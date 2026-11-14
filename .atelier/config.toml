@@ -33,6 +33,7 @@ setup = [
   "cargo install --locked cargo-mutants@27.1.0",
 ]
 run = '''
+set -e
 mkdir -p target
 git diff --no-ext-diff --no-textconv --no-color "$ATELIER_BASE" -- crates plugins > target/mutants.diff
 cargo mutants --in-diff target/mutants.diff --timeout 120 --jobs 3
