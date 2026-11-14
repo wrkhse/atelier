@@ -92,7 +92,10 @@ Before an empty selection counts, `cargo.py` proves the diff can be made:
 `git diff --name-only "$ATELIER_BASE" --` must succeed, and the repository
 files it changes are recorded (the mutants diff itself covers only `crates`
 and `plugins`). A refusal from `cargo.py` is one `atelier CI:` line, with the
-tool's last stderr line when a tool failed or timed out. When the diff selects no mutant, as on a docs-only change, `cargo.py` mutates
+tool's last stderr line when a tool failed or timed out. The canary runs only when the plan includes `commands/mutants` and its diff
+selects nothing: a change the root `.` holds (such as the root `README.md` or
+`Cargo.toml`) but no mutable line in `crates` or `plugins`. A change only
+under `docs/`, `scripts/` or `.github/` plans no mutants gate at all. Then `cargo.py` mutates
 the canary `crates/cli/src/command_step/run.rs`, the background step runner
 whose cleanup reached the host incident's broadcast kill, so the report is
 never empty and the run stays within the gate's hour. The job summary says
