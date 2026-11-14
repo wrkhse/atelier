@@ -38,9 +38,19 @@ git diff --no-ext-diff --no-textconv --no-color "$ATELIER_BASE" -- crates plugin
 cargo mutants --in-diff target/mutants.diff --timeout 120 --jobs 3
 '''
 
+# The workspace's declared rust-version, so the gate always checks the
+# minimum Cargo.toml states; an absent or malformed one fails the gate.
 [commands.msrv]
-setup = ["rustup toolchain install 1.96 --profile minimal"]
-run = "cargo +1.96 check --workspace --all-targets --all-features --locked"
+setup = ['''
+msrv=$(awk -F'"' '/^rust-version = "/ { print $2; exit }' Cargo.toml) &&
+echo "$msrv" | grep -Eqx '[0-9]+\.[0-9]+(\.[0-9]+)?' &&
+rustup toolchain install "$msrv" --profile minimal
+''']
+run = '''
+msrv=$(awk -F'"' '/^rust-version = "/ { print $2; exit }' Cargo.toml) &&
+echo "$msrv" | grep -Eqx '[0-9]+\.[0-9]+(\.[0-9]+)?' &&
+cargo +"$msrv" check --workspace --all-targets --all-features --locked
+'''
 
 [commands.kani]
 setup = ["cargo install --locked kani-verifier --version 0.68.0", "cargo kani setup"]
