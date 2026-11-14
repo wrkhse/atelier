@@ -62,12 +62,12 @@ create() {
   names+=("$name")
   local sources=()
   for mount in "$@"; do
-    sources+=("$(sed -E 's/.*source=([^,]*).*/\1/' <<< "$mount")")
+    sources+=("$(sed -E 's/.*type=([^,]*),source=([^,]*),target=([^,]*).*/\1:\2:\3/' <<< "$mount")")
   done
   contained "$name" "$network" "${sources[@]}"
 }
 
-# contained NAME NETWORK SOURCE...: refuse to start a container whose
+# contained NAME NETWORK TYPE:SOURCE:TARGET...: refuse to start a container whose
 # recorded settings differ from these exact values; the inspection is kept as
 # evidence. This guards against regressions and daemon defaults, not against
 # an edit to run.sh itself.
@@ -88,7 +88,7 @@ contained() {
     and $h.NanoCpus > 0
     and ($h.Binds // [] | length == 0)
     and ($h.Mounts | all(.ReadOnly == true))
-    and ([$h.Mounts[].Source] | sort) == ($ARGS.positional | sort)' \
+    and ([$h.Mounts[] | "\(.Type):\(.Source):\(.Target)"] | sort) == ($ARGS.positional | sort)' \
     "$@" < "$reports/$name.json" >/dev/null \
     || { echo "container $name is not contained" >&2; exit 1; }
 }
@@ -98,7 +98,7 @@ contained() {
 summary() {
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
   grep -E '^(\*\*commands/[a-z0-9_-]+:\*\* |base [0-9a-f]+ is unavailable)' <<< "$1" \
-    | cut -c1-500 | head -n 5 | sed 's/$/\n/' >> "$GITHUB_STEP_SUMMARY" || true
+    | cut -b1-500 | head -n 5 | sed 's/$/\n/' >> "$GITHUB_STEP_SUMMARY" || true
 }
 
 # start NAME: run it within the mode's limit; its exit status.

@@ -42,8 +42,8 @@ settings differ from exact values: user, `CapDrop` `ALL` with no `CapAdd`,
 `SecurityOpt` exactly `no-new-privileges`, not privileged, private PID and
 IPC, no user or UTS namespace mode, the intended network (`bridge` for a gate,
 `none` for validation), no devices or `VolumesFrom`, 4,096 processes,
-swap equal to memory, a CPU limit, read-only mounts whose sources are exactly
-the intended ones. This guards against regressions and daemon defaults, not
+swap equal to memory, a CPU limit, read-only mounts whose type, source and
+target are exactly the intended ones. This guards against regressions and daemon defaults, not
 against an edit to `run.sh` itself.
 
 No container has a Docker socket, runner home, runner command files or token:
@@ -57,8 +57,8 @@ Only plain files and folders cross back to the runner, into
 that `docker cp` would keep are deleted, and the planner binary must be a
 plain file. The job summary takes only known, bounded lines from container
 output (`**commands/<gate>:** …` and the unavailable-base note, 500
-characters each). Each job uploads its folder as `reports-plan` or
-`reports-<gate>-<root>`.
+bytes each). Each job uploads its folder as `reports-plan` (without the
+planner, which is its own artifact) or `reports-<gate>-<root>-<index>`.
 
 The gate definitions still come from `origin`'s default branch, as
 [slice 2](../../docs/plans/slices/slice-2.md) describes. For another project,
@@ -79,7 +79,9 @@ cannot change the validator or the interpreter that runs it.
   the repository it checks (`job.workflow_repository` equals
   `github.repository`: atelier's own CI), both core proofs in
   `machine::proofs` are also required. The summary names the harness count
-  and whether that floor applied.
+  and whether that floor applied. A project that copies `gates.yml` into its
+  own repository and calls it locally also matches, and would need atelier's
+  proofs and canary; projects call atelier's pinned workflow instead.
 - **Mutants:** `/reports/mutants.out/outcomes.json` from cargo-mutants 27.1.0
   has a finished run, a successful baseline, at least one mutant, and no
   missed, timed-out or failed mutant. Unviable mutants keep their existing
@@ -87,13 +89,16 @@ cannot change the validator or the interpreter that runs it.
   `/reports/mutants-selection.json` recorded.
 
 Before an empty selection counts, `cargo.py` proves the diff can be made:
-`git diff --name-only "$ATELIER_BASE"` must succeed, and its changed files
-are recorded. When the diff selects no mutant, as on a docs-only change, `cargo.py` mutates
+`git diff --name-only "$ATELIER_BASE" --` must succeed, and the repository
+files it changes are recorded (the mutants diff itself covers only `crates`
+and `plugins`). A refusal from `cargo.py` is one `atelier CI:` line, with the
+tool's last stderr line when a tool failed or timed out. When the diff selects no mutant, as on a docs-only change, `cargo.py` mutates
 the canary `crates/cli/src/command_step/run.rs`, the background step runner
 whose cleanup reached the host incident's broadcast kill, so the report is
 never empty and the run stays within the gate's hour. The job summary says
-`diff changed K files, selected N mutants; canary 0 mutants (not run)` or
-`diff changed K files, selected 0 mutants; canary M mutants` with the reason; a canary run never reads as diff coverage. Both keep the floor of
+`diff changed K repository files, selected N mutants; canary 0 mutants (not
+run)` or `diff changed K repository files, selected 0 mutants; canary M
+mutants` with the reason; a canary run never reads as diff coverage. Both keep the floor of
 0 missed and 0 timeouts; a canary must also have at least one caught mutant
 and mutate only its own file. A missing canary, or one that yields no mutant,
 fails the gate.

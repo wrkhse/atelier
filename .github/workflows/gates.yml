@@ -53,7 +53,8 @@ jobs:
           (cd "$RUNNER_TEMP/release" && sha256sum --check --ignore-missing SHA256SUMS)
           tar -xzf "$RUNNER_TEMP/release/$archive" -C "$RUNNER_TEMP/release" bin/atelier
           cp "$RUNNER_TEMP/release/bin/atelier" "$RUNNER_TEMP/atelier/atelier"
-      - name: Check the report validator
+      - id: selftest
+        name: Check the report validator
         env:
           CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
@@ -93,10 +94,13 @@ jobs:
           path: ${{ runner.temp }}/atelier/atelier
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: ${{ !cancelled() && steps.selftest.outcome != 'skipped' }}
         with:
           name: reports-plan
-          path: ${{ runner.temp }}/atelier-reports
+          # The planner itself is the atelier artifact.
+          path: |
+            ${{ runner.temp }}/atelier-reports
+            !${{ runner.temp }}/atelier-reports/container/atelier
           if-no-files-found: error
 
   gate:
@@ -131,7 +135,8 @@ jobs:
         with:
           name: atelier
           path: ${{ runner.temp }}/atelier
-      - name: Run the gate in the container
+      - id: gate
+        name: Run the gate in the container
         env:
           GATE: ${{ matrix.gate }}
           ROOT: ${{ matrix.root }}
@@ -145,14 +150,18 @@ jobs:
           bash "$CI_SUPPORT/run.sh" gate "$GATE" "$ROOT" "$BASE"
       - id: artifact
         name: Name the reports after the gate
-        if: always()
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' }}
         env:
           GATE: ${{ matrix.gate }}
           ROOT: ${{ matrix.root }}
-        # Artifact names cannot hold "/"; a gate and its root are unique.
-        run: echo "name=reports-${GATE//\//-}-${ROOT//\//-}" >> "$GITHUB_OUTPUT"
+          INDEX: ${{ strategy.job-index }}
+        # Artifact names cannot hold "/"; the job index keeps them unique.
+        run: |
+          root=${ROOT//\//-}
+          [ "$root" = . ] && root=root
+          echo "name=reports-${GATE//\//-}-$root-$INDEX" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' }}
         with:
           name: ${{ steps.artifact.outputs.name }}
           path: ${{ runner.temp }}/atelier-reports
