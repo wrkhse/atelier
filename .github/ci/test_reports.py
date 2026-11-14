@@ -124,7 +124,12 @@ def diff_selection(value: object) -> dict:
         names = [item["scenario"]["Mutant"]["name"] for item in value["outcomes"][1:]]
     except (KeyError, IndexError, TypeError):
         names = []
-    return {"mode": "diff", "diff_selected": len(names), "selected": names}
+    return {
+        "mode": "diff",
+        "diff_selected": len(names),
+        "changed_files": ["src/lib.rs"],
+        "selected": names,
+    }
 
 
 class ReportCase(unittest.TestCase):
@@ -233,7 +238,10 @@ class ReportTests(ReportCase):
 class KaniTests(ReportCase):
     def test_another_project_needs_only_consistent_complete_results(self) -> None:
         self.write("kani", kani_report(["proofs::holds"], crate="other"))
-        reports.validate("commands/kani", self.root, False)
+        summary = reports.validate("commands/kani", self.root, False)
+        self.assertEqual(
+            summary, "1 harnesses verified; no atelier floor (not atelier's own workflow)"
+        )
         self.write("kani", kani_report([], crate="other"))
         with self.assertRaises(ValueError):
             reports.validate("kani", self.root, False)
@@ -241,6 +249,11 @@ class KaniTests(ReportCase):
         self.write("kani", kani_report(["proofs::holds"], crate="other"))
         with self.assertRaises(ValueError):
             reports.validate("kani", self.root, True)
+
+    def test_the_summary_names_atelier_floor(self) -> None:
+        self.write("kani", kani_report())
+        summary = reports.validate("commands/kani", self.root, True)
+        self.assertEqual(summary, "2 harnesses verified; atelier floor: its 2 core proofs required")
 
     def test_atelier_requires_both_core_proofs(self) -> None:
         names = sorted(reports.ATELIER_HARNESSES)
@@ -459,23 +472,28 @@ def canary_selection(**changes: object) -> dict:
     selection = {
         "mode": "canary",
         "diff_selected": 0,
+        "changed_files": ["docs/a.md"],
         "canary": reports.CANARY,
         "selected": diff_selection(canary_report())["selected"],
-        "reason": "the diff against abc selects no mutant",
+        "reason": "the diff against abc changes 1 files and selects no mutant",
     }
     return {**selection, **changes}
 
 
 class SelectionTests(ReportCase):
-    def test_diff_selection_names_its_count_and_mutants(self) -> None:
+    def test_diff_selection_names_its_files_count_and_mutants(self) -> None:
         self.write("mutants", mutants_report())
         summary = reports.validate("commands/mutants", self.root, True)
-        self.assertEqual(summary, "diff selected 2 mutants; canary 0 mutants (not run)")
+        expected = "diff changed 1 files, selected 2 mutants; canary 0 mutants (not run)"
+        self.assertEqual(summary, expected)
         good = diff_selection(mutants_report())
         cases = {
             "count": {**good, "diff_selected": 3},
             "names": {**good, "selected": ["src/lib.rs:9: other", good["selected"][1]]},
             "empty": {**good, "diff_selected": 0, "selected": []},
+            "no files": {**good, "changed_files": []},
+            "unevaluated": {**good, "diff_selected": None, "changed_files": None},
+            "bad file": {**good, "changed_files": [""]},
         }
         for case, selection in cases.items():
             with self.subTest(case=case):
@@ -495,21 +513,26 @@ class SelectionTests(ReportCase):
     def test_canary_never_reads_as_diff_coverage(self) -> None:
         self.write("mutants", canary_report(), canary_selection())
         summary = reports.validate("mutants", self.root, True)
-        self.assertTrue(summary.startswith("diff selected 0 mutants; canary 2 mutants"))
+        head = "diff changed 1 files, selected 0 mutants; canary 2 mutants"
+        self.assertTrue(summary.startswith(head), summary)
         self.assertIn(reports.CANARY, summary)
         self.assertIn("selects no mutant", summary)
 
-    def test_canary_must_be_complete_confined_and_caught(self) -> None:
+    def test_canary_must_be_complete_confined_caught_and_short(self) -> None:
         unviable = canary_report()
         unviable["outcomes"][1] = copy.deepcopy(unviable["outcomes"][2])
         unviable["outcomes"][1]["scenario"]["Mutant"]["name"] = "src/lib.rs:1: replace true"
         unviable.update(caught=0, unviable=2)
+        long = "x" * (reports.MAX_REASON + 1)
         cases = {
             "other file": (mutants_report(), canary_selection()),
             "none selected": (canary_report(), canary_selection(selected=[])),
             "names differ": (canary_report(), canary_selection(selected=["x", "y"])),
             "no reason": (canary_report(), canary_selection(reason=" ")),
+            "long reason": (canary_report(), canary_selection(reason=long)),
+            "two lines": (canary_report(), canary_selection(reason="a\nb")),
             "with a diff": (canary_report(), canary_selection(diff_selected=1)),
+            "half evaluated": (canary_report(), canary_selection(changed_files=None)),
             "moved": (canary_report(), canary_selection(canary="crates/x.rs")),
             "all unviable": (unviable, canary_selection()),
         }
@@ -524,13 +547,23 @@ class SelectionTests(ReportCase):
         with self.assertRaises(ValueError):
             reports.validate("mutants", self.root, False)
 
-    def test_an_unavailable_base_allows_only_the_canary(self) -> None:
+    def test_an_unavailable_base_allows_only_an_unevaluated_canary(self) -> None:
         (self.root / "base.txt").write_text("base 000 is unavailable\n", encoding="utf-8")
+        unevaluated = {"diff_selected": None, "changed_files": None}
         self.write("mutants", mutants_report())
         with self.assertRaises(ValueError):
             reports.validate("mutants", self.root, True)
-        self.write("mutants", canary_report(), canary_selection(reason="base 000 is unavailable"))
-        reports.validate("mutants", self.root, True)
+        self.write("mutants", canary_report(), canary_selection())
+        with self.assertRaises(ValueError):
+            reports.validate("mutants", self.root, True)
+        selection = canary_selection(reason="base 000 is unavailable", **unevaluated)
+        self.write("mutants", canary_report(), selection)
+        summary = reports.validate("mutants", self.root, True)
+        self.assertTrue(summary.startswith("diff not evaluated, selected 0 mutants"), summary)
+        # Without the note, an unevaluated diff is refused.
+        (self.root / "base.txt").unlink()
+        with self.assertRaises(ValueError):
+            reports.validate("mutants", self.root, True)
 
     def test_summary_through_cli(self) -> None:
         self.write("mutants", canary_report(), canary_selection())
@@ -538,31 +571,36 @@ class SelectionTests(ReportCase):
         with contextlib.redirect_stdout(stdout):
             code = reports.main(["commands/mutants", str(self.root), "--atelier"])
         self.assertEqual(code, 0)
-        self.assertIn("**commands/mutants:** diff selected 0 mutants; canary 2", stdout.getvalue())
+        self.assertIn("**commands/mutants:** diff changed 1 files", stdout.getvalue())
 
 
 class WrapperTests(unittest.TestCase):
-    """cargo.py's choice of mutants, with cargo-mutants' listing stubbed."""
+    """cargo.py's choice of mutants, with cargo-mutants and git stubbed."""
 
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         (self.root / "reports").mkdir()
-        original = (cargo.REPORTS, cargo.listed, Path.cwd(), os.environ.get("PROJECT"))
-        self.addCleanup(self.restore, *original)
+        saved = {name: getattr(cargo, name) for name in ("REPORTS", "listed", "changed_files", "CARGO", "GIT")}
+        environment = {name: os.environ.get(name) for name in ("FLOOR", "ATELIER_BASE")}
+        self.addCleanup(self.restore, saved, environment, Path.cwd())
         cargo.REPORTS = self.root / "reports"
-        os.environ["PROJECT"] = reports.ATELIER_REPOSITORY
+        cargo.changed_files = lambda: ["docs/a.md"]
+        os.environ["FLOOR"] = "atelier"
+        os.environ["ATELIER_BASE"] = "abc"
         os.chdir(self.root)
 
     @staticmethod
-    def restore(reports_dir: Path, listed: object, cwd: Path, project: str | None) -> None:
-        cargo.REPORTS, cargo.listed = reports_dir, listed
+    def restore(saved: dict, environment: dict, cwd: Path) -> None:
+        for name, value in saved.items():
+            setattr(cargo, name, value)
+        for name, value in environment.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         os.chdir(cwd)
-        if project is None:
-            os.environ.pop("PROJECT", None)
-        else:
-            os.environ["PROJECT"] = project
 
     def canary(self) -> None:
         canary = self.root / reports.CANARY
@@ -573,12 +611,47 @@ class WrapperTests(unittest.TestCase):
         path = self.root / "reports" / "mutants-selection.json"
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def script(self, name: str, body: str) -> str:
+        path = self.root / name
+        path.write_text(f"#!/usr/bin/python3\n{body}\n", encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    def test_listing_keeps_test_arguments_last(self) -> None:
+        # The real listed(), against a cargo that echoes its arguments.
+        cargo.listed = WrapperTests.real_listed
+        cargo.CARGO = self.script(
+            "cargo", 'import json, sys; print(json.dumps([{"name": " ".join(sys.argv[1:])}]))'
+        )
+        names = cargo.listed(["mutants", "--in-diff", "d", "--", "-q"])
+        self.assertEqual(names, [{"name": "mutants --in-diff d --list --json -- -q"}])
+        cargo.CARGO = self.script("failing", "import sys; sys.exit(3)")
+        with self.assertRaises(ValueError):
+            cargo.listed(["mutants"])
+
+    def test_the_diff_must_be_made_before_an_empty_selection_counts(self) -> None:
+        cargo.changed_files = WrapperTests.real_changed_files
+        os.environ.pop("ATELIER_BASE")
+        with self.assertRaises(ValueError):
+            cargo.changed_files()
+        os.environ["ATELIER_BASE"] = "abc"
+        cargo.GIT = self.script("git", "import sys; sys.exit(128)")
+        with self.assertRaises(ValueError):
+            cargo.changed_files()
+        cargo.GIT = self.script("git", 'print("b.rs"); print("a.md")')
+        self.assertEqual(cargo.changed_files(), ["a.md", "b.rs"])
+
     def test_a_diff_with_mutants_runs_as_configured(self) -> None:
         cargo.listed = lambda args: [{"name": "b"}, {"name": "a"}]
         args = ["mutants", "--in-diff", "d", "--jobs", "3"]
         output = str(self.root / "reports")
         self.assertEqual(cargo.arguments(args), [*args, "--output", output])
-        expected = {"mode": "diff", "diff_selected": 2, "selected": ["a", "b"]}
+        expected = {
+            "mode": "diff",
+            "diff_selected": 2,
+            "changed_files": ["docs/a.md"],
+            "selected": ["a", "b"],
+        }
         self.assertEqual(self.selection(), expected)
 
     def test_an_empty_diff_mutates_the_canary_and_says_why(self) -> None:
@@ -590,8 +663,10 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(args, [*expected, "--", "-q"])
         selection = self.selection()
         self.assertEqual(selection["mode"], "canary")
+        self.assertEqual(selection["diff_selected"], 0)
+        self.assertEqual(selection["changed_files"], ["docs/a.md"])
         self.assertEqual(selection["selected"], ["c"])
-        self.assertIn("selects no mutant", selection["reason"])
+        self.assertIn("changes 1 files and selects no mutant", selection["reason"])
 
     def test_an_unavailable_base_goes_straight_to_the_canary(self) -> None:
         self.canary()
@@ -601,8 +676,11 @@ class WrapperTests(unittest.TestCase):
         for spelling in (["--in-diff", "d"], ["-D", "d"], ["--in-diff=d"]):
             with self.subTest(spelling=spelling):
                 cargo.arguments(["mutants", *spelling])
-                self.assertEqual(self.selection()["mode"], "canary")
-                self.assertEqual(self.selection()["reason"], "base 000 is unavailable")
+                selection = self.selection()
+                self.assertEqual(selection["mode"], "canary")
+                self.assertIsNone(selection["diff_selected"])
+                self.assertIsNone(selection["changed_files"])
+                self.assertEqual(selection["reason"], "base 000 is unavailable")
 
     def test_a_missing_empty_or_foreign_canary_fails(self) -> None:
         cargo.listed = lambda args: []
@@ -612,10 +690,25 @@ class WrapperTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cargo.arguments(["mutants", "--in-diff", "d"])
         cargo.listed = lambda args: [{"name": "c"}] if "--file" in args else []
-        os.environ["PROJECT"] = "someone/else"
+        os.environ["FLOOR"] = ""
         with self.assertRaises(ValueError):
             cargo.arguments(["mutants", "--in-diff", "d"])
         self.assertFalse((self.root / "reports" / "mutants-selection.json").exists())
+
+    def test_a_refusal_is_one_line_and_fails(self) -> None:
+        cargo.listed = lambda args: []
+        stderr = io.StringIO()
+        saved = sys.argv
+        self.addCleanup(setattr, sys, "argv", saved)
+        sys.argv = ["cargo", "mutants", "--in-diff", "d"]
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(cargo.main(), 1)
+        self.assertEqual(len(stderr.getvalue().splitlines()), 1, stderr.getvalue())
+        self.assertTrue(stderr.getvalue().startswith("atelier CI: "))
+
+
+WrapperTests.real_listed = staticmethod(cargo.listed)
+WrapperTests.real_changed_files = staticmethod(cargo.changed_files)
 
 
 if __name__ == "__main__":

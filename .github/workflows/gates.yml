@@ -56,6 +56,7 @@ jobs:
       - name: Check the report validator
         env:
           CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           SOURCE: ${{ github.workspace }}/source
         run: bash "$CI_SUPPORT/run.sh" selftest
       - id: plan
@@ -64,6 +65,7 @@ jobs:
           ATELIER: ${{ inputs.atelier }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           SOURCE: ${{ github.workspace }}/source
         run: |
           set -euo pipefail
@@ -74,7 +76,7 @@ jobs:
           matrix=$(bash "$CI_SUPPORT/run.sh" "$mode" "" . "$BASE")
           if [ "$mode" = plan ]; then
             # The planner the container built must be a plain file, never a link.
-            built="$RUNNER_TEMP/atelier-reports/atelier"
+            built="$RUNNER_TEMP/atelier-reports/container/atelier"
             if [ ! -f "$built" ] || [ -L "$built" ]; then
               echo "the planner is not a plain file" >&2
               exit 1
@@ -89,6 +91,12 @@ jobs:
         with:
           name: atelier
           path: ${{ runner.temp }}/atelier/atelier
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: reports-plan
+          path: ${{ runner.temp }}/atelier-reports
           if-no-files-found: error
 
   gate:
@@ -129,14 +137,23 @@ jobs:
           ROOT: ${{ matrix.root }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           SOURCE: ${{ github.workspace }}/source
         run: |
           set -euo pipefail
           chmod +x "$RUNNER_TEMP/atelier/atelier"
           bash "$CI_SUPPORT/run.sh" gate "$GATE" "$ROOT" "$BASE"
+      - id: artifact
+        name: Name the reports after the gate
+        if: always()
+        env:
+          GATE: ${{ matrix.gate }}
+          ROOT: ${{ matrix.root }}
+        # Artifact names cannot hold "/"; a gate and its root are unique.
+        run: echo "name=reports-${GATE//\//-}-${ROOT//\//-}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: reports-${{ strategy.job-index }}
+          name: ${{ steps.artifact.outputs.name }}
           path: ${{ runner.temp }}/atelier-reports
           if-no-files-found: error

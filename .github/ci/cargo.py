@@ -11,18 +11,25 @@ from pathlib import Path
 # file in the repository.
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parent)]
-from reports import ATELIER_REPOSITORY, CANARY  # noqa: E402
+from reports import CANARY, MAX_REASON  # noqa: E402
 
 CARGO = "/usr/local/cargo/bin/cargo"
+GIT = "/usr/bin/git"
 REPORTS = Path("/reports")
 LIMIT_SECS = 3600
+
+
+def options(args: list[str], *extra: str) -> list[str]:
+    """`args` with cargo-mutants options added before any test arguments."""
+    end = args.index("--") if "--" in args else len(args)
+    return [*args[:end], *extra, *args[end:]]
 
 
 def listed(args: list[str]) -> list:
     """The mutants `args` select; cargo-mutants prints nothing for none."""
     try:
         output = subprocess.run(
-            [CARGO, *args, "--list", "--json"],
+            [CARGO, *options(args, "--list", "--json")],
             check=True,
             capture_output=True,
             text=True,
@@ -30,7 +37,7 @@ def listed(args: list[str]) -> list:
         ).stdout
     except subprocess.CalledProcessError as error:
         print(error.stderr, file=sys.stderr)
-        raise
+        raise ValueError(f"cargo mutants --list failed with status {error.returncode}") from None
 
     if not output.strip():
         return []
@@ -43,10 +50,26 @@ def listed(args: list[str]) -> list:
     return mutants
 
 
-def options(args: list[str], *extra: str) -> list[str]:
-    """`args` with cargo-mutants options added before any test arguments."""
-    end = args.index("--") if "--" in args else len(args)
-    return [*args[:end], *extra, *args[end:]]
+def changed_files() -> list[str]:
+    """The files the change touches, proving its diff can be made at all."""
+    base = os.environ.get("ATELIER_BASE")
+
+    if not base:
+        raise ValueError("no ATELIER_BASE, so no diff can be evaluated")
+
+    try:
+        output = subprocess.run(
+            [GIT, "diff", "--no-ext-diff", "--no-textconv", "--name-only", base],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=LIMIT_SECS,
+        ).stdout
+    except subprocess.CalledProcessError as error:
+        print(error.stderr, file=sys.stderr)
+        raise ValueError(f"git diff against {base} failed") from None
+
+    return sorted(line for line in output.splitlines() if line)
 
 
 def without_diff(args: list[str]) -> list[str] | None:
@@ -61,9 +84,9 @@ def without_diff(args: list[str]) -> list[str] | None:
     return None
 
 
-def canary(args: list[str], why: str) -> tuple[list[str], dict]:
-    """Mutate the canary instead of an empty diff; atelier's own CI only."""
-    if os.environ.get("PROJECT") != ATELIER_REPOSITORY:
+def canary(args: list[str], evaluated: dict, why: str) -> tuple[list[str], dict]:
+    """Mutate the canary instead of an empty or unevaluated diff."""
+    if os.environ.get("FLOOR") != "atelier":
         raise ValueError(f"{why}; the canary is atelier's own, so this gate has no evidence")
 
     if not Path(CANARY).is_file():
@@ -79,10 +102,10 @@ def canary(args: list[str], why: str) -> tuple[list[str], dict]:
 
     selection = {
         "mode": "canary",
-        "diff_selected": 0,
+        **evaluated,
         "canary": CANARY,
         "selected": sorted(mutant.get("name") for mutant in mutants),
-        "reason": why,
+        "reason": " ".join(why.split())[:MAX_REASON],
     }
     return options(rest, "--file", CANARY), selection
 
@@ -93,16 +116,20 @@ def select(args: list[str]) -> tuple[list[str], dict]:
 
     # Without a usable base the diff is not this change's; never call it one.
     if note.is_file():
-        return canary(args, note.read_text(encoding="utf-8").strip())
+        unevaluated = {"diff_selected": None, "changed_files": None}
+        return canary(args, unevaluated, note.read_text(encoding="utf-8"))
 
+    files = changed_files()
     diff = listed(args)
+    names = sorted(mutant.get("name") for mutant in diff)
+    evaluated = {"diff_selected": len(names), "changed_files": files}
 
     if not diff:
-        base = os.environ.get("ATELIER_BASE", "the base")
-        return canary(args, f"the diff against {base} selects no mutant")
+        base = os.environ["ATELIER_BASE"]
+        why = f"the diff against {base} changes {len(files)} files and selects no mutant"
+        return canary(args, evaluated, why)
 
-    names = sorted(mutant.get("name") for mutant in diff)
-    return args, {"mode": "diff", "diff_selected": len(diff), "selected": names}
+    return args, {"mode": "diff", **evaluated, "selected": names}
 
 
 def arguments(args: list[str]) -> list[str]:
@@ -127,7 +154,14 @@ def arguments(args: list[str]) -> list[str]:
 
 def main() -> int:
     REPORTS.mkdir(exist_ok=True)
-    args = arguments(sys.argv[1:])
+
+    try:
+        args = arguments(sys.argv[1:])
+    except ValueError as error:
+        # A refusal is a verdict, not a crash: one line, and the gate fails.
+        print(f"atelier CI: {error}", file=sys.stderr)
+        return 1
+
     return subprocess.run([CARGO, *args], check=False, timeout=LIMIT_SECS).returncode
 
 

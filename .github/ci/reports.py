@@ -3,7 +3,8 @@
 Usage: python3 .github/ci/reports.py <gate> <reports> [--atelier]
 <reports> holds kani.json, mutants-selection.json, base.txt and
 mutants.out/outcomes.json, as the gate container wrote them to /reports.
---atelier adds atelier's own floor: both core proofs, and the canary.
+--atelier adds atelier's own floor: both core proofs, and the canary. run.sh
+passes it when the workflow runs from the repository it checks.
 Other gates rely on their process exit status and need no report.
 Contracts: Kani's kani-driver/src/frontend/schema_utils.rs and cargo-mutants'
 src/outcome.rs and src/output.rs at the pinned upstream release tags.
@@ -21,9 +22,8 @@ MAX_REPORT_BYTES = 128 * 1024 * 1024
 # The signal boundary of the 2026-11-13 host incident. When a change selects
 # no mutant, cargo.py mutates this file so the report is never empty.
 CANARY = "crates/cli/src/command_step/run.rs"
-# atelier's own floor applies in its repository's CI, which cannot rename
-# itself away the way a moved proofs file could.
-ATELIER_REPOSITORY = "wrkhse/atelier"
+# The longest canary reason the job summary shows, on one line.
+MAX_REASON = 300
 ATELIER_HARNESSES = frozenset(
     {
         "machine::proofs::a_run_follows_what_rungs_answers",
@@ -132,7 +132,8 @@ def validate_properties(result: dict, entry: dict) -> None:
         )
 
 
-def validate_kani(report: dict, atelier: bool) -> None:
+def validate_kani(report: dict, atelier: bool) -> str:
+    """Check the Kani export; the summary line names the floor applied."""
     metadata = object_value(report.get("metadata"), "metadata")
     require(metadata.get("kani_version") == "0.68.0", "unexpected Kani version")
     harnesses = harness_entries(report.get("harness_metadata"), "pretty_name", "metadata")
@@ -168,6 +169,12 @@ def validate_kani(report: dict, atelier: bool) -> None:
             f"harness exit failure: {name}",
         )
         validate_properties(result, properties[name])
+    floor = (
+        f"atelier floor: its {len(ATELIER_HARNESSES)} core proofs required"
+        if atelier
+        else "no atelier floor (not atelier's own workflow)"
+    )
+    return f"{len(names)} harnesses verified; {floor}"
 
 
 def timestamp(value: object, label: str) -> datetime:
@@ -256,35 +263,56 @@ def selected_names(selection: dict, tested: dict, label: str) -> int:
     return len(names)
 
 
+def evaluated_diff(selection: dict, fallback: bool) -> tuple[int, int] | None:
+    """The diff's changed files and mutants, or None when it was not evaluated."""
+    selected, files = selection.get("diff_selected"), selection.get("changed_files")
+    if selected is None or files is None:
+        require(selected is None and files is None, "half an evaluated diff")
+        require(fallback, "a diff was not evaluated though the base was available")
+        return None
+    require(not fallback, "the base was unavailable, so no diff can be evaluated")
+    files = array_value(files, "changed_files")
+    require(all(isinstance(file, str) and file for file in files), "bad changed file")
+    return len(files), count(selected, "diff_selected")
+
+
+def validate_canary(selection: dict, tested: dict, diff: tuple[int, int] | None) -> str:
+    require(diff is None or diff[1] == 0, "canary with a diff that selected mutants")
+    canary = selection.get("canary")
+    require(canary == CANARY, f"unexpected canary: {canary}")
+    listed = selected_names(selection, tested, "canary")
+    require(all(file == CANARY for file in tested["files"]), "a canary mutated another file")
+    # All-unviable canary mutants would prove nothing about the tests.
+    require(tested["caught"] > 0, "no canary mutant was caught")
+    why = selection.get("reason")
+    require(isinstance(why, str) and bool(why.strip()), "canary run without a reason")
+    require(len(why) <= MAX_REASON and "\n" not in why, "canary reason is not one short line")
+    head = "diff not evaluated" if diff is None else f"diff changed {diff[0]} files"
+    return f"{head}, selected 0 mutants; canary {listed} mutants in {CANARY}: {why}"
+
+
 def validate_selection(selection: dict, tested: dict, atelier: bool, fallback: bool) -> str:
     """Which mutants were tested and why; a canary never reads as diff coverage."""
     mode = selection.get("mode")
-    if mode == "diff":
-        require(not fallback, "the base was unavailable, so only the canary is evidence")
-        selected = count(selection.get("diff_selected"), "diff_selected")
-        require(selected == selected_names(selection, tested, "diff"), "diff count mismatch")
-        return f"diff selected {selected} mutants; canary 0 mutants (not run)"
+    if mode == "configured":
+        return f"{len(tested['names'])} mutants as the gate configures them (no --in-diff)"
+    require(mode in ("diff", "canary"), f"unknown mutants selection: {mode}")
+    diff = evaluated_diff(selection, fallback)
     if mode == "canary":
         require(atelier, "the canary is atelier's own")
-        require(count(selection.get("diff_selected"), "diff_selected") == 0, "canary with a diff")
-        canary = selection.get("canary")
-        require(canary == CANARY, f"unexpected canary: {canary}")
-        listed = selected_names(selection, tested, "canary")
-        require(all(file == CANARY for file in tested["files"]), "a canary mutated another file")
-        # All-unviable canary mutants would prove nothing about the tests.
-        require(tested["caught"] > 0, "no canary mutant was caught")
-        why = selection.get("reason")
-        require(isinstance(why, str) and bool(why.strip()), "canary run without a reason")
-        return f"diff selected 0 mutants; canary {listed} mutants in {CANARY}: {why}"
-    require(mode == "configured", f"unknown mutants selection: {mode}")
-    return f"{len(tested['names'])} mutants as the gate configures them (no --in-diff)"
+        return validate_canary(selection, tested, diff)
+    require(diff is not None, "a diff run needs an evaluated diff")
+    files, selected = diff
+    require(files > 0, "a diff that selected mutants changed no file")
+    require(selected == selected_names(selection, tested, "diff"), "diff count mismatch")
+    return f"diff changed {files} files, selected {selected} mutants; canary 0 mutants (not run)"
 
 
 def validate(gate: str, reports: Path, atelier: bool) -> str | None:
     """Check `commands/kani` and `commands/mutants`; the summary line, if any."""
     name = gate.rpartition("/")[2]
     if name == "kani":
-        validate_kani(read_report(reports / "kani.json"), atelier)
+        return validate_kani(read_report(reports / "kani.json"), atelier)
     elif name == "mutants":
         tested = validate_mutants(read_report(reports / "mutants.out" / "outcomes.json"))
         selection = read_report(reports / "mutants-selection.json")

@@ -34,9 +34,17 @@ runner's less 2 GiB, no swap beyond it), processes and threads (4,096), CPUs
 (the runner's less one) and time (10 minutes for the self-test, 60 for the
 plan, 75 for a gate, 10 for validation, inside each job's 90). Disk is not
 bounded beyond the runner's own, and the gate container's network is Docker's
-bridge, never the host's, so setup commands can install pinned tools. `run.sh`
-inspects every container before starting it and refuses one whose user,
-capabilities, privileges, PID, IPC or network mode, limits or mounts differ.
+bridge, never the host's, so setup commands can install pinned tools; the
+ruff gate's `pipx run` still fetches ruff from PyPI there.
+
+`run.sh` inspects every container before starting it and refuses one whose
+settings differ from exact values: user, `CapDrop` `ALL` with no `CapAdd`,
+`SecurityOpt` exactly `no-new-privileges`, not privileged, private PID and
+IPC, no user or UTS namespace mode, the intended network (`bridge` for a gate,
+`none` for validation), no devices or `VolumesFrom`, 4,096 processes,
+swap equal to memory, a CPU limit, read-only mounts whose sources are exactly
+the intended ones. This guards against regressions and daemon defaults, not
+against an edit to `run.sh` itself.
 
 No container has a Docker socket, runner home, runner command files or token:
 the checkout is mounted read-only after `actions/checkout` drops its
@@ -44,8 +52,13 @@ credential, and the release download that needs `GH_TOKEN` runs before,
 without project code. A private repository's `origin` fetch therefore needs a
 public clone or a future read-only mirror; atelier itself is public.
 
-Only plain files and folders cross back to the runner: links that `docker cp`
-would keep are deleted, and the planner binary must be a plain file.
+Only plain files and folders cross back to the runner, into
+`atelier-reports/container/`, apart from the runner's own inspections: links
+that `docker cp` would keep are deleted, and the planner binary must be a
+plain file. The job summary takes only known, bounded lines from container
+output (`**commands/<gate>:** …` and the unavailable-base note, 500
+characters each). Each job uploads its folder as `reports-plan` or
+`reports-<gate>-<root>`.
 
 The gate definitions still come from `origin`'s default branch, as
 [slice 2](../../docs/plans/slices/slice-2.md) describes. For another project,
@@ -62,30 +75,36 @@ offline and with the reports mounted read-only, finds them valid. The gate
 cannot change the validator or the interpreter that runs it.
 
 - **Kani:** `/reports/kani.json` from Kani 0.68.0: every harness completed
-  and successful, with matching property counts; in atelier's repository,
-  both core proofs in `machine::proofs`.
+  and successful, with matching property counts. When the workflow runs from
+  the repository it checks (`job.workflow_repository` equals
+  `github.repository`: atelier's own CI), both core proofs in
+  `machine::proofs` are also required. The summary names the harness count
+  and whether that floor applied.
 - **Mutants:** `/reports/mutants.out/outcomes.json` from cargo-mutants 27.1.0
   has a finished run, a successful baseline, at least one mutant, and no
   missed, timed-out or failed mutant. Unviable mutants keep their existing
   meaning. The tested mutants must be exactly those
   `/reports/mutants-selection.json` recorded.
 
-When a diff selects no mutant, as on a docs-only change, `cargo.py` mutates
+Before an empty selection counts, `cargo.py` proves the diff can be made:
+`git diff --name-only "$ATELIER_BASE"` must succeed, and its changed files
+are recorded. When the diff selects no mutant, as on a docs-only change, `cargo.py` mutates
 the canary `crates/cli/src/command_step/run.rs`, the background step runner
 whose cleanup reached the host incident's broadcast kill, so the report is
 never empty and the run stays within the gate's hour. The job summary says
-`diff selected N mutants` or `diff selected 0 mutants; canary M mutants` with
-the reason; a canary run never reads as diff coverage. Both keep the floor of
+`diff changed K files, selected N mutants; canary 0 mutants (not run)` or
+`diff changed K files, selected 0 mutants; canary M mutants` with the reason; a canary run never reads as diff coverage. Both keep the floor of
 0 missed and 0 timeouts; a canary must also have at least one caught mutant
 and mutate only its own file. A missing canary, or one that yields no mutant,
 fails the gate.
 
-The canary is atelier's own. In another project, a diff that selects no
+The canary is atelier's own, under the same rule as the Kani floor. In another project, a diff that selects no
 mutant fails the mutants gate with that reason.
 
 A push to `main` diffs against the push's `before` commit. When that is all
 zeros or unreachable (a first or forced push), every gate runs, mutants use
-the canary, and the summary says so.
+the canary, the selection records the diff as not evaluated, and the summary
+says `diff not evaluated`.
 
 Every report is uploaded as an artifact, also when the gate fails.
 

@@ -5,7 +5,7 @@ set -euo pipefail
 # validate runs in a fresh one, offline, with the reports mounted read-only.
 if [[ "$MODE" == validate ]]; then
   floor=()
-  if [[ "${PROJECT:-}" == wrkhse/atelier ]]; then
+  if [[ "${FLOOR:-}" == atelier ]]; then
     floor=(--atelier)
   fi
   exec /usr/bin/python3 -I /opt/ci/reports.py "$GATE" /reports "${floor[@]}"

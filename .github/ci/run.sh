@@ -11,9 +11,17 @@ export MODE=${1:?mode}
 export GATE=${2:-}
 export ROOT=${3:-.}
 export BASE=${4:-}
-export PROJECT=${GITHUB_REPOSITORY:-}
+# atelier's own floor (both core proofs, the mutants canary) applies when the
+# workflow runs from the repository it checks: atelier's own CI.
+export FLOOR=
+if [[ -n "${WORKFLOW_REPOSITORY:-}" && "$WORKFLOW_REPOSITORY" == "${GITHUB_REPOSITORY:-}" ]]; then
+  FLOOR=atelier
+fi
+# Host-written inspections sit beside container/, which holds only what a
+# container wrote.
 reports="$RUNNER_TEMP/atelier-reports"
-mkdir -p "$reports" "$RUNNER_TEMP/atelier"
+output="$reports/container"
+mkdir -p "$output" "$RUNNER_TEMP/atelier"
 
 # Each job stays inside its 90 minutes: plan is selftest + plan, a gate is
 # gate + validate.
@@ -50,27 +58,47 @@ create() {
     --pids-limit 4096 --memory "$memory" --memory-swap "$memory" --cpus "$cpus" \
     --network "$network" --ipc private --stop-timeout 10 \
     "${mounts[@]}" \
-    --env MODE --env GATE --env ROOT --env BASE --env PROJECT atelier-gates >/dev/null
+    --env MODE --env GATE --env ROOT --env BASE --env FLOOR atelier-gates >/dev/null
   names+=("$name")
-  contained "$name"
+  local sources=()
+  for mount in "$@"; do
+    sources+=("$(sed -E 's/.*source=([^,]*).*/\1/' <<< "$mount")")
+  done
+  contained "$name" "$network" "${sources[@]}"
 }
 
-# Refuse to start a container whose recorded settings are not the contained
-# ones; the inspection is kept as evidence.
+# contained NAME NETWORK SOURCE...: refuse to start a container whose
+# recorded settings differ from these exact values; the inspection is kept as
+# evidence. This guards against regressions and daemon defaults, not against
+# an edit to run.sh itself.
 contained() {
-  docker inspect "$1" > "$reports/$1.json"
-  jq -e '.[0] as $c | $c.Config.User == "10001:10001"
-    and $c.HostConfig.CapDrop == ["ALL"]
-    and ($c.HostConfig.SecurityOpt | any(startswith("no-new-privileges")))
-    and $c.HostConfig.Privileged == false
-    and ($c.HostConfig.PidMode == "" or $c.HostConfig.PidMode == "private")
-    and $c.HostConfig.IpcMode == "private"
-    and ($c.HostConfig.NetworkMode == "bridge" or $c.HostConfig.NetworkMode == "none")
-    and $c.HostConfig.PidsLimit == 4096 and $c.HostConfig.Memory > 0
-    and ($c.HostConfig.Binds // [] | length == 0)
-    and ($c.HostConfig.Mounts | all(.ReadOnly == true))
-    and ($c.HostConfig.Mounts | all(.Source != "/var/run/docker.sock"))' \
-    "$reports/$1.json" >/dev/null || { echo "container $1 is not contained" >&2; exit 1; }
+  local name=$1 network=$2
+  shift 2
+  docker inspect "$name" > "$reports/$name.json"
+  jq -e --arg network "$network" --args '.[0] as $c | $c.HostConfig as $h
+    | $c.Config.User == "10001:10001"
+    and $h.CapDrop == ["ALL"] and ($h.CapAdd // [] | length == 0)
+    and $h.SecurityOpt == ["no-new-privileges"]
+    and $h.Privileged == false
+    and ($h.PidMode == "" or $h.PidMode == "private")
+    and $h.IpcMode == "private" and $h.UsernsMode == "" and $h.UTSMode == ""
+    and $h.NetworkMode == $network
+    and ($h.Devices // [] | length == 0) and ($h.VolumesFrom // [] | length == 0)
+    and $h.PidsLimit == 4096 and $h.Memory > 0 and $h.MemorySwap == $h.Memory
+    and $h.NanoCpus > 0
+    and ($h.Binds // [] | length == 0)
+    and ($h.Mounts | all(.ReadOnly == true))
+    and ([$h.Mounts[].Source] | sort) == ($ARGS.positional | sort)' \
+    "$@" < "$reports/$name.json" >/dev/null \
+    || { echo "container $name is not contained" >&2; exit 1; }
+}
+
+# summary TEXT: append known, bounded lines to the job summary; container
+# output never reaches it unfiltered.
+summary() {
+  [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
+  grep -E '^(\*\*commands/[a-z0-9_-]+:\*\* |base [0-9a-f]+ is unavailable)' <<< "$1" \
+    | cut -c1-500 | head -n 5 | sed 's/$/\n/' >> "$GITHUB_STEP_SUMMARY" || true
 }
 
 # start NAME: run it within the mode's limit; its exit status.
@@ -88,24 +116,22 @@ start "atelier-$MODE-$id" || status=$?
 
 # Evidence collection cannot turn a failed, timed-out or killed run green.
 # docker cp keeps links, so only plain files and folders cross to the host.
-docker cp "atelier-$MODE-$id:/reports/." "$reports/" >&2 || true
-find "$reports" -mindepth 1 ! -type f ! -type d -delete
+docker cp "atelier-$MODE-$id:/reports/." "$output/" >&2 || true
+find "$output" -mindepth 1 ! -type f ! -type d -delete
 
 if [[ "$MODE" == gate ]]; then
   # A fresh, offline container judges the copied reports: the gate cannot
   # change the validator or its interpreter.
   MODE=validate
   limit=10m
-  create "atelier-validate-$id" none "type=bind,source=$reports,target=/reports,readonly"
+  create "atelier-validate-$id" none "type=bind,source=$output,target=/reports,readonly"
   verdict=$(start "atelier-validate-$id") || status=1
   echo "$verdict"
-  if [[ -n "$verdict" && -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-    printf '%s\n\n' "$verdict" >> "$GITHUB_STEP_SUMMARY"
-  fi
+  summary "$verdict"
 fi
 
 # Say once, in the plan, when the push's base was unavailable.
-if [[ "$MODE" == plan* && -f "$reports/base.txt" && -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-  printf '%s\n\n' "$(cat "$reports/base.txt")" >> "$GITHUB_STEP_SUMMARY"
+if [[ "$MODE" == plan* && -f "$output/base.txt" ]]; then
+  summary "$(head -c 500 "$output/base.txt")"
 fi
 exit "$status"
