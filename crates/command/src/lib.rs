@@ -67,7 +67,7 @@ pub fn run(mut command: Command, deadline: Duration) -> Result<Output, PluginErr
             Ok(None) if started.elapsed() >= deadline => {
                 // The group too: a child the tool started, such as ssh, would
                 // otherwise hold the output open past the deadline.
-                if let Some(mut kill) = signal_group("-KILL", u64::from(child.id())) {
+                if let Some(mut kill) = signal_group(Signal::Kill, u64::from(child.id())) {
                     let _ = kill.status();
                 }
                 let _ = child.kill();
@@ -90,6 +90,26 @@ pub fn run(mut command: Command, deadline: Duration) -> Result<Output, PluginErr
     })
 }
 
+/// A signal atelier sends to a process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// `-0`: delivers nothing, and succeeds while any process is left.
+    Probe,
+    /// `-KILL`: ends every process at once.
+    Kill,
+}
+
+impl Signal {
+    /// The option `kill` takes for it.
+    #[must_use]
+    pub const fn option(self) -> &'static str {
+        match self {
+            Self::Probe => "-0",
+            Self::Kill => "-KILL",
+        }
+    }
+}
+
 /// Prepares `kill <signal> -- -<group>` for one process group without
 /// starting it, or `None` when the target would reach more than that group.
 ///
@@ -97,13 +117,15 @@ pub fn run(mut command: Command, deadline: Duration) -> Result<Output, PluginErr
 /// both the deadline kill above and a background step's cleanup.
 ///
 /// ```
-/// let command = atelier_command::signal_group("-KILL", 4242).unwrap();
+/// use atelier_command::{Signal, signal_group};
+///
+/// let command = signal_group(Signal::Kill, 4242).unwrap();
 ///
 /// assert_eq!(command.get_program(), "kill");
-/// assert!(atelier_command::signal_group("-KILL", 1).is_none());
+/// assert!(signal_group(Signal::Kill, 1).is_none());
 /// ```
 #[must_use]
-pub fn signal_group(signal: &str, group: u64) -> Option<Command> {
+pub fn signal_group(signal: Signal, group: u64) -> Option<Command> {
     // Targets 0 and 1 would address our group or every permitted process,
     // and `kill` truncates a larger number into its pid range, so 2^32 + 1
     // would reach every process too.
@@ -113,7 +135,7 @@ pub fn signal_group(signal: &str, group: u64) -> Option<Command> {
 
     let mut command = Command::new("kill");
     command
-        .args([signal, "--", &format!("-{group}")])
+        .args([signal.option(), "--", &format!("-{group}")])
         .stderr(Stdio::null());
 
     Some(command)
@@ -172,11 +194,11 @@ mod tests {
         ];
 
         // Inspect preparation only: even a missing guard must never run kill.
-        for signal in ["-0", "-KILL"] {
+        for signal in [Signal::Probe, Signal::Kill] {
             for group in refused {
                 assert!(
                     signal_group(signal, group).is_none(),
-                    "prepared {signal} for forbidden group {group}"
+                    "prepared {signal:?} for forbidden group {group}"
                 );
             }
 
@@ -188,7 +210,11 @@ mod tests {
                 assert_eq!(command.get_program(), OsStr::new("kill"));
                 assert_eq!(
                     args,
-                    [OsStr::new(signal), OsStr::new("--"), OsStr::new(&target)]
+                    [
+                        OsStr::new(signal.option()),
+                        OsStr::new("--"),
+                        OsStr::new(&target)
+                    ]
                 );
             }
         }
