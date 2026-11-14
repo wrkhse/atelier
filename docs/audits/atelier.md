@@ -119,8 +119,8 @@ no-new-privileges, no Docker socket or host network, no credentials, and
 bounded memory, process count, CPU and time; disk and the bridge network are
 not bounded. A fresh offline container validates the reports: they must be
 nonempty and complete; zero missed mutants, zero timeouts and both existing
-Kani harnesses remain required. When a diff selects no mutant, the gate
-mutates the canary `crates/cli/src/command_step/run.rs` and the job summary
+Kani harnesses remain required. When the plan includes the mutants gate and
+its diff selects no mutant, the gate mutates the canary `crates/cli/src/command_step/run.rs` and the job summary
 names it apart from diff coverage, so the report is never empty.
 
 On this Mac, contributors and builders only edit, use `git` and `gh`, and
@@ -129,6 +129,13 @@ The daemon stays unloaded and disabled until the owner approves the slice 3
 candidate installation and start. Linux containment does not establish
 Darwin-specific signalling behavior; disposable macOS verification requires
 separate approval. Historical audit results above retain their original scope.
+
+By the owner's decision of 2026-11-14, end-to-end proofs use the real
+projects: once the slice 3 candidate is installed, the daemon runs the
+pipelines of `wrkhse/atelier` and `wrkhse/chauffeur` on the Mac, and their
+gates, mutants included, run there without a container. There the guarded
+builder is the only barrier between a mutant and a broadcast kill, so no
+path may build a kill or group signal without `signal_group`.
 
 ## The machines
 

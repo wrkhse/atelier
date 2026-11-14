@@ -13,6 +13,13 @@ validates the Kani and mutation reports, and a missing or empty one fails.
 [The CI runner](https://github.com/wrkhse/atelier/tree/main/.github/ci)
 describes it. Never weaken a gate or exclude signalling code to obtain a pass.
 
+Developers never run gates on the Mac. The owner decided on 2026-11-14 that
+the installed atelier daemon, once the slice 3 candidate is installed, runs
+its registered projects' pipelines on the Mac, gates and mutants included,
+with `atelier_command::signal_group` as the guard against a broadcast kill.
+Every kill or group signal goes through that builder; a change that builds
+one another way is refused in review.
+
 Atelier's own pull requests run the workflow and `.github/ci` they contain,
 so a change to either needs review for what it loosens; CI cannot catch a
 pull request that disables its own containment.
