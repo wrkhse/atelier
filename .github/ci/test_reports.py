@@ -484,7 +484,7 @@ class SelectionTests(ReportCase):
     def test_diff_selection_names_its_files_count_and_mutants(self) -> None:
         self.write("mutants", mutants_report())
         summary = reports.validate("commands/mutants", self.root, True)
-        expected = "diff changed 1 files, selected 2 mutants; canary 0 mutants (not run)"
+        expected = "diff changed 1 repository files, selected 2 mutants; canary 0 mutants (not run)"
         self.assertEqual(summary, expected)
         good = diff_selection(mutants_report())
         cases = {
@@ -513,7 +513,7 @@ class SelectionTests(ReportCase):
     def test_canary_never_reads_as_diff_coverage(self) -> None:
         self.write("mutants", canary_report(), canary_selection())
         summary = reports.validate("mutants", self.root, True)
-        head = "diff changed 1 files, selected 0 mutants; canary 2 mutants"
+        head = "diff changed 1 repository files, selected 0 mutants; canary 2 mutants"
         self.assertTrue(summary.startswith(head), summary)
         self.assertIn(reports.CANARY, summary)
         self.assertIn("selects no mutant", summary)
@@ -571,7 +571,7 @@ class SelectionTests(ReportCase):
         with contextlib.redirect_stdout(stdout):
             code = reports.main(["commands/mutants", str(self.root), "--atelier"])
         self.assertEqual(code, 0)
-        self.assertIn("**commands/mutants:** diff changed 1 files", stdout.getvalue())
+        self.assertIn("**commands/mutants:** diff changed 1 repository files", stdout.getvalue())
 
 
 class WrapperTests(unittest.TestCase):
@@ -635,10 +635,14 @@ class WrapperTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cargo.changed_files()
         os.environ["ATELIER_BASE"] = "abc"
-        cargo.GIT = self.script("git", "import sys; sys.exit(128)")
-        with self.assertRaises(ValueError):
+        cargo.GIT = self.script(
+            "git", 'import sys; print("warning", file=sys.stderr); print("fatal: bad", file=sys.stderr); sys.exit(128)'
+        )
+        with self.assertRaisesRegex(ValueError, r"^git diff against abc failed: fatal: bad$"):
             cargo.changed_files()
-        cargo.GIT = self.script("git", 'print("b.rs"); print("a.md")')
+        cargo.GIT = self.script(
+            "git", 'import sys; assert sys.argv[-1] == "--", sys.argv; print("b.rs"); print("a.md")'
+        )
         self.assertEqual(cargo.changed_files(), ["a.md", "b.rs"])
 
     def test_a_diff_with_mutants_runs_as_configured(self) -> None:
@@ -666,7 +670,7 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(selection["diff_selected"], 0)
         self.assertEqual(selection["changed_files"], ["docs/a.md"])
         self.assertEqual(selection["selected"], ["c"])
-        self.assertIn("changes 1 files and selects no mutant", selection["reason"])
+        self.assertIn("changes 1 repository files and selects no mutant", selection["reason"])
 
     def test_an_unavailable_base_goes_straight_to_the_canary(self) -> None:
         self.canary()

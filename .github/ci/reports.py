@@ -287,7 +287,7 @@ def validate_canary(selection: dict, tested: dict, diff: tuple[int, int] | None)
     why = selection.get("reason")
     require(isinstance(why, str) and bool(why.strip()), "canary run without a reason")
     require(len(why) <= MAX_REASON and "\n" not in why, "canary reason is not one short line")
-    head = "diff not evaluated" if diff is None else f"diff changed {diff[0]} files"
+    head = "diff not evaluated" if diff is None else f"diff changed {diff[0]} repository files"
     return f"{head}, selected 0 mutants; canary {listed} mutants in {CANARY}: {why}"
 
 
@@ -305,7 +305,7 @@ def validate_selection(selection: dict, tested: dict, atelier: bool, fallback: b
     files, selected = diff
     require(files > 0, "a diff that selected mutants changed no file")
     require(selected == selected_names(selection, tested, "diff"), "diff count mismatch")
-    return f"diff changed {files} files, selected {selected} mutants; canary 0 mutants (not run)"
+    return f"diff changed {files} repository files, selected {selected} mutants; canary 0 mutants (not run)"
 
 
 def validate(gate: str, reports: Path, atelier: bool) -> str | None:

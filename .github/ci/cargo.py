@@ -36,8 +36,9 @@ def listed(args: list[str]) -> list:
             timeout=LIMIT_SECS,
         ).stdout
     except subprocess.CalledProcessError as error:
-        print(error.stderr, file=sys.stderr)
-        raise ValueError(f"cargo mutants --list failed with status {error.returncode}") from None
+        raise ValueError(f"cargo mutants --list failed: {last_line(error.stderr)}") from None
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"cargo mutants --list ran past {LIMIT_SECS}s") from None
 
     if not output.strip():
         return []
@@ -50,8 +51,14 @@ def listed(args: list[str]) -> list:
     return mutants
 
 
+def last_line(text: str | None) -> str:
+    """A tool's last stderr line, so a refusal stays one line."""
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    return lines[-1][:200] if lines else "no message"
+
+
 def changed_files() -> list[str]:
-    """The files the change touches, proving its diff can be made at all."""
+    """The repository files the change touches, proving its diff can be made."""
     base = os.environ.get("ATELIER_BASE")
 
     if not base:
@@ -59,15 +66,16 @@ def changed_files() -> list[str]:
 
     try:
         output = subprocess.run(
-            [GIT, "diff", "--no-ext-diff", "--no-textconv", "--name-only", base],
+            [GIT, "diff", "--no-ext-diff", "--no-textconv", "--name-only", base, "--"],
             check=True,
             capture_output=True,
             text=True,
             timeout=LIMIT_SECS,
         ).stdout
     except subprocess.CalledProcessError as error:
-        print(error.stderr, file=sys.stderr)
-        raise ValueError(f"git diff against {base} failed") from None
+        raise ValueError(f"git diff against {base} failed: {last_line(error.stderr)}") from None
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"git diff against {base} ran past {LIMIT_SECS}s") from None
 
     return sorted(line for line in output.splitlines() if line)
 
@@ -126,7 +134,7 @@ def select(args: list[str]) -> tuple[list[str], dict]:
 
     if not diff:
         base = os.environ["ATELIER_BASE"]
-        why = f"the diff against {base} changes {len(files)} files and selects no mutant"
+        why = f"the diff against {base} changes {len(files)} repository files and selects no mutant"
         return canary(args, evaluated, why)
 
     return args, {"mode": "diff", **evaluated, "selected": names}
