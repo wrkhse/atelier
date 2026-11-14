@@ -1,7 +1,11 @@
 # Contained CI gates
 
 `gates.yml` runs atelier's planner and every gate inside a fresh Linux
-container on a GitHub-hosted runner, and no gate runs on a developer machine.
+container on a GitHub-hosted runner, and no developer runs a gate on their
+machine. The installed daemon's pipeline runs are the one exception, by the
+owner's decision of 2026-11-14: they run gates on the Mac, guarded by
+`atelier_command::signal_group` alone (see
+[the audit](../../docs/audits/atelier.md#host-mutation-signal-incident)).
 The packaging and docs workflows build on the runner itself; they run no
 test, Kani proof or mutant.
 
