@@ -14,6 +14,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use atelier_command::Signal;
 use atelier_core::{Outcome, PluginError, Settings};
 
 use super::DEFAULT_TIMEOUT_SECS;
@@ -181,15 +182,15 @@ fn tail(folder: &Path) -> String {
 
 /// Whether any process of the group is left.
 fn alive(group: u64) -> bool {
-    signal("-0", group)
+    signal(Signal::Probe, group)
 }
 
 /// Kills the group's every process.
 fn kill(group: u64) {
-    signal("-KILL", group);
+    signal(Signal::Kill, group);
 }
 
-fn signal(signal: &str, group: u64) -> bool {
+fn signal(signal: Signal, group: u64) -> bool {
     atelier_command::signal_group(signal, group)
         .is_some_and(|mut command| command.status().is_ok_and(|status| status.success()))
 }
