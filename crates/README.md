@@ -53,7 +53,7 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo nextest run --workspace --all-targets --all-features --locked
 cargo test --workspace --doc --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-cargo +"$msrv" check --workspace --all-targets --all-features --locked  # rust-version from Cargo.toml
+RUSTUP_AUTO_INSTALL=0 cargo +1.96 check --workspace --all-targets --all-features --locked  # declared rust-version
 cargo deny check
 cargo mutants --workspace --timeout 120
 cargo kani -p atelier-core
