@@ -761,6 +761,21 @@ class ContainmentTests(unittest.TestCase):
         good = json.loads(INSPECTION.read_text(encoding="utf-8"))
         self.assertTrue(self.contained(good))
 
+    def test_a_gate_can_use_bridge_and_its_two_readonly_mounts(self) -> None:
+        gate = json.loads(INSPECTION.read_text(encoding="utf-8"))
+        gate[0]["HostConfig"]["NetworkMode"] = "bridge"
+        gate[0]["HostConfig"]["Mounts"] = [
+            {"Type": "bind", "Source": "/checkout", "Target": "/source", "ReadOnly": True},
+            {"Type": "bind", "Source": "/binary", "Target": "/binary", "ReadOnly": True},
+        ]
+        gate[0]["Mounts"] = [
+            {"Type": "bind", "Source": "/checkout", "Destination": "/source", "RW": False},
+            {"Type": "bind", "Source": "/binary", "Destination": "/binary", "RW": False},
+        ]
+        self.assertTrue(
+            self.contained(gate, "bridge", "bind:/checkout:/source", "bind:/binary:/binary")
+        )
+
     def test_one_bad_setting_at_a_time_is_refused(self) -> None:
         good = json.loads(INSPECTION.read_text(encoding="utf-8"))
         mount = good[0]["HostConfig"]["Mounts"][0]
