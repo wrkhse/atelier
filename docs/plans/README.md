@@ -19,9 +19,9 @@ flowchart LR
 | 2: Run a project's gates                | Implemented, `0.1.0-rc.7` | [Gates](slices/slice-2.md)     |
 | 3: Pipelines made of steps              | In progress               | [Pipelines](slices/slice-3.md) |
 
-The [architecture and ordered slice list](https://github.com/StevenJPx2/atelier/issues/1)
-are the approved contract. [GitHub](https://github.com/StevenJPx2/atelier/issues/6)
-and [OpenCode](https://github.com/StevenJPx2/atelier/issues/7) have separate
+The [architecture and ordered slice list](https://github.com/wrkhse/atelier/issues/1)
+are the approved contract. [GitHub](https://github.com/wrkhse/atelier/issues/6)
+and [OpenCode](https://github.com/wrkhse/atelier/issues/7) have separate
 plugin plans. Each slice page describes what is built, its Structure and its
 checks.
 
