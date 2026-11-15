@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -582,7 +583,8 @@ class WrapperTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         (self.root / "reports").mkdir()
-        saved = {name: getattr(cargo, name) for name in ("REPORTS", "listed", "changed_files", "CARGO", "GIT")}
+        names = ("REPORTS", "listed", "changed_files", "CARGO", "GIT", "LIMIT_SECS")
+        saved = {name: getattr(cargo, name) for name in names}
         environment = {name: os.environ.get(name) for name in ("FLOOR", "ATELIER_BASE")}
         self.addCleanup(self.restore, saved, environment, Path.cwd())
         cargo.REPORTS = self.root / "reports"
@@ -709,6 +711,140 @@ class WrapperTests(unittest.TestCase):
             self.assertEqual(cargo.main(), 1)
         self.assertEqual(len(stderr.getvalue().splitlines()), 1, stderr.getvalue())
         self.assertTrue(stderr.getvalue().startswith("atelier CI: "))
+
+    def test_a_cargo_past_its_limit_is_one_line_and_fails(self) -> None:
+        cargo.LIMIT_SECS = 1
+        cargo.CARGO = self.script("slow", "import time; time.sleep(30)")
+        stderr = io.StringIO()
+        saved = sys.argv
+        self.addCleanup(setattr, sys, "argv", saved)
+        sys.argv = ["cargo", "fmt", "--check"]
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(cargo.main(), 1)
+        self.assertEqual(stderr.getvalue(), "atelier CI: cargo fmt ran past 1s\n")
+
+
+HERE = SCRIPT.parent
+CONTAINED = HERE / "contained.jq"
+FLOOR = HERE / "floor.sh"
+# A real `docker inspect` of the offline validator from run 43597277527,
+# reduced to the fields contained.jq reads.
+INSPECTION = HERE / "inspection.json"
+MOUNT = "bind:/home/runner/work/_temp/atelier-reports:/reports"
+
+
+class ContainmentTests(unittest.TestCase):
+    """contained.jq refuses a container with any one setting off."""
+
+    def contained(self, inspection: object, network: str = "none", *mounts: str) -> bool:
+        completed = subprocess.run(
+            [
+                "jq",
+                "-e",
+                "--arg",
+                "network",
+                network,
+                "--from-file",
+                str(CONTAINED),
+                "--args",
+                *(mounts or (MOUNT,)),
+            ],
+            input=json.dumps(inspection),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return completed.returncode == 0
+
+    def test_the_saved_inspection_is_contained(self) -> None:
+        good = json.loads(INSPECTION.read_text(encoding="utf-8"))
+        self.assertTrue(self.contained(good))
+
+    def test_one_bad_setting_at_a_time_is_refused(self) -> None:
+        good = json.loads(INSPECTION.read_text(encoding="utf-8"))
+        mount = good[0]["HostConfig"]["Mounts"][0]
+        cases = {
+            "root user": ("Config", "User", "0:0"),
+            "cap added": ("HostConfig", "CapAdd", ["SYS_ADMIN"]),
+            "caps kept": ("HostConfig", "CapDrop", []),
+            "new privileges": ("HostConfig", "SecurityOpt", []),
+            "privileged": ("HostConfig", "Privileged", True),
+            "host pid": ("HostConfig", "PidMode", "host"),
+            "host ipc": ("HostConfig", "IpcMode", "host"),
+            "host userns": ("HostConfig", "UsernsMode", "host"),
+            "host uts": ("HostConfig", "UTSMode", "host"),
+            "host network": ("HostConfig", "NetworkMode", "host"),
+            "bridge network": ("HostConfig", "NetworkMode", "bridge"),
+            "device": ("HostConfig", "Devices", [{"PathOnHost": "/dev/kvm"}]),
+            "volumes from": ("HostConfig", "VolumesFrom", ["other"]),
+            "group added": ("HostConfig", "GroupAdd", ["docker"]),
+            "tmpfs": ("HostConfig", "Tmpfs", {"/run": ""}),
+            "no pids limit": ("HostConfig", "PidsLimit", 0),
+            "no memory limit": ("HostConfig", "Memory", 0),
+            "swap": ("HostConfig", "MemorySwap", -1),
+            "no cpu limit": ("HostConfig", "NanoCpus", 0),
+            "bind": ("HostConfig", "Binds", ["/var/run/docker.sock:/var/run/docker.sock"]),
+            "writable mount": ("HostConfig", "Mounts", [{**mount, "ReadOnly": False}]),
+            "extra mount": ("HostConfig", "Mounts", [mount, {**mount, "Target": "/other"}]),
+            "other source": ("HostConfig", "Mounts", [{**mount, "Source": "/home/runner"}]),
+            "other type": ("HostConfig", "Mounts", [{**mount, "Type": "volume"}]),
+            "anonymous volume": (None, "Mounts", [*good[0]["Mounts"], {"Type": "volume"}]),
+        }
+        for case, (section, field, value) in cases.items():
+            with self.subTest(case=case):
+                bad = copy.deepcopy(good)
+                target = bad[0] if section is None else bad[0][section]
+                target[field] = value
+                self.assertFalse(self.contained(bad))
+
+    def test_the_network_and_mounts_must_be_the_expected_ones(self) -> None:
+        good = json.loads(INSPECTION.read_text(encoding="utf-8"))
+        self.assertFalse(self.contained(good, "bridge"))
+        self.assertFalse(self.contained(good, "none", MOUNT, "bind:/x:/y"))
+        self.assertFalse(self.contained(good, "none", "bind:/home/runner:/reports"))
+
+
+class FloorTests(unittest.TestCase):
+    """atelier's floor applies only in atelier's own workflow."""
+
+    def floor(self, **environment: str) -> str:
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **environment}
+        completed = subprocess.run(
+            ["bash", str(FLOOR)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        return completed.stdout.strip()
+
+    def test_the_floor_follows_the_workflow_repository(self) -> None:
+        own = {"WORKFLOW_REPOSITORY": "wrkhse/atelier", "GITHUB_REPOSITORY": "wrkhse/atelier"}
+        self.assertEqual(self.floor(**own), "atelier")
+        other = {**own, "GITHUB_REPOSITORY": "wrkhse/chauffeur"}
+        self.assertEqual(self.floor(**other), "")
+        self.assertEqual(self.floor(GITHUB_REPOSITORY="wrkhse/atelier"), "")
+        self.assertEqual(self.floor(WORKFLOW_REPOSITORY="", GITHUB_REPOSITORY=""), "")
+
+
+class GateConfigTests(unittest.TestCase):
+    """The checked-out gate definitions keep what the reports rely on."""
+
+    @unittest.skipUnless(os.environ.get("FLOOR") == "atelier", "atelier's own gate config")
+    def test_the_mutants_run_script_starts_with_set_e(self) -> None:
+        # /source in the self-test container; the repository otherwise.
+        candidates = [
+            Path("/source/.atelier/config.toml"),
+            HERE.parents[1] / ".atelier/config.toml",
+        ]
+        path = next((path for path in candidates if path.is_file()), None)
+        self.assertIsNotNone(path, f"no gate config among {candidates}")
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+        run = config["commands"]["mutants"]["run"]
+        first = next(line.strip() for line in run.splitlines() if line.strip())
+        self.assertRegex(first, r"^set -[a-z]*e[a-z]*( |$)")
 
 
 WrapperTests.real_listed = staticmethod(cargo.listed)

@@ -170,7 +170,12 @@ def main() -> int:
         print(f"atelier CI: {error}", file=sys.stderr)
         return 1
 
-    return subprocess.run([CARGO, *args], check=False, timeout=LIMIT_SECS).returncode
+    try:
+        return subprocess.run([CARGO, *args], check=False, timeout=LIMIT_SECS).returncode
+    except subprocess.TimeoutExpired:
+        # run() has already killed cargo itself; the verdict stays one line.
+        print(f"atelier CI: cargo {' '.join(args[:1])} ran past {LIMIT_SECS}s", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
