@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { defineConfig, type DefaultTheme } from "vitepress"
 
-const REPOSITORY = "https://github.com/StevenJPx2/atelier"
+const REPOSITORY = "https://github.com/wrkhse/atelier"
 const BRANCH = "main"
 const SITE = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const ROOT = resolve(SITE, "..")
