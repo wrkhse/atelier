@@ -16,9 +16,11 @@ describes it. Never weaken a gate or exclude signalling code to obtain a pass.
 Developers never run gates on the Mac. The owner decided on 2026-11-14 that
 the installed atelier daemon, once the slice 3 candidate is installed, runs
 its registered projects' pipelines on the Mac, gates and mutants included,
-with `atelier_command::signal_group` as the guard against a broadcast kill.
-Every kill or group signal goes through that builder; a change that builds
-one another way is refused in review.
+as the user and with no container. `atelier_command::signal_group` guards
+only the signals atelier itself sends: every kill or group signal goes
+through it, and a change that builds one another way is refused in review.
+Nothing guards the code under test: a project's own commands and tests, and
+file, credential or network damage, are unguarded there.
 
 Atelier's own pull requests run the workflow and `.github/ci` they contain,
 so a change to either needs review for what it loosens; CI cannot catch a

@@ -3,8 +3,9 @@
 `gates.yml` runs atelier's planner and every gate inside a fresh Linux
 container on a GitHub-hosted runner, and no developer runs a gate on their
 machine. The installed daemon's pipeline runs are the one exception, by the
-owner's decision of 2026-11-14: they run gates on the Mac, guarded by
-`atelier_command::signal_group` alone (see
+owner's decision of 2026-11-14: they run gates on the Mac with no container.
+There `atelier_command::signal_group` guards only the signals atelier itself
+sends, and nothing guards the code under test (see
 [the audit](../../docs/audits/atelier.md#host-mutation-signal-incident)).
 The packaging and docs workflows build on the runner itself; they run no
 test, Kani proof or mutant.
@@ -17,14 +18,17 @@ flowchart LR
     Gate --> Validate["fresh offline container:<br/>reports.py"]
 ```
 
-| File              | Holds                                                                             |
-| ----------------- | --------------------------------------------------------------------------------- |
-| `run.sh`          | The runner-side launcher; refuses to run outside GitHub-hosted Linux              |
-| `Dockerfile`      | Tooling only: Rust, Node, Go, Python, pipx and ruff, with user 10001              |
-| `entrypoint.sh`   | Copies the read-only checkout into the container, then plans, checks or validates |
-| `cargo.py`        | A `cargo` front that writes Kani's and cargo-mutants' reports to `/reports`       |
-| `reports.py`      | Fail-closed validation of fresh Kani and cargo-mutants reports                    |
-| `test_reports.py` | The validator's and `cargo.py`'s own tests, run before every plan                 |
+| File              | Holds                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| `run.sh`          | The runner-side launcher; refuses to run outside GitHub-hosted Linux                 |
+| `floor.sh`        | Whether atelier's own floor applies: the workflow runs from the checked repository   |
+| `contained.jq`    | The exact container settings `run.sh` requires of every `docker inspect`             |
+| `inspection.json` | A real inspection of the validator, which the self-test varies one setting at a time |
+| `Dockerfile`      | Tooling only: Rust, Node, Go, Python, jq, pipx and ruff, with user 10001             |
+| `entrypoint.sh`   | Copies the read-only checkout into the container, then plans, checks or validates    |
+| `cargo.py`        | A `cargo` front that writes Kani's and cargo-mutants' reports to `/reports`          |
+| `reports.py`      | Fail-closed validation of fresh Kani and cargo-mutants reports                       |
+| `test_reports.py` | Tests of the validator, `cargo.py`, `contained.jq`, `floor.sh` and the gate config   |
 
 ## The container
 
@@ -42,13 +46,16 @@ bridge, never the host's, so setup commands can install pinned tools; the
 ruff gate's `pipx run` still fetches ruff from PyPI there.
 
 `run.sh` inspects every container before starting it and refuses one whose
-settings differ from exact values: user, `CapDrop` `ALL` with no `CapAdd`,
-`SecurityOpt` exactly `no-new-privileges`, not privileged, private PID and
-IPC, no user or UTS namespace mode, the intended network (`bridge` for a gate,
-`none` for validation), no devices or `VolumesFrom`, 4,096 processes,
-swap equal to memory, a CPU limit, read-only mounts whose type, source and
-target are exactly the intended ones. This guards against regressions and daemon defaults, not
-against an edit to `run.sh` itself.
+settings differ from `contained.jq`'s exact values: user, `CapDrop` `ALL`
+with no `CapAdd`, `SecurityOpt` exactly `no-new-privileges`, not
+privileged, private PID and IPC, no user or UTS namespace mode, the intended
+network (`bridge` for a gate, `none` for validation), no devices,
+`VolumesFrom`, `GroupAdd` or tmpfs, 4,096 processes, swap equal to memory,
+a CPU limit, and read-only mounts whose type, source and target are exactly
+the intended ones, with no anonymous volume beside them. The self-test runs
+the filter against `inspection.json` with one setting changed at a time. This
+guards against regressions and daemon defaults, not against an edit to
+`run.sh` itself.
 
 No container has a Docker socket, runner home, runner command files or token:
 the checkout is mounted read-only after `actions/checkout` drops its
@@ -70,7 +77,9 @@ the CI support files come from the reusable workflow's pinned commit
 (`job.workflow_sha`). Atelier's own CI calls `./.github/workflows/gates.yml`,
 so on its pull requests the workflow, `.github/ci` and the planner come from
 the pull request itself: review, not this workflow, keeps a pull request from
-loosening its own containment.
+loosening its own containment. The judged code can also write its own
+`/reports` files, including `base.txt`; the fresh validator checks their
+consistency, not their provenance.
 
 ## Reports
 
@@ -96,22 +105,27 @@ Before an empty selection counts, `cargo.py` proves the diff can be made:
 `git diff --name-only "$ATELIER_BASE" --` must succeed, and the repository
 files it changes are recorded (the mutants diff itself covers only `crates`
 and `plugins`). A refusal from `cargo.py` is one `atelier CI:` line, with the
-tool's last stderr line when a tool failed or timed out. The canary runs only when the plan includes `commands/mutants` and its diff
-selects nothing: a change the root `.` holds (such as the root `README.md` or
-`Cargo.toml`) but no mutable line in `crates` or `plugins`. A change only
-under `docs/`, `scripts/` or `.github/` plans no mutants gate at all. Then `cargo.py` mutates
+tool's last stderr line when a tool failed or timed out, and one line when
+cargo itself runs past the hour.
+
+The canary runs only when the plan includes `commands/mutants` and its diff
+selects nothing: a change the root `.` holds (such as the root `README.md`
+or `Cargo.toml`) but no mutable line in `crates` or `plugins`. A change
+only under `docs/`, `scripts/` or `.github/` plans no mutants gate at all.
+Then `cargo.py` mutates
 the canary `crates/cli/src/command_step/run.rs`, the background step runner
 whose cleanup reached the host incident's broadcast kill, so the report is
 never empty and the run stays within the gate's hour. The job summary says
 `diff changed K repository files, selected N mutants; canary 0 mutants (not
 run)` or `diff changed K repository files, selected 0 mutants; canary M
-mutants` with the reason; a canary run never reads as diff coverage. Both keep the floor of
-0 missed and 0 timeouts; a canary must also have at least one caught mutant
+mutants` with the reason; a canary run never reads as diff coverage. Both
+keep the floor of 0 missed and 0 timeouts; a canary must also have at least one caught mutant
 and mutate only its own file. A missing canary, or one that yields no mutant,
 fails the gate.
 
-The canary is atelier's own, under the same rule as the Kani floor. In another project, a diff that selects no
-mutant fails the mutants gate with that reason.
+The canary is atelier's own, under the same rule as the Kani floor, which
+`floor.sh` decides. In another project, a diff that selects no mutant fails
+the mutants gate with that reason.
 
 A push to `main` diffs against the push's `before` commit. When that is all
 zeros or unreachable (a first or forced push), every gate runs, mutants use

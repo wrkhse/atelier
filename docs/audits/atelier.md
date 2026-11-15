@@ -99,7 +99,9 @@ both say 5.
 
 ## Host mutation signal incident
 
-**Status: Containment required for slice 3; no release claimed.** On
+**Status: Containment required for CI and for developers; waived for the
+installed daemon's pipelines on the Mac by the owner's decision of
+2026-11-14.** On
 2026-11-13, local mutation testing for PR #57 changed command-group validation
 to return group 1. The cleanup regression reached `kill -KILL -- -1` on the
 Mac: a broadcast target, not one command's process group. The mutation log
@@ -120,12 +122,13 @@ bounded memory, process count, CPU and time; disk and the bridge network are
 not bounded. A fresh offline container validates the reports: they must be
 nonempty and complete; zero missed mutants, zero timeouts and both existing
 Kani harnesses remain required. When the plan includes the mutants gate and
-its diff selects no mutant, the gate mutates the canary `crates/cli/src/command_step/run.rs` and the job summary
-names it apart from diff coverage, so the report is never empty.
+its diff selects no mutant, the gate mutates the canary
+`crates/cli/src/command_step/run.rs` and the job summary names it apart from
+diff coverage, so the report is never empty.
 
 On this Mac, contributors and builders only edit, use `git` and `gh`, and
-run `cargo fmt`. Every other check, including the site build, belongs in CI.
-The daemon stays unloaded and disabled until the owner approves the slice 3
+run `cargo fmt`. Every other check, including the site build, belongs in CI,
+except the installed daemon's pipeline runs described below. The daemon stays unloaded and disabled until the owner approves the slice 3
 candidate installation and start. Linux containment does not establish
 Darwin-specific signalling behavior; disposable macOS verification requires
 separate approval. Historical audit results above retain their original scope.
@@ -133,9 +136,20 @@ separate approval. Historical audit results above retain their original scope.
 By the owner's decision of 2026-11-14, end-to-end proofs use the real
 projects: once the slice 3 candidate is installed, the daemon runs the
 pipelines of `wrkhse/atelier` and `wrkhse/chauffeur` on the Mac, and their
-gates, mutants included, run there without a container. There the guarded
-builder is the only barrier between a mutant and a broadcast kill, so no
-path may build a kill or group signal without `signal_group`.
+gates, mutants included, run there as the user, with no container.
+
+What `signal_group` guards there is narrow: the signals atelier itself
+sends, the deadline kill in `crates/command/src/lib.rs` and a background
+step's cleanup in `crates/cli/src/command_step/run.rs`. No path may build a
+kill or group signal without it. It does nothing for the code under test. A
+project's own commands and tests run unguarded, and in atelier's own mutants
+only atelier's signal paths are guarded. Damage to files, credentials or the
+network is guarded nowhere.
+
+Today `wrkhse/chauffeur` declares no command gates: its main's
+`.atelier/config.toml` holds only `base = "v2"`, and `v2` has no gate
+config. Its tests signal only the daemons they start. Any command gate it adds
+later runs on the Mac unguarded.
 
 ## The machines
 
