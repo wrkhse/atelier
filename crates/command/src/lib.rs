@@ -194,7 +194,7 @@ mod tests {
         ];
 
         // Inspect preparation only: even a missing guard must never run kill.
-        for signal in [Signal::Probe, Signal::Kill] {
+        for (signal, option) in [(Signal::Probe, "-0"), (Signal::Kill, "-KILL")] {
             for group in refused {
                 assert!(
                     signal_group(signal, group).is_none(),
@@ -210,11 +210,7 @@ mod tests {
                 assert_eq!(command.get_program(), OsStr::new("kill"));
                 assert_eq!(
                     args,
-                    [
-                        OsStr::new(signal.option()),
-                        OsStr::new("--"),
-                        OsStr::new(&target)
-                    ]
+                    [OsStr::new(option), OsStr::new("--"), OsStr::new(&target)]
                 );
             }
         }
