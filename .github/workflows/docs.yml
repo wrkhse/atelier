@@ -33,15 +33,43 @@ jobs:
           bun-version: "1.4.4"
       - run: bun install --frozen-lockfile
       - run: bun run build
-      # The token reaches only these steps, never the install or the build.
+
+  # Deploys the redirect from a fresh job, so nothing the site job's install or
+  # build ran (a GITHUB_ENV or GITHUB_PATH entry, a changed file) reaches the
+  # token. The Worker serves redirect/ from the checkout, not the VitePress
+  # build, so no artifact crosses between the jobs.
+  deploy:
+    needs: site
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.4"
+      # The locked deploy tools, cf and wrangler, without running any
+      # package's install scripts; nothing is built here.
+      - run: bun install --frozen-lockfile --ignore-scripts
       - id: token
         name: Check for the deploy token
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: echo "present=${CLOUDFLARE_API_TOKEN:+yes}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "present=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::CLOUDFLARE_API_TOKEN is not set; skipping deploy"
+          fi
       - name: Deploy
         if: steps.token.outputs.present == 'yes'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npx cf deploy --message "${GITHUB_SHA}"
+        run: ./node_modules/.bin/cf deploy --message "${GITHUB_SHA}"
