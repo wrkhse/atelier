@@ -48,7 +48,7 @@ sequenceDiagram
 The checks decide when the work is done. The agent does not judge it, and no
 rulebook or skill has to be followed: a builder knows its issue, the project's
 `AGENTS.md` and the contract in
-[the builder's brief](https://github.com/StevenJPx2/atelier/issues/1#the-builders-brief).
+[the builder's brief](https://github.com/wrkhse/atelier/issues/1#the-builders-brief).
 
 ## A core and its plugins
 
@@ -112,13 +112,13 @@ never runs them: a failed gate reaches it as a failed check, through sourcefed.
 
 The gates follow the code-discipline policy, one check each:
 
-- **rust** ([#2](https://github.com/StevenJPx2/atelier/issues/2)): a root is a
+- **rust** ([#2](https://github.com/wrkhse/atelier/issues/2)): a root is a
   Cargo workspace or a crate outside one. fmt, Clippy with `-D warnings`,
   nextest, doc tests, rustdoc with `-D warnings`, cargo-deny, cargo-mutants on
   the pull request's diff (`--in-diff`), and Kani when a crate has proofs.
-- **tla** ([#3](https://github.com/StevenJPx2/atelier/issues/3)): a root is a
+- **tla** ([#3](https://github.com/wrkhse/atelier/issues/3)): a root is a
   directory with `*.tla` specs. TLC on each, in a project of any language.
-- **typescript** ([#4](https://github.com/StevenJPx2/atelier/issues/4)): a root is
+- **typescript** ([#4](https://github.com/wrkhse/atelier/issues/4)): a root is
   an npm, Bun or pnpm workspace, or a package outside one. oxfmt, Oxlint with the
   vendored anti-slop plugin and no warnings, `tsgo -b`, Effect diagnostics when
   it uses Effect, its tests, `fallow audit`, and the package manager's audit,
@@ -235,4 +235,4 @@ even in a local container. [AGENTS.md](AGENTS.md) is the builder's safety rule;
 describes its containment and reports.
 
 atelier is built by atelier, one slice at a time. Its plan is
-[issue #1](https://github.com/StevenJPx2/atelier/issues/1).
+[issue #1](https://github.com/wrkhse/atelier/issues/1).

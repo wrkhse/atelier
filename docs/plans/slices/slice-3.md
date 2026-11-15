@@ -1,10 +1,10 @@
 # Slice 3: pipelines made of steps
 
 **Status: In progress.** The plan is
-[#43](https://github.com/StevenJPx2/atelier/issues/43), slice 3 of
-[#1](https://github.com/StevenJPx2/atelier/issues/1). The `sourcefed` trigger
-follows as slice 4 ([#42](https://github.com/StevenJPx2/atelier/issues/42)).
-Pipelines run on [rungs](https://github.com/StevenJPx2/rungs) `v0.1.0`, and
+[#43](https://github.com/wrkhse/atelier/issues/43), slice 3 of
+[#1](https://github.com/wrkhse/atelier/issues/1). The `sourcefed` trigger
+follows as slice 4 ([#42](https://github.com/wrkhse/atelier/issues/42)).
+Pipelines run on [rungs](https://github.com/wrkhse/rungs) `v0.1.0`, and
 an earlier rc's `state.json` is read into runs of `build`. Left:
 `atelier finish` and `atelier stop`, and a trigger mark for each pipeline;
 until then the build mark starts `build`.
@@ -435,7 +435,7 @@ kind with the plugin a role's kind resolved to:
   starts that pipeline, so `atelier:build` keeps its meaning. `atelier init`
   creates a label for each pipeline. In this slice the tracker's listing finds
   them, as today; from slice 4 the trigger role does, with sourcefed's events
-  ([#42](https://github.com/StevenJPx2/atelier/issues/42)), and the listing only
+  ([#42](https://github.com/wrkhse/atelier/issues/42)), and the listing only
   reconciles.
 - **A run** is one pass of a pipeline for one item, such as `build github#12`.
   It replaces "an issue" in `state.json` and `atelier status`. An item has at
@@ -443,8 +443,8 @@ kind with the plugin a role's kind resolved to:
 
 ### The machine
 
-The step logic is [rungs](https://github.com/StevenJPx2/rungs)
-([its plan](https://github.com/StevenJPx2/rungs/issues/1)), a crate shared with
+The step logic is [rungs](https://github.com/wrkhse/rungs)
+([its plan](https://github.com/wrkhse/rungs/issues/1)), a crate shared with
 Chauffeur: no I/O, no dependencies, `no_std`, proven with Kani. Core lowers a
 pipeline to a `rungs::Plan`, saves each run's `rungs::Progress` in `state.json`,
 and turns what rungs reports into actions:
@@ -484,7 +484,7 @@ stateDiagram-v2
   resident step that started, and remove the worktree.
 
 rungs proves its own promises
-([rungs#1](https://github.com/StevenJPx2/rungs/issues/1)), for every plan of up
+([rungs#1](https://github.com/wrkhse/rungs/issues/1)), for every plan of up
 to four steps: a step starts only when every step it names has settled or been
 skipped and its needs hold, it is skipped only when they cannot, a step fails
 at most its attempts, a restart keeps failed attempts, and `state` is Over
