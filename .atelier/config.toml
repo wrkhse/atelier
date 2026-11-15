@@ -40,16 +40,51 @@ cargo mutants --in-diff target/mutants.diff --timeout 120 --jobs 3
 
 # The workspace's declared rust-version, so the gate always checks the
 # minimum Cargo.toml states; an absent or malformed one fails the gate.
+# Keep the duplicated setup/run extraction and validation in sync.
 [commands.msrv]
 setup = ['''
-msrv=$(awk -F'"' '/^rust-version = "/ { print $2; exit }' Cargo.toml) &&
-echo "$msrv" | grep -Eqx '[0-9]+\.[0-9]+(\.[0-9]+)?' &&
+msrv=$(awk -F'"' '
+  /^[[:space:]]*\[/ {
+    workspace = $0 ~ /^[[:space:]]*\[workspace[.]package\][[:space:]]*(#.*)?$/
+  }
+  workspace && /^[[:space:]]*rust-version[[:space:]]*=/ {
+    if (found++ || $0 !~ /^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+(\.[0-9]+)?"[[:space:]]*(#.*)?$/) {
+      invalid = 1
+    } else {
+      version = $2
+    }
+  }
+  END {
+    if (!found || invalid) exit 1
+    print version
+  }
+' Cargo.toml) || {
+  printf '%s\n' 'msrv: no valid [workspace.package] rust-version in Cargo.toml' >&2
+  exit 1
+}
 rustup toolchain install "$msrv" --profile minimal
 ''']
 run = '''
-msrv=$(awk -F'"' '/^rust-version = "/ { print $2; exit }' Cargo.toml) &&
-echo "$msrv" | grep -Eqx '[0-9]+\.[0-9]+(\.[0-9]+)?' &&
-cargo +"$msrv" check --workspace --all-targets --all-features --locked
+msrv=$(awk -F'"' '
+  /^[[:space:]]*\[/ {
+    workspace = $0 ~ /^[[:space:]]*\[workspace[.]package\][[:space:]]*(#.*)?$/
+  }
+  workspace && /^[[:space:]]*rust-version[[:space:]]*=/ {
+    if (found++ || $0 !~ /^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+(\.[0-9]+)?"[[:space:]]*(#.*)?$/) {
+      invalid = 1
+    } else {
+      version = $2
+    }
+  }
+  END {
+    if (!found || invalid) exit 1
+    print version
+  }
+' Cargo.toml) || {
+  printf '%s\n' 'msrv: no valid [workspace.package] rust-version in Cargo.toml' >&2
+  exit 1
+}
+RUSTUP_AUTO_INSTALL=0 cargo +"$msrv" check --workspace --all-targets --all-features --locked
 '''
 
 [commands.kani]
