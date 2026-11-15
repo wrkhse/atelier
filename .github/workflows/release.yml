@@ -79,27 +79,31 @@ jobs:
     needs: publish
     runs-on: macos-latest
     environment: release
-    env:
-      TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
-      GH_TOKEN: ${{ github.token }}
+    # The deploy key and the token reach only the steps that use them, so the
+    # formula script and Homebrew's audit, install and test never see either.
     steps:
       - name: Require the tap's dedicated write key
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
         run: test -n "$TAP_DEPLOY_KEY"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The tap is public, so it is read without the key; only the push uses it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: StevenJPx2/homebrew-taps
-          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+          persist-credentials: false
           path: tap
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
+      - name: Download the published checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --dir checksums
       - name: Generate the formula from the published checksums
         run: |
-          set -euo pipefail
-          gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS --dir checksums
           python scripts/release.py formula "${GITHUB_REF_NAME#v}" checksums/SHA256SUMS \
             --out tap/Formula/atelier.rb
       - name: Audit, install and test the real formula
@@ -115,10 +119,19 @@ jobs:
           brew test stevenjpx2/taps/atelier
       - name: Publish the formula
         working-directory: tap
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
         run: |
           set -euo pipefail
+          key="$RUNNER_TEMP/tap-key"
+          hosts="$RUNNER_TEMP/tap-known-hosts"
+          trap 'rm -f "$key" "$hosts"' EXIT
+          (umask 077 && printf '%s\n' "$TAP_DEPLOY_KEY" > "$key")
+          # GitHub's published host key, so the push trusts no other host.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$hosts -o StrictHostKeyChecking=yes"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/atelier.rb
           git commit -m "chore(atelier): ${GITHUB_REF_NAME#v}"
-          git push
+          git push git@github.com:StevenJPx2/homebrew-taps.git HEAD
