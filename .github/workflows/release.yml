@@ -129,9 +129,14 @@ jobs:
           (umask 077 && printf '%s\n' "$TAP_DEPLOY_KEY" > "$key")
           # GitHub's published host key, so the push trusts no other host.
           echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$hosts"
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$hosts -o StrictHostKeyChecking=yes"
+          export GIT_SSH_COMMAND="ssh -i '$key' -o IdentitiesOnly=yes -o UserKnownHostsFile='$hosts' -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/atelier.rb
+          # A re-run of the same tag generates the formula already published.
+          if git diff --cached --quiet; then
+            echo "::notice::formula unchanged"
+            exit 0
+          fi
           git commit -m "chore(atelier): ${GITHUB_REF_NAME#v}"
-          git push git@github.com:StevenJPx2/homebrew-taps.git HEAD
+          git push git@github.com:StevenJPx2/homebrew-taps.git HEAD:refs/heads/main

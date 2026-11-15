@@ -9,9 +9,11 @@ on:
 permissions:
   contents: read
 
+# A pull request's newer push cancels its older run; main's runs are never
+# cancelled, so a deploy is never stopped halfway.
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   site:
@@ -38,9 +40,14 @@ jobs:
   # build ran (a GITHUB_ENV or GITHUB_PATH entry, a changed file) reaches the
   # token. The Worker serves redirect/ from the checkout, not the VitePress
   # build, so no artifact crosses between the jobs.
+  # A workflow_dispatch on main deploys too. A later push queues behind a
+  # deploy in progress instead of cancelling it halfway.
   deploy:
     needs: site
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: docs-deploy
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     defaults:
       run:
