@@ -11,12 +11,11 @@ export MODE=${1:?mode}
 export GATE=${2:-}
 export ROOT=${3:-.}
 export BASE=${4:-}
+support=${CI_SUPPORT:?pinned CI support directory}
 # atelier's own floor (both core proofs, the mutants canary) applies when the
 # workflow runs from the repository it checks: atelier's own CI.
-export FLOOR=
-if [[ -n "${WORKFLOW_REPOSITORY:-}" && "$WORKFLOW_REPOSITORY" == "${GITHUB_REPOSITORY:-}" ]]; then
-  FLOOR=atelier
-fi
+FLOOR=$(bash "$support/floor.sh")
+export FLOOR
 # Host-written inspections sit beside container/, which holds only what a
 # container wrote.
 reports="$RUNNER_TEMP/atelier-reports"
@@ -32,7 +31,6 @@ case "$MODE" in
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
-support=${CI_SUPPORT:?pinned CI support directory}
 docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
 names=()
 trap 'docker rm --force "${names[@]}" >/dev/null 2>&1 || true' EXIT
@@ -68,27 +66,14 @@ create() {
 }
 
 # contained NAME NETWORK TYPE:SOURCE:TARGET...: refuse to start a container whose
-# recorded settings differ from these exact values; the inspection is kept as
-# evidence. This guards against regressions and daemon defaults, not against
+# recorded settings differ from contained.jq's exact values; the inspection is
+# kept as evidence. This guards against regressions and daemon defaults, not against
 # an edit to run.sh itself.
 contained() {
   local name=$1 network=$2
   shift 2
   docker inspect "$name" > "$reports/$name.json"
-  jq -e --arg network "$network" --args '.[0] as $c | $c.HostConfig as $h
-    | $c.Config.User == "10001:10001"
-    and $h.CapDrop == ["ALL"] and ($h.CapAdd // [] | length == 0)
-    and $h.SecurityOpt == ["no-new-privileges"]
-    and $h.Privileged == false
-    and ($h.PidMode == "" or $h.PidMode == "private")
-    and $h.IpcMode == "private" and $h.UsernsMode == "" and $h.UTSMode == ""
-    and $h.NetworkMode == $network
-    and ($h.Devices // [] | length == 0) and ($h.VolumesFrom // [] | length == 0)
-    and $h.PidsLimit == 4096 and $h.Memory > 0 and $h.MemorySwap == $h.Memory
-    and $h.NanoCpus > 0
-    and ($h.Binds // [] | length == 0)
-    and ($h.Mounts | all(.ReadOnly == true))
-    and ([$h.Mounts[] | "\(.Type):\(.Source):\(.Target)"] | sort) == ($ARGS.positional | sort)' \
+  jq -e --arg network "$network" --from-file "$support/contained.jq" --args \
     "$@" < "$reports/$name.json" >/dev/null \
     || { echo "container $name is not contained" >&2; exit 1; }
 }
@@ -97,7 +82,7 @@ contained() {
 # output never reaches it unfiltered.
 summary() {
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
-  grep -E '^(\*\*commands/[a-z0-9_-]+:\*\* |base [0-9a-f]+ is unavailable)' <<< "$1" \
+  grep -E '^(\*\*commands/[A-Za-z0-9_.-]+:\*\* |base [0-9a-f]+ is unavailable)' <<< "$1" \
     | cut -b1-500 | head -n 5 | sed 's/$/\n/' >> "$GITHUB_STEP_SUMMARY" || true
 }
 
