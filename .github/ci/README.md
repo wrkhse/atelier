@@ -44,17 +44,19 @@ bounded beyond the runner's own, and the gate container's network is Docker's
 bridge, never the host's, so setup commands can install pinned tools; the
 ruff gate's `pipx run` still fetches ruff from PyPI there.
 
-`run.sh` inspects every container before starting it and refuses one whose
-settings differ from `contained.jq`'s exact values: user, `CapDrop` `ALL`
-with no `CapAdd`, `SecurityOpt` exactly `no-new-privileges`, not
-privileged, private PID and IPC, no user or UTS namespace mode, the intended
-network (`bridge` for a gate, `none` for validation), no devices,
-`VolumesFrom`, `GroupAdd` or tmpfs, 4,096 processes, swap equal to memory,
-a CPU limit, and read-only mounts whose type, source and target are exactly
-the intended ones, with no anonymous volume beside them. The self-test runs
-the filter against `inspection.json` with one setting changed at a time. This
-guards against regressions and daemon defaults, not against an edit to
-`run.sh` itself.
+`run.sh` inspects every container before starting it and refuses one that
+fails any check in `contained.jq`. It compares these exactly: user
+`10001:10001`, `CapDrop` exactly `ALL`, `SecurityOpt` exactly
+`no-new-privileges`, `Privileged` false, `PidMode` empty or `private`,
+`IpcMode` `private`, empty `UsernsMode` and `UTSMode`, the intended network
+(`bridge` for a gate, `none` for validation), `PidsLimit` 4096, `MemorySwap`
+equal to `Memory`, and the mounts' `TYPE:SOURCE:TARGET`, sorted, exactly the
+intended set, with every mount read-only and no anonymous mount beside them.
+`CapAdd`, `Devices`, `VolumesFrom`, `GroupAdd`, `Tmpfs` and `Binds` need
+only be empty, and `Memory` and `NanoCpus` need only be above zero, so their
+values are not compared. The self-test runs the filter against
+`inspection.json` with one setting changed at a time. This guards against
+regressions and daemon defaults, not against an edit to `run.sh` itself.
 
 No container has a Docker socket, runner home, runner command files or token:
 the checkout is mounted read-only after `actions/checkout` drops its
@@ -131,7 +133,10 @@ zeros or unreachable (a first or forced push), every gate runs, mutants use
 the canary, the selection records the diff as not evaluated, and the summary
 says `diff not evaluated`.
 
-Every report is uploaded as an artifact, also when the gate fails.
+Every report is uploaded as an artifact, also when the gate fails. The upload
+step runs when the job is not cancelled and the step its condition names has
+not skipped: `selftest` in the plan job, `gate` in a gate job. A cancelled
+run, or a job stopped by its job-level 90-minute timeout, uploads no report.
 
 Linux containers do not prove Darwin's process-group signalling. That needs a
 separately approved disposable macOS environment.
