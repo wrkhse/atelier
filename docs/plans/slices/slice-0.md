@@ -134,14 +134,14 @@ tap job pass and the owner's local install reports the candidate version.
 
 ## End to end
 
-- [Pull request #8](https://github.com/StevenJPx2/atelier/pull/8) and
-  [the formula fix](https://github.com/StevenJPx2/atelier/pull/9)
+- [Pull request #8](https://github.com/wrkhse/atelier/pull/8) and
+  [the formula fix](https://github.com/wrkhse/atelier/pull/9)
   pass the pull-request gates.
-- [The release commit's Check run](https://github.com/StevenJPx2/atelier/actions/runs/43021461460)
+- [The release commit's Check run](https://github.com/wrkhse/atelier/actions/runs/43021461460)
   passes formatting, lint, tests, MSRV and packaged smoke checks.
-- [The candidate release](https://github.com/StevenJPx2/atelier/releases/tag/v0.1.0-rc.2)
+- [The candidate release](https://github.com/wrkhse/atelier/releases/tag/v0.1.0-rc.2)
   contains three native archives and SHA256SUMS.
-- [The complete Release run](https://github.com/StevenJPx2/atelier/actions/runs/43021654905)
+- [The complete Release run](https://github.com/wrkhse/atelier/actions/runs/43021654905)
   passes all three native builds and smoke tests, then the owner-approved tap
   job: style, strict online audit, install, test and formula publication.
 - The local Apple Silicon install through `StevenJPx2/taps/atelier` reports
