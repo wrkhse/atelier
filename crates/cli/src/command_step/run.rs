@@ -390,7 +390,7 @@ fn note(folder: &Path, what: &str) -> bool {
 
 /// Forgets a folder atelier has emptied.
 fn forget(folder: &Path) {
-    remembered().forget(folder)
+    remembered().forget(folder);
 }
 
 /// What every text about a command atelier left unsignalled says: `what`
