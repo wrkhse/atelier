@@ -30,12 +30,19 @@ run::observe(&folder, &step.settings)?;
 - **Starting again.** A start on a folder that already exists first stops
   whatever command the folder still names, through the same identity check,
   so a start repeated after a daemon crash cannot orphan a running command.
-  It empties the folder only once the record no longer names anything atelier
-  could not verify. A legacy record (a `group` file and no identity), an
-  unpublished identity or an invalid one is kept, and the start fails with a
-  transient error saying the command an earlier start left in the folder
-  cannot be stopped, followed by the unsignalled text. The folder stays,
-  since it is the only trace of a command that may still run.
+  It empties the folder only once a fresh check finds the leader gone or
+  its record from another boot. While the record still names a leader that
+  is stopping, the start fails with a transient error saying the command an
+  earlier start left in the folder is still stopping, keeps the folder
+  until it is gone, and retries on the next poll. A legacy record (a
+  `group` file and no identity), an unpublished identity or an invalid one
+  is kept, and the start fails with a transient error saying the command an
+  earlier start left in the folder cannot be stopped, followed by the
+  unsignalled text. The folder stays, since it is the only trace of a
+  command that may still run. A start that cannot spawn removes the folder
+  it just made, since nothing ran; one abandoned because its identity could
+  not be recorded removes the folder once its group kill was delivered,
+  keeping it only when the signal was refused.
 - **Its own process group,** not the daemon's, so a daemon restarted while it
   runs leaves it running. While its leader runs, its limit signals every
   process still in that group, not descendants that create a different group
@@ -67,7 +74,8 @@ running, and atelier sends it no signal. `observe` settles the step failed with
 a reason that says it started but its identity was never recorded. The reason ends
 `; atelier sent no signal, and the command may still be running in <worktree>`,
 or `in its worktree` when no worktree is recorded; `stop` sends nothing, and
-its log line ends the same way.
+its log line ends the same way, logged once for that folder and reason
+rather than on every poll.
 
 ```text
 atelier-command-identity 1
@@ -85,11 +93,17 @@ signal. A folder holding only the older `group` file, an unpublished
 identity, a malformed record, or a leader outside `2..=i32::MAX` fails
 closed: `observe` settles `failed` with the same ending, `stop` sends
 nothing and logs it, and a start over it fails with a transient error and
-keeps the folder.
+keeps the folder. While a start keeps failing this way, the run waits at
+that step; a person ends the run with `atelier stop "<pipeline> <issue>"`,
+and the folder stays for them to check and remove, since a later run starts
+in its own generation's folder.
 A running command past its limit is signalled through
 `/bin/kill -KILL -- -<leader>`, which `atelier_command::signal_group` builds.
 When that refuses a target, the kill and a start's abandon log
 `<folder>: atelier refused to signal group <n>; the command may still be running in <worktree>`.
+`kill` reports whether a signal was delivered, so a refused signal or a
+failed `/bin/kill` is never read as a stop. A start's fresh check keeps a
+folder whose leader still runs.
 
 Linux reads the boot identity from `/proc/sys/kernel/random/boot_id`, and
 the leader's start ticks, group and state from `/proc/<pid>/stat`. macOS

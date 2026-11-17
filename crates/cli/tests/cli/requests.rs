@@ -20,15 +20,20 @@ fn request_file(sandbox: &Sandbox) -> std::path::PathBuf {
         .join(".local/state/atelier/requests/StevenJPx2/demo/0.json")
 }
 
-/// Whether the process group led by `leader` still has a process. A probe
-/// that cannot be taken, and a probe whose wait fails, both count as alive,
-/// so only a probe that ran and exited non-zero reports the group gone.
-fn alive(leader: u64) -> bool {
-    let Some(mut signal) = signal_group(Signal::Probe, leader) else {
-        return true;
-    };
+/// The probe's answer: `Some(true)` while the group has a process,
+/// `Some(false)` once none is left, and `None` when the probe itself could
+/// not be taken.
+fn probe(leader: u64) -> Option<bool> {
+    let mut signal = signal_group(Signal::Probe, leader)?;
 
-    signal.status().map_or(true, |status| status.success())
+    signal.status().ok().map(|status| status.success())
+}
+
+/// Whether the group may still have a process: a probe that could not be
+/// taken counts as alive, so a wait on it fails at its deadline instead of
+/// passing early.
+fn alive(leader: u64) -> bool {
+    probe(leader).unwrap_or(true)
 }
 
 #[test]
@@ -373,7 +378,16 @@ run = "sleep 300"
     );
 
     assert!(comment.contains(&running_in), "{comment}");
-    assert!(alive(leader), "an unrecorded command's group was signalled");
+    assert_eq!(
+        probe(leader),
+        Some(true),
+        "an unrecorded command's group was signalled"
+    );
+
+    // The test ends the command the daemon left unsignalled.
+    if let Some(mut kill) = signal_group(Signal::Kill, leader) {
+        let _ = kill.status();
+    }
 }
 #[test]
 fn finish_checks_reason_bounds_and_stop_requires_the_exact_run_key() {
