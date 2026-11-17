@@ -1,9 +1,9 @@
 # Rust 1.100
 
-**Status: In progress.** The workspace's minimum is Rust 1.100 and development
-and CI pin stable `1.100.0`. Kani's compatibility with the raised minimum is
-shown by this change's contained CI run; the simplifications below follow in
-their own pull request.
+**Status: In progress.** The workspace's minimum is Rust 1.100, and
+development and CI pin stable `1.100.0` in `rust-toolchain.toml` and the
+container image. Clippy 1.100's `map_unwrap_or` requires `map_or_default`,
+which this change applies in `crates/command`, `crates/cli` and `crates/core`.
 
 Every member inherits `rust-version = "1.100"` from the workspace. The `msrv`
 gate reads that value from `Cargo.toml`, installs that toolchain and checks
@@ -17,15 +17,16 @@ toolchain. Edition 2024 stays.
 
 Every gate runs in CI's container, as [AGENTS.md](../../AGENTS.md) and
 [slice 3](slices/slice-3.md#verification) describe; on a developer's Mac only
-`cargo fmt` runs.
+`cargo fmt` runs. The container's Rust image is `rust:1.100.0-bookworm`,
+pinned by digest in `.github/ci/Dockerfile`.
 
-| Check                                     | Proves                                                             |
-| ----------------------------------------- | ------------------------------------------------------------------ |
-| `clippy`, `nextest`, `doctest`, `rustdoc` | The workspace builds and passes on 1.100.0                         |
-| `msrv`                                    | The declared minimum holds                                         |
-| `kani`                                    | Kani 0.68.0 still proves both core harnesses with the new manifest |
-| `mutants`                                 | No mutant is missed on the changed lines                           |
-| Package, Release                          | Native builds and smoke runs on macOS arm64 and Linux              |
+| Check                                     | Proves                                                       |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| `clippy`, `nextest`, `doctest`, `rustdoc` | The workspace builds and passes on 1.100.0                   |
+| `msrv`                                    | The declared minimum holds                                   |
+| `kani`                                    | Kani 0.68.0 proves both core harnesses on the 1.100 manifest |
+| `mutants`                                 | No mutant is missed on the changed lines                     |
+| Package, Release                          | Native builds and smoke runs on macOS arm64 and Linux        |
 
 Kani 0.68.0 compiles with its own `nightly-2026-08-21` (rustc 1.100.0-nightly,
 commit `8925ea358`). Cargo ignores the nightly suffix when it compares
@@ -37,18 +38,17 @@ contained Kani run passes with it.
 Cargo 1.100 moves intermediate build artifacts. Atelier reads only final ones:
 `target/<triple>/release/atelier` in releases, `target/release/atelier` in
 packaging, and `CARGO_BIN_EXE_atelier` in the CLI tests. nextest 0.9.151 is past
-the release that supports the new layout.
+the release that supports that layout.
 
 ## Simplifications it allows
 
-Clippy 1.100's `map_unwrap_or` requires `map_or_default` in `crates/command`,
-`crates/cli` and `crates/core`, so this change applies it there; the rows below
-follow in their own pull request.
+`map_or_default` lands in this change; the two rows below follow in their own
+pull request.
 
 | Where                           | Today                                   | With                                    | Since |
 | ------------------------------- | --------------------------------------- | --------------------------------------- | ----- |
 | `crates/cli/src/config.rs:420`  | `strip_suffix(".git").unwrap_or(rest)`  | `trim_suffix(".git")`                   | 1.100 |
-| `crates/command/src/lib.rs:102` | `from_utf8_lossy(&tail.0).into_owned()` | `String::from_utf8_lossy_owned(tail.0)` | 1.99  |
+| `crates/command/src/lib.rs:152` | `from_utf8_lossy(&tail.0).into_owned()` | `String::from_utf8_lossy_owned(tail.0)` | 1.99  |
 
 ```rust
 let rest = rest.trim_suffix(".git");
