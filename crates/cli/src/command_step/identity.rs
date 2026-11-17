@@ -27,7 +27,7 @@ const LOWEST_LEADER: i64 = 2;
 /// `ESRCH`: the kernel's answer for a process that has gone.
 const ESRCH: i32 = 3;
 
-/// How long reading the boot time or a process may take.
+/// How long reading the boot identity or a process may take.
 const READ_DEADLINE: Duration = Duration::from_secs(10);
 
 /// What identifies a command's group leader across polls and daemon
@@ -37,7 +37,7 @@ pub struct Identity {
     /// The number the leader has, which is also its group's.
     pub leader: u32,
     /// The boot it started in: the kernel's boot id on Linux, and
-    /// `kern.boottime` on macOS.
+    /// `kern.bootsessionuuid` on macOS.
     pub boot: String,
     /// When it started, in that boot's terms: ticks since boot on Linux,
     /// and its start clock time on macOS.
@@ -167,7 +167,7 @@ pub fn judge(identity: &Identity, boot: &str, process: Option<&Process>) -> Lead
 }
 
 /// The boot that is running now: the kernel's boot id on Linux, and
-/// `kern.boottime` on macOS.
+/// `kern.bootsessionuuid` on macOS.
 fn boot() -> Result<String, String> {
     if cfg!(target_os = "linux") {
         proc_boot()
@@ -192,19 +192,19 @@ fn proc_boot() -> Result<String, String> {
     Ok(boot.into())
 }
 
-/// The boot that is running now, as `sysctl -n kern.boottime` gives its
-/// seconds and microseconds.
+/// The boot that is running now, as `sysctl -n kern.bootsessionuuid` gives
+/// its per-boot UUID.
 fn sysctl_boot() -> Result<String, String> {
     let mut command = Command::new("/usr/sbin/sysctl");
-    command.args(["-n", "kern.boottime"]);
+    command.args(["-n", "kern.bootsessionuuid"]);
 
     let output = run(command, READ_DEADLINE).map_err(|error| error.message)?;
 
     output
         .success
-        .then(|| parse_boottime(&output.stdout))
+        .then(|| parse_uuid(&output.stdout))
         .flatten()
-        .ok_or_else(|| "kern.boottime is unreadable".to_owned())
+        .ok_or_else(|| "kern.bootsessionuuid is unreadable".to_owned())
 }
 
 /// Whether reading a process's file failed because the process has gone.
@@ -235,7 +235,9 @@ fn proc_process(pid: u32) -> Result<Option<Process>, String> {
         Err(error) => return Err(format!("reading {path}: {error}")),
     };
 
-    parse_stat(&text).ok_or_else(|| format!("unreadable {path}"))
+    parse_stat(&text)
+        .map(Some)
+        .ok_or_else(|| format!("unreadable {path}"))
 }
 
 /// The process `pid` names, if there is one, as `ps` describes it.
@@ -249,18 +251,30 @@ fn ps_process(pid: u32) -> Result<Option<Process>, String> {
         .env("TZ", "UTC0");
 
     let output = run(command, READ_DEADLINE).map_err(|error| error.message)?;
-    let stdout = output.stdout.trim();
-    let stderr = output.stderr.trim();
 
-    match (output.success, stdout.is_empty(), stderr.is_empty()) {
+    read_ps(pid, output.success, &output.stdout, &output.stderr)
+}
+
+/// What the result of `ps` says about the process `pid` names: nothing,
+/// the process, or why it could not be read. Output from a `ps` that
+/// exited non-zero is never parsed.
+fn read_ps(pid: u32, success: bool, stdout: &str, stderr: &str) -> Result<Option<Process>, String> {
+    let stdout = stdout.trim();
+    let stderr = stderr.trim();
+    let last_stderr = || stderr.lines().next_back().unwrap_or("no message");
+
+    match (success, stdout.is_empty(), stderr.is_empty()) {
         // `ps` prints nothing and exits 1 when no process has that number.
         (false, true, true) => Ok(None),
+        (true, false, _) => parse_ps(stdout)
+            .map(Some)
+            .ok_or_else(|| format!("unreadable ps output for {pid}")),
+        (false, false, _) => Err(format!("ps failed for process {pid}: {}", last_stderr())),
         (_, true, false) => Err(format!(
             "ps could not read process {pid}: {}",
-            stderr.lines().next_back().unwrap_or("no output")
+            last_stderr()
         )),
-        (_, true, true) => Err(format!("ps could not read process {pid}: no output")),
-        (_, false, _) => parse_ps(stdout).ok_or_else(|| format!("unreadable ps output for {pid}")),
+        (true, true, true) => Err(format!("ps printed nothing for process {pid}")),
     }
 }
 
@@ -316,18 +330,21 @@ fn parse_ps(text: &str) -> Option<Process> {
     })
 }
 
-/// The boot time `sysctl -n kern.boottime` prints, as its seconds and
-/// microseconds: `{ sec = 1763350000, usec = 123456 } Tue Nov 17 …`.
-fn parse_boottime(text: &str) -> Option<String> {
-    let rest = text.strip_prefix("{ sec = ")?;
-    let (seconds, rest) = rest.split_once(", usec = ")?;
-    let (micros, _) = rest.split_once(' ')?;
+/// The UUID `sysctl -n kern.bootsessionuuid` prints: 36 bytes of ASCII
+/// hex digits, with `-` at byte indexes 8, 13, 18 and 23.
+fn parse_uuid(text: &str) -> Option<String> {
+    let uuid = text.trim();
 
-    if !digits(seconds) || !digits(micros) {
+    if uuid.len() != 36 {
         return None;
     }
 
-    Some(format!("{seconds}.{micros}"))
+    let uuid_shaped = uuid.bytes().enumerate().all(|(index, byte)| match index {
+        8 | 13 | 18 | 23 => byte == b'-',
+        _ => byte.is_ascii_hexdigit(),
+    });
+
+    uuid_shaped.then(|| uuid.to_owned())
 }
 
 /// The value of a rendered identity's `key` line: the key, one space, and
@@ -601,19 +618,78 @@ mod tests {
     }
 
     #[test]
-    fn a_boottime_line_gives_its_seconds_and_microseconds() {
-        assert_eq!(
-            parse_boottime("{ sec = 1763350000, usec = 123456 } Tue Nov 17 03:00:00 2026\n"),
-            Some("1763350000.123456".into())
-        );
+    fn a_ps_result_with_no_process_is_none() {
+        assert_eq!(read_ps(4242, false, "", ""), Ok(None));
+    }
 
+    #[test]
+    fn a_ps_result_with_a_line_is_the_process() {
+        assert_eq!(
+            read_ps(4242, true, "Tue Nov 17 10:00:00 2026  4242 Ss\n", ""),
+            Ok(Some(Process {
+                group: 4242,
+                start: "Tue Nov 17 10:00:00 2026".into(),
+                zombie: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_failed_ps_is_an_error_even_when_its_output_would_parse() {
+        assert_eq!(
+            read_ps(
+                4242,
+                false,
+                "Tue Nov 17 10:00:00 2026  4242 Ss",
+                "ps: no such process\n"
+            ),
+            Err("ps failed for process 4242: ps: no such process".into())
+        );
+        assert_eq!(
+            read_ps(4242, false, "Tue Nov 17 10:00:00 2026  4242 Ss", ""),
+            Err("ps failed for process 4242: no message".into())
+        );
+    }
+
+    #[test]
+    fn an_empty_ps_output_is_an_error_naming_its_last_stderr_line() {
+        assert_eq!(
+            read_ps(4242, true, "", "ps: illegal option\nUsage: ps\n"),
+            Err("ps could not read process 4242: Usage: ps".into())
+        );
+    }
+
+    #[test]
+    fn a_successful_ps_with_nothing_to_say_is_an_error() {
+        assert_eq!(
+            read_ps(4242, true, "", ""),
+            Err("ps printed nothing for process 4242".into())
+        );
+    }
+
+    #[test]
+    fn a_boot_session_uuid_is_read_in_either_case_without_its_newline() {
+        assert_eq!(
+            parse_uuid("C3A6F5E2-1B2C-4D3E-8F90-0123456789AB\n"),
+            Some("C3A6F5E2-1B2C-4D3E-8F90-0123456789AB".into())
+        );
+        assert_eq!(
+            parse_uuid("c3a6f5e2-1b2c-4d3e-8f90-0123456789ab\n"),
+            Some("c3a6f5e2-1b2c-4d3e-8f90-0123456789ab".into())
+        );
+    }
+
+    #[test]
+    fn a_text_that_is_not_a_boot_session_uuid_is_refused() {
         for broken in [
-            "1763350000 123456",
-            "{ sec = 1763350000 } Tue Nov 17 03:00:00 2026",
-            "{ sec = 1763350000, usec = 12x456 } Tue Nov 17 03:00:00 2026",
-            "{ sec = 17a3350000, usec = 123456 } Tue Nov 17 03:00:00 2026",
+            "",
+            "C3A6F5E2-1B2C-4D3E-8F90-0123456789A",
+            "C3A6F5E2-1B2C-4D3E-8F90-0123456789ABC",
+            "C3A6F5E2-1B2C-4D3E-8F90-0123456789AG",
+            "C3A6F5E2X1B2C-4D3E-8F90-0123456789AB",
+            "C3A6F5E21B2C-4D3E-8F90-0123456789AB-",
         ] {
-            assert_eq!(parse_boottime(broken), None, "{broken}");
+            assert_eq!(parse_uuid(broken), None, "{broken:?}");
         }
     }
 
@@ -637,6 +713,26 @@ mod tests {
         };
 
         assert_eq!(rebooted.check(), Ok(Leader::Rebooted));
+    }
+
+    /// A child that inherits this test's group leads none, so `of`
+    /// refuses it. Only the test's own child is killed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn of_refuses_a_process_that_does_not_lead_its_group() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("5")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        assert!(Identity::of(child.id()).is_err());
+
+        // This kills only the test's own child, never a group.
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// Reading a process that has gone is told apart from a read that
@@ -663,20 +759,7 @@ mod tests {
 
         assert_eq!(boot.len(), 36);
         assert_eq!(boot, text.trim());
-        assert!(
-            boot.bytes()
-                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'),
-            "{boot}"
-        );
-
-        let dashes: Vec<usize> = boot
-            .bytes()
-            .enumerate()
-            .filter(|(_, byte)| *byte == b'-')
-            .map(|(index, _)| index)
-            .collect();
-
-        assert_eq!(dashes, [8, 13, 18, 23]);
+        assert_eq!(parse_uuid(&boot), Some(boot.clone()), "{boot}");
 
         let this = process(std::process::id()).unwrap().unwrap();
 
@@ -700,13 +783,13 @@ mod tests {
         assert_eq!(ps_process(u32::try_from(i32::MAX).unwrap()).unwrap(), None);
     }
 
-    /// Linux has no `kern.boottime`, so the macOS reader gives an error
-    /// rather than a boot.
+    /// Linux's `sysctl` has no `kern.bootsessionuuid` either, so the macOS
+    /// reader gives an error rather than a boot.
     #[cfg(target_os = "linux")]
     #[test]
     fn sysctl_cannot_read_a_linux_boot() {
-        // Linux has no `/proc/sys/kern/boottime`, so `sysctl -n` fails, and
-        // a boot it cannot print is an error, never an empty one.
+        // Linux has no `kern.bootsessionuuid`, so `sysctl -n` fails, and a
+        // boot it cannot print is an error, never an empty one.
         assert!(sysctl_boot().is_err());
     }
 }

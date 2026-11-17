@@ -341,16 +341,20 @@ pub fn observe(folder: &Path, settings: &Settings)
 The command's shell leads its own process group and stays alive until the
 command's top level ends, then writes `exit`; the leader's identity record
 sits beside it, written atomically before the start returns, with the
-leader's pid, boot and start identity. A reaper thread waits on the leader,
-so it is reaped once it ends; if that thread cannot start, the leader stays a
-zombie until the daemon exits, and the identity check reads a zombie as gone.
-Before `observe` or `stop` sends a signal, it checks the record: the same
-boot, the leader alive and not a zombie, the same start identity, and still
-leading its group. A record from another boot, or for a leader that is gone,
-settles `failed` without a signal; a legacy folder with only `group`, a
-malformed record, or a leader outside `2..=i32::MAX` fails closed: `observe`
-settles `failed` and says no signal was sent, and `stop` returns a permanent
-error.
+leader's pid, boot and start identity. The boot is the kernel's boot id on
+Linux and `kern.bootsessionuuid` on macOS. A reaper thread waits on the
+leader, so it is reaped once it ends; if that thread cannot start, the leader
+stays a zombie until the daemon exits, and the identity check reads a zombie
+as gone. Before `observe` or `stop` sends a signal, it checks the record: the
+same boot, the leader alive and not a zombie, the same start identity, and
+still leading its group. A record from another boot, or for a leader that is
+gone, settles `failed` without a signal. A legacy folder with only `group`, a
+malformed record, a leader outside `2..=i32::MAX`, or a command that started
+but never published its identity fails closed: `observe` settles `failed`
+with the reason, which reaches the run's comment, and `stop` sends nothing
+and returns no error, so the run still ends. It logs
+`<folder>: <what>; atelier sent no signal, and the command may still be
+running`, where `<what>` says which record could not name a leader.
 
 ```rust
 pub struct Identity {
@@ -839,19 +843,25 @@ On 2026-11-13, a host mutation run changed command-group validation to accept
 group 1. A cleanup test reached `kill -KILL -- -1` on the Mac. Every group
 signal is built by `atelier_command::signal_group`, which refuses groups 0
 and 1 and numbers `kill` would truncate to them, independently of file
-parsing; its regression constructs commands without executing them. This guard does not
-replace process isolation. [The incident record](../../audits/atelier.md#host-mutation-signal-incident)
+parsing. It also refuses atelier's own pid, its parent's pid and its own
+process group, read once; with no group readable, it refuses every target.
+Its regression constructs commands without executing them. This guard does
+not replace process isolation. [The incident record](../../audits/atelier.md#host-mutation-signal-incident)
 keeps the evidence and containment rule.
 
 The identity record narrows which process a signal reaches; it does not
 contain the command. macOS resolves a start time to the second, and checking
 before `/bin/kill` runs leaves a window in which the leader can exit and its
-number be reused. A limit or a stop reaches the group only while its leader
-runs. Once the command's top level exits normally, its exit status is written
-and a stop sends nothing, so background processes it left behind are not
-signalled. Neither are descendants that leave the group or outlive a leader
-killed by something else. This is not containment and not a proof of ownership.
-Tests that start or signal processes run only in the contained CI gates.
+number be reused. A boot identity the system cannot report fails closed, and
+so does a macOS value that is not a UUID: a start kills the command it
+began, and a check sends no signal. A limit or a stop reaches the group only
+while its leader runs. Once the command's top level exits normally, its exit
+status is written and a stop sends nothing, so background processes it left
+behind are not signalled. Neither are descendants that leave the group or
+outlive a leader killed by something else. An unrecorded or legacy command is
+left running, and named in the log and the run's report. This is not
+containment and not a proof of ownership. Tests that start or signal processes
+run only in the contained CI gates.
 
 On the development Mac, only editing, `git`, `gh` and `cargo fmt` are allowed.
 No compile, Clippy, test, metadata, docs build, Kani, mutants or atelier binary

@@ -49,6 +49,12 @@ the leader's own start identity. A reaper thread waits on the leader, so it
 is reaped once it ends; if that thread cannot start, the leader stays a
 zombie until the daemon exits, and the identity check reads a zombie as gone.
 
+A crash between the spawn and the rename leaves `started`, and perhaps
+`identity.tmp`, without `identity`: the command may still be running, and
+atelier sends it no signal. `observe` settles the step failed, saying it
+started but its identity was never recorded; `stop` sends nothing, and the
+log names it.
+
 ```text
 atelier-command-identity 1
 leader 4242
@@ -63,24 +69,29 @@ stopped before it exited, as on a restart of the computer"; a leader that is
 gone settles `failed` with "it stopped before it exited". Neither sends a
 signal. A folder holding only the older `group` file, a malformed record, or
 a leader outside `2..=i32::MAX` fails closed: `observe` settles `failed` and
-says no signal was sent, and `stop` returns a permanent error. A running
-command past its limit is signalled through `/bin/kill -KILL -- -<leader>`,
-which `atelier_command::signal_group` builds.
+says no signal was sent, and `stop` sends nothing. A running command past
+its limit is signalled through `/bin/kill -KILL -- -<leader>`, which
+`atelier_command::signal_group` builds.
 
 Linux reads the boot identity from `/proc/sys/kernel/random/boot_id`, and
 the leader's start ticks, group and state from `/proc/<pid>/stat`. macOS
-reads `kern.boottime` through `/usr/sbin/sysctl`, and the leader's start
-time, group and state from `/bin/ps -o lstart= -o pgid= -o stat=` with
-`LC_ALL=C`. No new dependency.
+reads `kern.bootsessionuuid` through `/usr/sbin/sysctl`, and the leader's
+start time, group and state from `/bin/ps -o lstart= -o pgid= -o stat=`
+with `LC_ALL=C` and `TZ=UTC0`, so its start time does not depend on the
+locale or the time zone. No new dependency.
 
 The record narrows which process a signal reaches; it is not containment.
 On macOS a start time resolves to the second, and checking before running
 `/bin/kill` leaves a window in which the leader can exit and its number be
-reused. Once the command's top level exits normally, its exit status is
-written and a stop sends nothing, so background processes it left behind are
-not signalled. Neither are descendants that leave the group or outlive a
-leader killed by something else. This is not a proof of ownership.
-Tests that start or signal processes run only in the contained CI gates.
+reused. A boot identity the system cannot report fails closed, and so does a
+macOS value that is not a UUID: a start kills the command it began, and a
+check sends no signal. Once the command's top level exits normally, its exit
+status is written and a stop sends nothing, so background processes it left
+behind are not signalled. Neither are descendants that leave the group or
+outlive a leader killed by something else. An unrecorded or legacy command
+is left running, and named in the log and the run's report. This is not a
+proof of ownership. Tests that start or signal processes run only in the
+contained CI gates.
 
 ## Separate descendant groups
 

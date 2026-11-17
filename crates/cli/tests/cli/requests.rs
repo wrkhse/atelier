@@ -293,15 +293,85 @@ run = "sleep 300 & wait"
         .status()
         .unwrap()
         .success();
-    if alive {
-        signal_group(Signal::Kill, leader)
-            .expect("a group to kill")
-            .status()
-            .unwrap();
-    }
 
     assert!(!alive, "the command process group survived stop");
     assert!(!worktree(&sandbox).exists());
+}
+
+#[test]
+fn an_unrecorded_command_settles_its_run_without_a_signal() {
+    let sandbox = Sandbox::new(&labelled(&["atelier:build"]));
+    sandbox.config(
+        r#"
+poll = 15
+[[pipeline.build.step]]
+id = "worktree"
+uses = "git.worktree"
+
+[[pipeline.build.step]]
+id = "wait"
+uses = "atelier.command"
+run = "sleep 120"
+"#,
+    );
+    let daemon = sandbox.daemon();
+    sandbox.wait("command running", |sandbox| {
+        sandbox.step("12", "wait").as_deref() == Some("running")
+    });
+    let folder = sandbox
+        .home
+        .join(".local/state/atelier/steps/StevenJPx2/demo/issue-12/build/1/wait");
+    let identity = fs::read_to_string(folder.join("identity")).unwrap();
+    let leader = identity
+        .lines()
+        .find_map(|line| line.strip_prefix("leader "))
+        .and_then(|leader| leader.trim().parse::<u64>().ok())
+        .expect("an identity record names its leader");
+    drop(daemon);
+
+    // A crash between the start and the identity's publishing leaves
+    // `started`, and no `identity`.
+    fs::remove_file(folder.join("identity")).unwrap();
+
+    let daemon = sandbox.daemon();
+    sandbox.wait("the blocked run and its comment", |sandbox| {
+        let commented = sandbox.world()["issues"]["12"]["comments"]
+            .as_array()
+            .is_some_and(|comments| {
+                comments
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|text| text.contains("its identity was never recorded"))
+            });
+
+        sandbox.phase("12").as_deref() == Some("blocked") && commented
+    });
+    sandbox.wait("the log line", |sandbox| {
+        sandbox
+            .log()
+            .contains("atelier sent no signal, and the command may still be running")
+    });
+    drop(daemon);
+
+    let issue = &sandbox.world()["issues"]["12"];
+    let comment = issue["comments"]
+        .as_array()
+        .and_then(|comments| comments.last())
+        .and_then(|comment| comment.as_str())
+        .unwrap_or_default();
+    let alive = signal_group(Signal::Probe, leader)
+        .expect("a group to probe")
+        .status()
+        .unwrap()
+        .success();
+
+    assert!(
+        comment.contains(
+            "it started but its identity was never recorded, so atelier sent it no signal"
+        ),
+        "{comment}"
+    );
+    assert!(alive, "an unrecorded command's group was signalled");
 }
 #[test]
 fn finish_checks_reason_bounds_and_stop_requires_the_exact_run_key() {

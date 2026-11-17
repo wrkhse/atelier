@@ -19,6 +19,7 @@ use atelier_core::{Outcome, PluginError, Settings};
 
 use super::DEFAULT_TIMEOUT_SECS;
 use super::identity::{Identity, Leader};
+use crate::log::log;
 
 /// Runs the command: `$1` is the command and `$2` the worktree. The outer
 /// shell is the group leader and stays alive until the work ends, so the
@@ -98,8 +99,9 @@ pub fn start(
 
 /// How the command started in `folder` ended, if it has: `passed` on
 /// exit 0, `failed` on any other exit, past its time limit, which kills
-/// it with every process it started, or when it stopped without an exit
-/// status, as on a restart of the computer.
+/// it with every process it started, when it stopped without an exit
+/// status, as on a restart of the computer, or when it started but never
+/// published its identity.
 ///
 /// # Errors
 ///
@@ -120,6 +122,12 @@ pub fn observe(folder: &Path, settings: &Settings) -> Result<Option<Outcome>, Pl
         Err(Unrecorded::Legacy) => {
             return Ok(Some(failed(
                 "it has no identity record, so atelier sent it no signal".into(),
+            )));
+        }
+        Err(Unrecorded::Unpublished) => {
+            return Ok(Some(failed(
+                "it started but its identity was never recorded, so atelier sent it no signal"
+                    .into(),
             )));
         }
         Err(Unrecorded::Unreadable(error)) => {
@@ -173,13 +181,15 @@ pub fn observe(folder: &Path, settings: &Settings) -> Result<Option<Outcome>, Pl
 }
 
 /// Cancels a command still running in this attempt's folder. A command
-/// that already exited, or an attempt never started, needs no signal.
+/// that already exited or an attempt never started needs no signal; a
+/// record that cannot name a leader sends none either, and the log and
+/// `observe` say so.
 ///
 /// # Errors
 ///
-/// A permanent error when the record is from an earlier version or cannot
-/// name a leader, and a transient error when the record cannot be read or
-/// the leader cannot be checked. Nothing is signalled in any error case.
+/// A transient error when the record cannot be read or the leader cannot
+/// be checked, since either may clear and the stop be tried again.
+/// Nothing is signalled in any error case.
 pub fn stop(folder: &Path) -> Result<(), PluginError> {
     if folder.join("exit").exists() {
         return Ok(());
@@ -188,19 +198,27 @@ pub fn stop(folder: &Path) -> Result<(), PluginError> {
     let identity = match record(folder) {
         Ok(identity) => identity,
         Err(Unrecorded::Absent) => return Ok(()),
+        // Fail closed and say so: no signal is sent, `observe` settles the
+        // step `failed`, and a permanent error here would be retried on
+        // every poll and keep the run from ending.
         Err(Unrecorded::Legacy) => {
-            return Err(PluginError::permanent(
-                "the command has no identity record; atelier sent it no signal",
-            ));
+            unsigned(folder, "it has no identity record");
+
+            return Ok(());
+        }
+        Err(Unrecorded::Unpublished) => {
+            unsigned(folder, "it started but its identity was never recorded");
+
+            return Ok(());
+        }
+        Err(Unrecorded::Invalid(why)) => {
+            unsigned(folder, &format!("its identity record is invalid ({why})"));
+
+            return Ok(());
         }
         Err(Unrecorded::Unreadable(error)) => {
             return Err(PluginError::transient(format!(
                 "reading the command's identity: {error}"
-            )));
-        }
-        Err(Unrecorded::Invalid(why)) => {
-            return Err(PluginError::permanent(format!(
-                "the command's identity record is invalid: {why}; atelier sent it no signal"
             )));
         }
     };
@@ -221,25 +239,42 @@ pub fn stop(folder: &Path) -> Result<(), PluginError> {
     }
 }
 
+/// Says in the log that the command in `folder` was not signalled, and
+/// why: `what` names the record that cannot say which leader to signal.
+fn unsigned(folder: &Path, what: &str) {
+    log(
+        "atelier.command",
+        &format!(
+            "{}: {what}; atelier sent no signal, and the command may still be running",
+            folder.display()
+        ),
+    );
+}
+
 /// What reading a command's identity found instead of one.
 enum Unrecorded {
     /// Nothing was started in the folder.
     Absent,
     /// A record from an earlier version, which named the group.
     Legacy,
+    /// A command that started but never published its identity.
+    Unpublished,
     /// The record could not be read.
     Unreadable(std::io::Error),
     /// The record cannot name a leader.
     Invalid(String),
 }
 
-/// The identity of the command started in `folder`.
+/// The identity of the command started in `folder`, or what the folder
+/// holds instead of one.
 fn record(folder: &Path) -> Result<Identity, Unrecorded> {
     let text = match fs::read_to_string(folder.join("identity")) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(if folder.join("group").exists() {
                 Unrecorded::Legacy
+            } else if folder.join("started").exists() || folder.join("identity.tmp").exists() {
+                Unrecorded::Unpublished
             } else {
                 Unrecorded::Absent
             });
@@ -601,7 +636,7 @@ mod tests {
             legacy.why,
             "it has no identity record, so atelier sent it no signal"
         );
-        assert!(stop(&folder).unwrap_err().is_permanent());
+        assert!(stop(&folder).is_ok());
 
         fs::write(
             folder.join("identity"),
@@ -614,11 +649,51 @@ mod tests {
             invalid.why.starts_with("its identity record is invalid"),
             "{invalid:?}"
         );
-        assert!(stop(&folder).unwrap_err().is_permanent());
+        assert!(stop(&folder).is_ok());
 
         fs::remove_file(folder.join("identity")).unwrap();
         fs::create_dir(folder.join("identity")).unwrap();
         assert!(!stop(&folder).unwrap_err().is_permanent());
+    }
+
+    #[test]
+    fn unpublished_records_fail_closed() {
+        let scratch = Scratch::new("unpublished");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("started"), "1").unwrap();
+
+        let unpublished = observe(&folder, &Settings::default()).unwrap().unwrap();
+        assert_eq!(
+            unpublished.why,
+            "it started but its identity was never recorded, so atelier sent it no signal"
+        );
+        assert!(stop(&folder).is_ok());
+
+        fs::write(folder.join("identity.tmp"), "not an identity").unwrap();
+
+        let half_written = observe(&folder, &Settings::default()).unwrap().unwrap();
+        assert_eq!(half_written, unpublished);
+        assert!(stop(&folder).is_ok());
+    }
+
+    #[test]
+    fn observe_without_a_start_time_fails_closed() {
+        let scratch = Scratch::new("no-start-time");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("identity"),
+            "atelier-command-identity 1\nleader 4242\nboot b\nstart s\n",
+        )
+        .unwrap();
+
+        let outcome = observe(&folder, &Settings::default()).unwrap().unwrap();
+
+        assert_eq!(
+            outcome.why,
+            "its identity record is invalid (no start time), so atelier sent it no signal"
+        );
     }
 
     #[cfg(target_os = "linux")]
