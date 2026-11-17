@@ -31,6 +31,9 @@ const TICK: Duration = Duration::from_millis(20);
 /// failed.
 const MAX_OUTPUT: usize = 1 << 20;
 
+/// How long `/bin/ps` may take to answer with atelier's process group.
+const PS_DEADLINE: Duration = Duration::from_secs(5);
+
 /// What a finished command printed, and whether it succeeded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
@@ -177,27 +180,79 @@ fn refused(group: u64) -> bool {
 
 /// The process group atelier runs in, read once and kept. `None` when this
 /// platform has no reader or the read fails, which refuses every target.
+/// Only a read that succeeded is kept, so a failed read is tried again by
+/// the next call instead of refusing every kill until a restart.
 fn own_group() -> Option<u32> {
-    static GROUP: OnceLock<Option<u32>> = OnceLock::new();
+    static GROUP: OnceLock<u32> = OnceLock::new();
 
-    *GROUP.get_or_init(|| {
-        if cfg!(target_os = "linux") {
-            let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    if let Some(group) = GROUP.get() {
+        return Some(*group);
+    }
 
-            parse_pgrp(&stat)
-        } else if cfg!(target_os = "macos") {
-            let output = Command::new("/bin/ps")
-                .env("LC_ALL", "C")
-                .args(["-o", "pgid=", "-p", &std::process::id().to_string()])
-                .output()
-                .ok()?;
-            let ps = String::from_utf8_lossy(&output.stdout);
+    let group = read_own_group()?;
 
-            parse_pgid(&ps)
-        } else {
-            None
+    // Another caller may have read it first; either value is the same group.
+    let _ = GROUP.set(group);
+
+    Some(group)
+}
+
+/// Reads atelier's process group with this platform's reader. Every reader
+/// compiles on every target, so only the call is chosen.
+fn read_own_group() -> Option<u32> {
+    if cfg!(target_os = "linux") {
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+
+        parse_pgrp(&stat)
+    } else if cfg!(target_os = "macos") {
+        read_pgid_with_ps()
+    } else {
+        None
+    }
+}
+
+/// Reads atelier's process group from `/bin/ps`, killing it at
+/// `PS_DEADLINE`. It polls the child itself rather than going through
+/// `run`: `run` signals the group on its own deadline, and
+/// `signal_group` reads the own group, so a read inside it would wait on
+/// itself.
+fn read_pgid_with_ps() -> Option<u32> {
+    let mut child = Command::new("/bin/ps")
+        .env("LC_ALL", "C")
+        .args(["-o", "pgid=", "-p", &std::process::id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let started = Instant::now();
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() >= PS_DEADLINE => {
+                let _ = child.kill();
+                let _ = child.wait();
+
+                break None;
+            }
+            Ok(None) => thread::sleep(TICK),
+            Err(_) => break None,
         }
-    })
+    };
+
+    let status = status?;
+
+    if !status.success() {
+        return None;
+    }
+
+    let mut stdout = child.stdout.take()?;
+    let mut ps = String::new();
+    stdout.read_to_string(&mut ps).ok()?;
+
+    parse_pgid(&ps)
 }
 
 /// The process group in a `/proc/<pid>/stat` line: the third field after
