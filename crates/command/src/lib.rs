@@ -79,8 +79,8 @@ pub fn run(mut command: Command, deadline: Duration) -> Result<Output, PluginErr
         }
     };
 
-    let stdout = stdout.map(collect).unwrap_or_default();
-    let stderr = stderr.map(collect).unwrap_or_default();
+    let stdout = stdout.map_or_default(collect);
+    let stderr = stderr.map_or_default(collect);
     let status = status.map_err(PluginError::transient)?;
 
     Ok(Output {

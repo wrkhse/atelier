@@ -88,8 +88,7 @@ impl Build {
                 .checks
                 .iter()
                 .find(|spec| spec.plugin == name)
-                .map(|spec| spec.settings.clone())
-                .unwrap_or_default();
+                .map_or_default(|spec| spec.settings.clone());
             let checks = make
                 .make(&settings)
                 .map_err(|error| eyre!("{CONFIG}: {name}.{error}"))?;

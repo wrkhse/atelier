@@ -578,7 +578,7 @@ fn blocked(reason: Reason, record: &Record) -> String {
             .steps
             .get(usize::from(step))
             .and_then(|kept| kept.why.as_deref())
-            .map_or_else(String::new, |why| format!(": {why}"))
+            .map_or_default(|why| format!(": {why}"))
     };
 
     match reason {
@@ -624,7 +624,7 @@ fn report(record: &Record, pipeline: Option<&Pipeline>) -> String {
         let why = kept
             .why
             .as_deref()
-            .map_or_else(String::new, |why| format!(" ({why})"));
+            .map_or_default(|why| format!(" ({why})"));
 
         lines.push(format!("- `{}`: {status}{why}", kept.id));
     }

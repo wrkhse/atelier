@@ -41,15 +41,14 @@ the release that supports the new layout.
 
 ## Simplifications it allows
 
-One follow-up pull request applies these, each with its regression check:
+Clippy 1.100's `map_unwrap_or` requires `map_or_default` in `crates/command`,
+`crates/cli` and `crates/core`, so this change applies it there; the rows below
+follow in their own pull request.
 
-| Where                                 | Today                                   | With                                    | Since |
-| ------------------------------------- | --------------------------------------- | --------------------------------------- | ----- |
-| `crates/cli/src/config.rs:420`        | `strip_suffix(".git").unwrap_or(rest)`  | `trim_suffix(".git")`                   | 1.100 |
-| `crates/core/src/poll/act.rs:632,678` | `map_or_else(String::new, …)`           | `map_or_default(…)`                     | 1.98  |
-| `crates/command/src/lib.rs:82-83`     | `map(collect).unwrap_or_default()`      | `map_or_default(collect)`               | 1.98  |
-| `crates/cli/src/plugins.rs:89-92`     | `map(…).unwrap_or_default()`            | `map_or_default(…)`                     | 1.98  |
-| `crates/command/src/lib.rs:102`       | `from_utf8_lossy(&tail.0).into_owned()` | `String::from_utf8_lossy_owned(tail.0)` | 1.99  |
+| Where                           | Today                                   | With                                    | Since |
+| ------------------------------- | --------------------------------------- | --------------------------------------- | ----- |
+| `crates/cli/src/config.rs:420`  | `strip_suffix(".git").unwrap_or(rest)`  | `trim_suffix(".git")`                   | 1.100 |
+| `crates/command/src/lib.rs:102` | `from_utf8_lossy(&tail.0).into_owned()` | `String::from_utf8_lossy_owned(tail.0)` | 1.99  |
 
 ```rust
 let rest = rest.trim_suffix(".git");
@@ -58,8 +57,7 @@ let stdout = stdout.map_or_default(collect);
 ```
 
 `trim_suffix` removes one `.git`; the required `strip_prefix` and the repeated
-`trim_end_matches('/')` stay, since they decide which URLs are accepted. The
-`act.rs` sites are compiled by Kani, so they wait for its run.
+`trim_end_matches('/')` stay, since they decide which URLs are accepted.
 
 Cargo's `unused_dependencies` lint waits until Kani is shown to accept the
 manifest table; cargo-shear and cargo-deny keep their gates either way.
