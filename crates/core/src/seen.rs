@@ -6,7 +6,7 @@ use crate::Mark;
 /// The marks an issue carries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Marks {
-    build: bool,
+    requested: bool,
     working: bool,
     blocked: bool,
 }
@@ -15,7 +15,7 @@ impl Marks {
     #[must_use]
     pub const fn has(self, mark: Mark) -> bool {
         match mark {
-            Mark::Build => self.build,
+            Mark::Requested => self.requested,
             Mark::Working => self.working,
             Mark::Blocked => self.blocked,
         }
@@ -24,7 +24,7 @@ impl Marks {
     #[must_use]
     pub const fn with(mut self, mark: Mark) -> Self {
         match mark {
-            Mark::Build => self.build = true,
+            Mark::Requested => self.requested = true,
             Mark::Working => self.working = true,
             Mark::Blocked => self.blocked = true,
         }
@@ -35,7 +35,7 @@ impl Marks {
     #[must_use]
     pub const fn without(mut self, mark: Mark) -> Self {
         match mark {
-            Mark::Build => self.build = false,
+            Mark::Requested => self.requested = false,
             Mark::Working => self.working = false,
             Mark::Blocked => self.blocked = false,
         }
@@ -100,12 +100,12 @@ mod tests {
 
     #[test]
     fn marks_are_added_and_removed_one_at_a_time() {
-        let marks: Marks = [Mark::Build, Mark::Blocked].into_iter().collect();
+        let marks: Marks = [Mark::Requested, Mark::Blocked].into_iter().collect();
 
-        assert!(marks.has(Mark::Build) && marks.has(Mark::Blocked));
+        assert!(marks.has(Mark::Requested) && marks.has(Mark::Blocked));
         assert!(!marks.has(Mark::Working));
         assert!(marks.with(Mark::Working).has(Mark::Working));
-        assert!(!marks.without(Mark::Build).has(Mark::Build));
+        assert!(!marks.without(Mark::Requested).has(Mark::Requested));
         assert_eq!(PullRequest::Merged { number: 3 }.number(), 3);
         assert_eq!(PullRequest::Closed { number: 4 }.number(), 4);
     }

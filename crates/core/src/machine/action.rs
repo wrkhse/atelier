@@ -5,7 +5,7 @@ use super::Reason;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(kani, derive(kani::Arbitrary))]
 pub enum Mark {
-    Build,
+    Requested,
     Working,
     Blocked,
 }

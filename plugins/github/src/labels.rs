@@ -99,7 +99,7 @@ impl Labels {
     #[must_use]
     pub const fn mark(&self, mark: Mark) -> &Label {
         match mark {
-            Mark::Build => &self.build,
+            Mark::Requested => &self.build,
             Mark::Working => &self.working,
             Mark::Blocked => &self.blocked,
         }
@@ -181,7 +181,7 @@ mod tests {
             labels.working.description,
             Labels::default().working.description
         );
-        assert_eq!(labels.mark(Mark::Build), &Labels::default().build);
+        assert_eq!(labels.mark(Mark::Requested), &Labels::default().build);
         assert_eq!(labels.mark(Mark::Blocked).name, "atelier:blocked");
         assert_eq!(
             Labels::from_settings(&Settings::default()).unwrap(),

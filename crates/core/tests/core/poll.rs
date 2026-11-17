@@ -31,7 +31,7 @@ fn status(state: &State, id: &str) -> Option<Status> {
 }
 
 fn building() -> (World, State) {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Build]);
+    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
     let mut state = State::default();
     world.poll(&world.project(), &mut state);
     (world, state)
@@ -105,7 +105,7 @@ fn a_stop_after_any_save_resumes_to_the_same_end() {
     let (clean, clean_state) = building();
 
     for crash_at in 1..=12 {
-        let world = World::with_issue("12", "Fix the dead link", &[Mark::Build]);
+        let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
         let project = world.project();
         let plugins = world.plugins();
         let mut saved = State::default();
@@ -304,12 +304,12 @@ fn stale_or_invalid_finish_requests_leave_the_run_alone() {
 
 #[test]
 fn a_stop_request_preempts_pending_starts_and_removes_the_request_mark() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Build]);
+    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
     let mut state = State::default();
     let mut record = Record::new(&key(), "Fix the dead link", "build");
     record.begin(&world.project().pipelines[0]);
     record.phase = Phase::Claiming;
-    record.pending = vec![Action::Mark(Mark::Working), Action::Unmark(Mark::Build)];
+    record.pending = vec![Action::Mark(Mark::Working), Action::Unmark(Mark::Requested)];
     let request = atelier_core::Request {
         generation: record.generation,
         command: atelier_core::Command::Stop,
@@ -363,7 +363,7 @@ fn a_stop_request_takes_priority_over_a_queued_finish() {
 
 #[test]
 fn a_transient_failure_retries_and_keeps_the_listing_unconfirmed() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Build]);
+    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
     let project = world.project();
     let mut state = State::default();
     *world.fail.borrow_mut() = Some((3, Failure::Transient));
@@ -384,7 +384,7 @@ fn a_transient_failure_retries_and_keeps_the_listing_unconfirmed() {
 
 #[test]
 fn a_permanent_start_failure_blocks_the_run() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Build]);
+    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
     let project = world.project();
     let mut state = State::default();
     *world.fail.borrow_mut() = Some((3, Failure::Permanent));
@@ -401,7 +401,7 @@ fn a_permanent_start_failure_blocks_the_run() {
 
 #[test]
 fn a_claim_that_fails_for_good_blocks_the_run() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Build]);
+    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
     let mut state = State::default();
     *world.fail.borrow_mut() = Some((1, Failure::Permanent));
 
@@ -428,14 +428,16 @@ fn a_fresh_pass_keeps_each_steps_own_previous_session() {
 
 #[test]
 fn a_blocked_run_requested_again_continues_on_its_branch() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Build]);
+    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
     let project = world.project();
     let mut state = State::default();
     *world.fail.borrow_mut() = Some((3, Failure::Permanent));
     world.poll(&project, &mut state);
     *world.fail.borrow_mut() = None;
 
-    world.edit("12", |ticket| ticket.marks = ticket.marks.with(Mark::Build));
+    world.edit("12", |ticket| {
+        ticket.marks = ticket.marks.with(Mark::Requested)
+    });
     world.poll(&project, &mut state);
 
     assert_eq!(phase(&state), Phase::Running);
@@ -617,7 +619,7 @@ fn passed(why: &str) -> Observed {
 
 #[test]
 fn a_pipeline_without_forge_steps_does_not_ask_the_forge() {
-    let world = World::with_issue("12", "Audit", &[Mark::Build]);
+    let world = World::with_issue("12", "Audit", &[Mark::Requested]);
     let mut project = world.project_with(&audit());
     project.forge = "another-plugin".into();
     let mut state = State::default();
@@ -631,7 +633,7 @@ fn a_pipeline_without_forge_steps_does_not_ask_the_forge() {
 
 #[test]
 fn steps_whose_needs_hold_together_start_in_the_same_poll() {
-    let world = World::with_issue("12", "Audit", &[Mark::Build]);
+    let world = World::with_issue("12", "Audit", &[Mark::Requested]);
     let project = world.project_with(&audit());
     let mut state = State::default();
 
@@ -676,7 +678,7 @@ fn steps_whose_needs_hold_together_start_in_the_same_poll() {
 
 #[test]
 fn a_step_whose_needs_cannot_hold_is_skipped_and_the_run_is_done() {
-    let world = World::with_issue("12", "Audit", &[Mark::Build]);
+    let world = World::with_issue("12", "Audit", &[Mark::Requested]);
     let project = world.project_with(&audit());
     let mut state = State::default();
     world
@@ -699,7 +701,7 @@ fn a_step_whose_needs_cannot_hold_is_skipped_and_the_run_is_done() {
 
 #[test]
 fn a_command_that_settles_an_outcome_it_lacks_is_reported() {
-    let world = World::with_issue("12", "Audit", &[Mark::Build]);
+    let world = World::with_issue("12", "Audit", &[Mark::Requested]);
     let project = world.project_with(&audit());
     let mut state = State::default();
     world.commands.borrow_mut().insert(
@@ -850,7 +852,7 @@ fn saved_progress_the_pipeline_cannot_resume_blocks_its_run() {
 
 #[test]
 fn the_filter_narrows_requests_but_not_lost_track() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Build]);
+    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
     world.edit("12", |ticket| ticket.assignee = Some("someone-else".into()));
     let copy = world.ticket("12");
     world.tickets.borrow_mut().insert("13".into(), copy);

@@ -68,7 +68,7 @@ impl Raw {
             return None;
         }
 
-        let marks = [Mark::Build, Mark::Working, Mark::Blocked]
+        let marks = [Mark::Requested, Mark::Working, Mark::Blocked]
             .into_iter()
             .filter(|mark| {
                 self.labels

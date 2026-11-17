@@ -29,7 +29,9 @@ fn the_real_github_answers_as_the_captured_replies_do() {
     let tracker = github.tracker(&Settings::default()).unwrap();
     let issue = tracker.issue(&repo, "6").unwrap();
     let merged = github.pull_request(&repo, "feat/slice-0-setup").unwrap();
-    let first = tracker.issues(&repo, Mark::Build, &filter, None).unwrap();
+    let first = tracker
+        .issues(&repo, Mark::Requested, &filter, None)
+        .unwrap();
     let Listing::Changed {
         etag: Some(etag), ..
     } = first
@@ -37,7 +39,7 @@ fn the_real_github_answers_as_the_captured_replies_do() {
         panic!("{first:?}")
     };
     let again = tracker
-        .issues(&repo, Mark::Build, &filter, Some(&etag))
+        .issues(&repo, Mark::Requested, &filter, Some(&etag))
         .unwrap();
 
     assert_eq!(

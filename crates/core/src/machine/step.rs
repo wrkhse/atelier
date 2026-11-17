@@ -69,10 +69,10 @@ fn inside(run: Run, event: Event, plan: &Plan) -> Option<(Run, Vec<Action>)> {
     running(run, event, plan)
 }
 
-/// Claiming, with fresh progress: the working mark comes and the build
+/// Claiming, with fresh progress: the working mark comes and the trigger
 /// mark goes.
 fn claim(also: Option<Action>) -> (Run, Vec<Action>) {
-    let mut actions = vec![Action::Mark(Mark::Working), Action::Unmark(Mark::Build)];
+    let mut actions = vec![Action::Mark(Mark::Working), Action::Unmark(Mark::Requested)];
     actions.extend(also);
 
     let run = Run {
@@ -192,7 +192,7 @@ fn position(step: usize) -> Option<u8> {
 
 /// Blocked: a running run's resident steps are interrupted, the working
 /// mark goes, the blocked mark comes, a comment says why, and the worktree
-/// goes. A claim that failed takes the build mark too, so it is not
+/// goes. A claim that failed takes the trigger mark too, so it is not
 /// requested again until a person asks.
 fn block(run: Run, reason: Reason) -> (Run, Vec<Action>) {
     let ran = run.phase == Phase::Running;
@@ -203,7 +203,7 @@ fn block(run: Run, reason: Reason) -> (Run, Vec<Action>) {
     }
 
     if reason == Reason::Claim {
-        actions.push(Action::Unmark(Mark::Build));
+        actions.push(Action::Unmark(Mark::Requested));
     }
 
     actions.extend([
@@ -249,13 +249,16 @@ fn stop(run: Run) -> (Run, Vec<Action>) {
 fn stop_asked(run: Run) -> (Run, Vec<Action>) {
     let actions = if run.phase == Phase::Running {
         vec![
-            Action::Unmark(Mark::Build),
+            Action::Unmark(Mark::Requested),
             Action::Interrupt,
             Action::Unmark(Mark::Working),
             Action::RemoveWorktree,
         ]
     } else {
-        vec![Action::Unmark(Mark::Build), Action::Unmark(Mark::Working)]
+        vec![
+            Action::Unmark(Mark::Requested),
+            Action::Unmark(Mark::Working),
+        ]
     };
 
     let stopped = Run {
@@ -337,7 +340,7 @@ mod tests {
         assert_eq!(claiming.phase, Phase::Claiming);
         assert_eq!(
             claim,
-            [Action::Mark(Mark::Working), Action::Unmark(Mark::Build)]
+            [Action::Mark(Mark::Working), Action::Unmark(Mark::Requested)]
         );
         assert_eq!(reclaim.last(), Some(&Action::Unmark(Mark::Blocked)));
         assert_eq!(running.phase, Phase::Running);
@@ -454,7 +457,7 @@ mod tests {
         assert_eq!(
             unclaim,
             [
-                Action::Unmark(Mark::Build),
+                Action::Unmark(Mark::Requested),
                 Action::Unmark(Mark::Working),
                 Action::Mark(Mark::Blocked),
                 Action::Comment(Reason::Claim),
@@ -498,7 +501,7 @@ mod tests {
         assert_eq!(
             asked,
             [
-                Action::Unmark(Mark::Build),
+                Action::Unmark(Mark::Requested),
                 Action::Interrupt,
                 Action::Unmark(Mark::Working),
                 Action::RemoveWorktree,
@@ -507,7 +510,10 @@ mod tests {
         assert_eq!(claiming.phase, Phase::Stopped);
         assert_eq!(
             claim,
-            [Action::Unmark(Mark::Build), Action::Unmark(Mark::Working)]
+            [
+                Action::Unmark(Mark::Requested),
+                Action::Unmark(Mark::Working)
+            ]
         );
     }
 

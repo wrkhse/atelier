@@ -284,7 +284,7 @@ mod tests {
         );
         assert_eq!(
             pending("26"),
-            [Action::Mark(Mark::Working), Action::Unmark(Mark::Build)]
+            [Action::Mark(Mark::Working), Action::Unmark(Mark::Requested)]
         );
     }
 

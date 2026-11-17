@@ -310,7 +310,7 @@ impl From<Status> for StatusFile {
 impl From<MarkFile> for Mark {
     fn from(mark: MarkFile) -> Self {
         match mark {
-            MarkFile::Build => Self::Build,
+            MarkFile::Build => Self::Requested,
             MarkFile::Working => Self::Working,
             MarkFile::Blocked => Self::Blocked,
         }
@@ -320,7 +320,7 @@ impl From<MarkFile> for Mark {
 impl From<Mark> for MarkFile {
     fn from(mark: Mark) -> Self {
         match mark {
-            Mark::Build => Self::Build,
+            Mark::Requested => Self::Build,
             Mark::Working => Self::Working,
             Mark::Blocked => Self::Blocked,
         }
@@ -432,7 +432,7 @@ mod tests {
             Phase::Stopped,
         ];
         let pending = vec![
-            Action::Mark(Mark::Build),
+            Action::Mark(Mark::Requested),
             Action::Unmark(Mark::Working),
             Action::Mark(Mark::Blocked),
             Action::Start(0),

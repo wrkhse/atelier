@@ -22,7 +22,7 @@ pub struct Watched {
 
 /// The marks atelier lists: issues asking for a builder, and issues
 /// carrying the working mark, so one atelier never claimed is found.
-const LISTED: [Mark; 2] = [Mark::Build, Mark::Working];
+const LISTED: [Mark; 2] = [Mark::Requested, Mark::Working];
 
 /// Asks the project's trackers what changed, reads every issue atelier is
 /// working on, and asks the forge for the pull request of each run whose
@@ -86,7 +86,7 @@ fn list(
 ) -> Result<(), PluginError> {
     let key = (source.name.to_owned(), mark);
     let etag = state.etags.get(&key).map(String::as_str);
-    let filter = if mark == Mark::Build {
+    let filter = if mark == Mark::Requested {
         source.filter.clone()
     } else {
         Filter::default()

@@ -23,7 +23,7 @@ fn one_page_keeps_its_tag_and_an_unchanged_repository_answers_304() {
     let github = gh.tracker();
 
     let first = github
-        .issues(&repo(), Mark::Build, &Filter::default(), None)
+        .issues(&repo(), Mark::Requested, &Filter::default(), None)
         .unwrap();
     let Listing::Changed {
         etag: Some(etag), ..
@@ -32,7 +32,7 @@ fn one_page_keeps_its_tag_and_an_unchanged_repository_answers_304() {
         panic!("{first:?}")
     };
     let second = github
-        .issues(&repo(), Mark::Build, &Filter::default(), Some(etag))
+        .issues(&repo(), Mark::Requested, &Filter::default(), Some(etag))
         .unwrap();
 
     assert_eq!(ids(&first), ["3", "2", "1"]);
@@ -49,7 +49,7 @@ fn pages_are_followed_pull_requests_dropped_and_no_tag_kept() {
 
     let listing = gh
         .tracker()
-        .issues(&repo(), Mark::Build, &Filter::default(), None)
+        .issues(&repo(), Mark::Requested, &Filter::default(), None)
         .unwrap();
 
     assert_eq!(ids(&listing), ["7", "3", "2", "1"]);
@@ -88,7 +88,7 @@ fn a_query_goes_through_search_with_no_tag() {
 
     let error = gh
         .tracker()
-        .issues(&repo(), Mark::Build, &filter, Some("\"tag\""))
+        .issues(&repo(), Mark::Requested, &filter, Some("\"tag\""))
         .unwrap_err();
 
     let call = &gh.calls()[0];
@@ -134,7 +134,7 @@ fn a_rate_limit_waits_a_refusal_is_final_and_an_unreachable_github_retries() {
     let tracker = gh.tracker();
 
     let limited = tracker.issue(&repo(), "6").unwrap_err();
-    let forbidden = tracker.mark(&repo(), "1", Mark::Build).unwrap_err();
+    let forbidden = tracker.mark(&repo(), "1", Mark::Requested).unwrap_err();
     let unreachable = tracker.issue(&repo(), "6").unwrap_err();
 
     assert_eq!(
@@ -158,7 +158,7 @@ fn marks_comments_and_closing_change_the_issue_and_a_missing_label_is_no_failure
     let github = gh.tracker();
 
     github.mark(&repo(), "12", Mark::Working).unwrap();
-    github.unmark(&repo(), "12", Mark::Build).unwrap();
+    github.unmark(&repo(), "12", Mark::Requested).unwrap();
     github
         .comment(&repo(), "12", "atelier started a builder")
         .unwrap();
@@ -222,7 +222,12 @@ fn a_repository_that_is_not_owner_and_name_is_refused_before_any_call() {
     let github = gh.tracker();
 
     for name in ["atelier", "/atelier", "StevenJPx2/", "a/b/c"] {
-        let error = github.issues(&Repo(name.into()), Mark::Build, &Filter::default(), None);
+        let error = github.issues(
+            &Repo(name.into()),
+            Mark::Requested,
+            &Filter::default(),
+            None,
+        );
 
         assert!(error.unwrap_err().is_permanent(), "{name}");
     }

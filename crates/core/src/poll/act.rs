@@ -8,7 +8,7 @@ use crate::{
     Run, RunContext, Seen, Started, Tracker, step,
 };
 
-/// The pipeline the build mark starts.
+/// The pipeline the trigger mark starts.
 pub const TRIGGERED: &str = "build";
 
 /// The most moves one run makes in one poll. A start takes a few for each
@@ -226,7 +226,7 @@ fn next_event(
         _ => {}
     }
 
-    let requested = seen.open && seen.marks.has(crate::Mark::Build);
+    let requested = seen.open && seen.marks.has(crate::Mark::Requested);
     let unmarked = !seen.marks.has(crate::Mark::Working);
 
     let event = match run.phase {

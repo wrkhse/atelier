@@ -31,7 +31,7 @@ let tracker = github.tracker(&settings)?;
 let repo = Repo("StevenJPx2/chauffeur".into());
 let mine = Filter { assignee: Some("StevenJPx2".into()), ..Filter::default() };
 
-let listing = tracker.issues(&repo, Mark::Build, &mine, Some("W/\"f235c4…\""))?;
+let listing = tracker.issues(&repo, Mark::Requested, &mine, Some("W/\"f235c4…\""))?;
 // GET repos/StevenJPx2/chauffeur/issues?state=open&per_page=100
 //     &labels=atelier%3Abuild&assignee=StevenJPx2, If-None-Match: W/"f235c4…"
 // → Listing::Unchanged
