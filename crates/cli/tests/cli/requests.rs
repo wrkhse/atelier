@@ -311,7 +311,7 @@ uses = "git.worktree"
 [[pipeline.build.step]]
 id = "wait"
 uses = "atelier.command"
-run = "sleep 120"
+run = "sleep 30"
 "#,
     );
     let daemon = sandbox.daemon();
@@ -364,13 +364,13 @@ run = "sleep 120"
         .status()
         .unwrap()
         .success();
-
-    assert!(
-        comment.contains(
-            "it started but its identity was never recorded, so atelier sent it no signal"
-        ),
-        "{comment}"
+    let running_in = format!(
+        "it started but its identity was never recorded; atelier sent no signal, \
+         and the command may still be running in {}",
+        worktree(&sandbox).display()
     );
+
+    assert!(comment.contains(&running_in), "{comment}");
     assert!(alive, "an unrecorded command's group was signalled");
 }
 #[test]
