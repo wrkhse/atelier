@@ -358,12 +358,11 @@ malformed record, a leader outside `2..=i32::MAX`, or a command that started
 but never published its identity fails closed: `observe` settles `failed`
 with the reason, which reaches the run's comment, and `stop` sends nothing
 and returns no error, so the run still ends. That reason ends
-`<what>; atelier sent no signal, and the command may still be running in
-<worktree>`, and `stop`'s log line puts the folder before it; both say
-`in its worktree` when the folder records no worktree, and `<what>` names
-the record that could not name a leader. When `signal_group` refuses a
-target, the kill and abandon log `<folder>: atelier refused to signal group
-<n>; the command may still be running in <worktree>`.
+`<what>; atelier sent no signal, and the command may still be running in <worktree>`,
+and `stop`'s log line puts the folder before it; both say `in its worktree`
+when the folder records no worktree, and `<what>` names the record that could not
+name a leader. When `signal_group` refuses a target, the kill and abandon log
+`<folder>: atelier refused to signal group <n>; the command may still be running in <worktree>`.
 
 ```rust
 pub struct Identity {
@@ -871,9 +870,9 @@ status is written and a stop sends nothing, so background processes it left
 behind are not signalled. Neither are descendants that leave the group or
 outlive a leader killed by something else. An unrecorded or legacy command is
 left running, and named in the log and the run's report, each ending
-`; atelier sent no signal, and the command may still be running in
-<worktree>`, or `in its worktree` when the folder records no worktree. This
-is not containment and not a proof of ownership. Tests that start or signal
+`; atelier sent no signal, and the command may still be running in <worktree>`,
+or `in its worktree` when the folder records no worktree. This is not
+containment and not a proof of ownership. Tests that start or signal
 processes run only in the contained CI gates.
 
 On the development Mac, only editing, `git`, `gh` and `cargo fmt` are allowed.

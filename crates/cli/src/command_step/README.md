@@ -58,11 +58,11 @@ zombie as gone.
 
 A crash between the spawn and the rename leaves `started` and `worktree`,
 and perhaps `identity.tmp`, without `identity`: the command may still be
-running, and atelier sends it no signal. `observe` settles the step failed
-with a reason that says it started but its identity was never recorded.
-The reason ends `; atelier sent no signal, and the command may still be
-running in <worktree>`, or `in its worktree` when no worktree is recorded;
-`stop` sends nothing, and its log line ends the same way.
+running, and atelier sends it no signal. `observe` settles the step failed with
+a reason that says it started but its identity was never recorded. The reason ends
+`; atelier sent no signal, and the command may still be running in <worktree>`,
+or `in its worktree` when no worktree is recorded; `stop` sends nothing, and
+its log line ends the same way.
 
 ```text
 atelier-command-identity 1
@@ -78,11 +78,11 @@ stopped before it exited, as on a restart of the computer"; a leader that is
 gone settles `failed` with "it stopped before it exited". Neither sends a
 signal. A folder holding only the older `group` file, a malformed record, or
 a leader outside `2..=i32::MAX` fails closed: `observe` settles `failed`
-with the same ending, and `stop` sends nothing and logs it. A running
-command past its limit is signalled through `/bin/kill -KILL -- -<leader>`,
-which `atelier_command::signal_group` builds. When that refuses a target,
-the kill and a start's abandon log `<folder>: atelier refused to signal
-group <n>; the command may still be running in <worktree>`.
+with the same ending, and `stop` sends nothing and logs it.
+A running command past its limit is signalled through
+`/bin/kill -KILL -- -<leader>`, which `atelier_command::signal_group` builds.
+When that refuses a target, the kill and a start's abandon log
+`<folder>: atelier refused to signal group <n>; the command may still be running in <worktree>`.
 
 Linux reads the boot identity from `/proc/sys/kernel/random/boot_id`, and
 the leader's start ticks, group and state from `/proc/<pid>/stat`. macOS
