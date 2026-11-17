@@ -99,9 +99,9 @@ both say 5.
 
 ## Host mutation signal incident
 
-**Status: Containment required for CI and for developers; waived for the
-installed daemon's pipelines on the Mac by the owner's decision of
-2026-11-14.** On
+**Status: Containment required for CI, developers and the installed
+daemon's proof runs; mutation, fuzzing and process-signalling checks run
+only in contained CI (owner's proof contract, 2026-11-17).** On
 2026-11-13, local mutation testing for PR #57 changed command-group validation
 to return group 1. The cleanup regression reached `kill -KILL -- -1` on the
 Mac: a broadcast target, not one command's process group. The mutation log
@@ -127,29 +127,28 @@ its diff selects no mutant, the gate mutates the canary
 diff coverage, so the report is never empty.
 
 On this Mac, contributors and builders only edit, use `git` and `gh`, and
-run `cargo fmt`. Every other check, including the site build, belongs in CI,
-except the installed daemon's pipeline runs described below. The daemon stays unloaded and disabled until the owner approves the slice 3
+run `cargo fmt`. Every other check, including the site build, belongs in CI.
+The daemon stays unloaded and disabled until the owner approves the slice 3
 candidate installation and start. Linux containment does not establish
 Darwin-specific signalling behavior; disposable macOS verification requires
 separate approval. Historical audit results above retain their original scope.
 
-By the owner's decision of 2026-11-14, end-to-end proofs use the real
-projects: once the slice 3 candidate is installed, the daemon runs the
-pipelines of `wrkhse/atelier` and `wrkhse/chauffeur` on the Mac, and their
-gates, mutants included, run there as the user, with no container.
+By the owner's proof contract of 2026-11-17, end-to-end proofs use the real
+projects `wrkhse/atelier` and `wrkhse/chauffeur`: the installed daemon
+orchestrates their issues, branches, agent sessions and pull requests, and
+their gates, mutants and Kani included, run in contained CI, which the
+daemon observes through `forge.checks`. A local command step in the proof
+is benign, bounded and confined to repository data.
 
-What `signal_group` guards there is narrow: the signals atelier itself
-sends, the deadline kill in `crates/command/src/lib.rs` and a background
-step's cleanup in `crates/cli/src/command_step/run.rs`. No path may build a
-kill or group signal without it. It does nothing for the code under test. A
-project's own commands and tests run unguarded, and in atelier's own mutants
-only atelier's signal paths are guarded. Damage to files, credentials or the
-network is guarded nowhere.
+`signal_group` guards only the signals atelier itself sends: the deadline
+kill in `crates/command/src/lib.rs` and a background step's time-limit
+kill and cleanup in `crates/cli/src/command_step/run.rs`. No path may
+build a group signal without it. It is defence in depth, not containment:
+it does nothing for code under test, a mutant can change the guard itself,
+and damage to files, credentials or the network is guarded nowhere.
 
-Today `wrkhse/chauffeur` declares no command gates: its main's
-`.atelier/config.toml` holds only `base = "v2"`, and `v2` has no gate
-config. Its tests signal only the daemons they start. Any command gate it adds
-later runs on the Mac unguarded.
+`wrkhse/chauffeur`'s main declares no command gates today; any it adds runs
+in contained CI under the same contract.
 
 ## The machines
 
