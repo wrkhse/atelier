@@ -14,7 +14,7 @@ validates the Kani and mutation reports, and a missing or empty one fails.
 describes it. Never weaken a gate or exclude signalling code to obtain a pass.
 
 Developers never run gates on the Mac. By the owner's proof contract of
-2026-11-17, the installed daemon orchestrates real repositories, while
+2026-11-15, the installed daemon orchestrates real repositories, while
 mutation, fuzzing and process-signalling checks run only in contained CI,
 which the daemon observes through `forge.checks`. A local command step in
 the proof is benign, bounded and confined to repository data.
