@@ -110,8 +110,9 @@ impl Signal {
     }
 }
 
-/// Prepares `kill <signal> -- -<group>` for one process group without
+/// Prepares `/bin/kill <signal> -- -<group>` for one process group without
 /// starting it, or `None` when the target would reach more than that group.
+/// The program is absolute so `PATH` cannot substitute another executable.
 ///
 /// Every group signal atelier sends is built here, so the guard holds at
 /// both the deadline kill above and a background step's cleanup.
@@ -121,7 +122,7 @@ impl Signal {
 ///
 /// let command = signal_group(Signal::Kill, 4242).unwrap();
 ///
-/// assert_eq!(command.get_program(), "kill");
+/// assert_eq!(command.get_program(), "/bin/kill");
 /// assert!(signal_group(Signal::Kill, 1).is_none());
 /// ```
 #[must_use]
@@ -133,7 +134,7 @@ pub fn signal_group(signal: Signal, group: u64) -> Option<Command> {
         return None;
     }
 
-    let mut command = Command::new("kill");
+    let mut command = Command::new("/bin/kill");
     command
         .args([signal.option(), "--", &format!("-{group}")])
         .stderr(Stdio::null());
@@ -207,7 +208,7 @@ mod tests {
                 let args: Vec<&OsStr> = command.get_args().collect();
                 let target = format!("-{group}");
 
-                assert_eq!(command.get_program(), OsStr::new("kill"));
+                assert_eq!(command.get_program(), OsStr::new("/bin/kill"));
                 assert_eq!(
                     args,
                     [OsStr::new(option), OsStr::new("--"), OsStr::new(&target)]
