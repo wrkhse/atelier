@@ -319,10 +319,16 @@ folder holds `started`, `worktree`, `identity`, `output` and `exit`; a start
 writes `started` and `worktree` before it spawns the command there, and a
 later poll reads how it ended. A start on a folder that already exists first
 stops whatever command the folder still names, through the same identity
-check, then empties it, so a start repeated after a daemon crash cannot
-orphan a running command. It settles `passed` on exit 0, and `failed` on any
-other exit, past its limit, which kills its whole group, or when it stopped
-without an exit status; each says why, with the last 20 lines it printed.
+check, so a start repeated after a daemon crash cannot orphan a running
+command. It empties the folder only once the record no longer names anything
+atelier could not verify. A legacy record (a `group` file and no identity),
+an unpublished identity or an invalid one is kept: the start fails with a
+transient error saying the command an earlier start left in the folder
+cannot be stopped, followed by the unsignalled text, and the folder stays as
+the only trace of a command that may still run. The command settles `passed`
+on exit 0, and `failed` on any other exit, past its limit, which kills its
+whole group, or when it stopped without an exit status; each says why, with
+the last 20 lines it printed.
 `ATELIER_BASE` is `origin/<base>`, as for the gates.
 
 ```rust
@@ -357,7 +363,9 @@ gone, settles `failed` without a signal. A legacy folder with only `group`, a
 malformed record, a leader outside `2..=i32::MAX`, or a command that started
 but never published its identity fails closed: `observe` settles `failed`
 with the reason, which reaches the run's comment, and `stop` sends nothing
-and returns no error, so the run still ends. That reason ends
+and returns no error, so the run still ends. A start over such a folder
+fails with a transient error and keeps it, since the folder is the only
+trace of a command that may still run. `observe`'s reason ends
 `<what>; atelier sent no signal, and the command may still be running in <worktree>`,
 and `stop`'s log line puts the folder before it; both say `in its worktree`
 when the folder records no worktree, and `<what>` names the record that could not
@@ -854,9 +862,11 @@ and 1 and numbers `kill` would truncate to them, independently of file
 parsing. It also refuses atelier's own pid, its parent's pid and its own
 process group, keeping the group only from a read that succeeded, so a
 failed read refuses every target until a later read succeeds; on macOS that
-read gives up after 5 s and needs `ps` to succeed. Its regression constructs
-commands without executing them. This guard does not replace process
-isolation. [The incident record](../../audits/atelier.md#host-mutation-signal-incident)
+read waits for its `ps` child until a 5 s deadline, reads its output only
+after it exited successfully, and kills and reaps only that child. Its
+regression constructs commands without executing them. This guard does not
+replace process isolation.
+[The incident record](../../audits/atelier.md#host-mutation-signal-incident)
 keeps the evidence and containment rule.
 
 The identity record narrows which process a signal reaches; it does not
@@ -914,9 +924,10 @@ assert run was Running, next is not      implies it interrupts and
 
 - `atelier.command`: a passing command, a failing one, and one past its time
   limit; a stale or tampered identity, from another boot or another start,
-  settles without a signal; a legacy or malformed record fails closed; a
-  start repeated on a folder whose record still names a running command
-  stops it; and the leader is reaped once the command ends.
+  settles without a signal; a legacy or malformed record fails closed, and a
+  start repeated over one fails and keeps it; a start repeated on a folder
+  whose record still names a running command stops it; and the leader is
+  reaped once the command ends.
 - `atelier finish` and `atelier stop` against a running daemon in a temporary
   state folder.
 - An older `state.json` read by the new daemon, with each run where it was.

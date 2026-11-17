@@ -113,7 +113,8 @@ refuses 0, 1 and any number `kill` would truncate to them, independently of
 parsing. It also refuses atelier's own pid, its parent's pid and its own
 process group, keeping the group only from a read that succeeded, so a
 failed read refuses every target until a later read succeeds; on macOS that
-read gives up after 5 s and needs `ps` to succeed.
+read waits for its `ps` child until a 5 s deadline, reads its output only
+after it exited successfully, and kills and reaps only that child.
 The deadline kill and a background step's cleanup both use it.
 When it refuses a target, the kill and a start's abandon log
 `<folder>: atelier refused to signal group <n>; the command may still be running in <worktree>`.

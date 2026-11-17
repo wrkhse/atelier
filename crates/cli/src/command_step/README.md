@@ -29,8 +29,13 @@ run::observe(&folder, &step.settings)?;
   and `exit`.
 - **Starting again.** A start on a folder that already exists first stops
   whatever command the folder still names, through the same identity check,
-  then empties it, so a start repeated after a daemon crash cannot orphan a
-  running command.
+  so a start repeated after a daemon crash cannot orphan a running command.
+  It empties the folder only once the record no longer names anything atelier
+  could not verify. A legacy record (a `group` file and no identity), an
+  unpublished identity or an invalid one is kept, and the start fails with a
+  transient error saying the command an earlier start left in the folder
+  cannot be stopped, followed by the unsignalled text. The folder stays,
+  since it is the only trace of a command that may still run.
 - **Its own process group,** not the daemon's, so a daemon restarted while it
   runs leaves it running. While its leader runs, its limit signals every
   process still in that group, not descendants that create a different group
@@ -76,9 +81,11 @@ boot, the leader alive and not a zombie, the same start identity, and still
 leading its group. A record from another boot settles `failed` with "it
 stopped before it exited, as on a restart of the computer"; a leader that is
 gone settles `failed` with "it stopped before it exited". Neither sends a
-signal. A folder holding only the older `group` file, a malformed record, or
-a leader outside `2..=i32::MAX` fails closed: `observe` settles `failed`
-with the same ending, and `stop` sends nothing and logs it.
+signal. A folder holding only the older `group` file, an unpublished
+identity, a malformed record, or a leader outside `2..=i32::MAX` fails
+closed: `observe` settles `failed` with the same ending, `stop` sends
+nothing and logs it, and a start over it fails with a transient error and
+keeps the folder.
 A running command past its limit is signalled through
 `/bin/kill -KILL -- -<leader>`, which `atelier_command::signal_group` builds.
 When that refuses a target, the kill and a start's abandon log
