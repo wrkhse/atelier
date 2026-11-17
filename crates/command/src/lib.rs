@@ -523,6 +523,11 @@ mod tests {
         let mut child = short_child("sleep 1; echo 42");
 
         assert_eq!(read_child(&mut child, Duration::from_millis(100)), None);
+        // The helper kills and reaps only the child it owns, so no later wait is needed.
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_))),
+            "the child this call owned is reaped"
+        );
     }
 
     #[test]

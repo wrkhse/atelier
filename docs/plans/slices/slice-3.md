@@ -320,15 +320,21 @@ writes `started` and `worktree` before it spawns the command there, and a
 later poll reads how it ended. A start on a folder that already exists first
 stops whatever command the folder still names, through the same identity
 check, so a start repeated after a daemon crash cannot orphan a running
-command. It empties the folder only once the record no longer names anything
-atelier could not verify. A legacy record (a `group` file and no identity),
-an unpublished identity or an invalid one is kept: the start fails with a
-transient error saying the command an earlier start left in the folder
-cannot be stopped, followed by the unsignalled text, and the folder stays as
-the only trace of a command that may still run. The command settles `passed`
-on exit 0, and `failed` on any other exit, past its limit, which kills its
-whole group, or when it stopped without an exit status; each says why, with
-the last 20 lines it printed.
+command. It empties the folder only once a fresh check finds the leader gone
+or its record from another boot. While the record still names a leader that
+is stopping, the start fails with a transient error saying the command an
+earlier start left in the folder is still stopping, keeps the folder until
+it is gone, and retries on the next poll. A legacy record (a `group` file
+and no identity), an unpublished identity or an invalid one is kept: the
+start fails with a transient error saying the command an earlier start left
+in the folder cannot be stopped, followed by the unsignalled text, and the
+folder stays as the only trace of a command that may still run. A start
+that cannot spawn removes the folder it just made, since nothing ran; one
+abandoned because its identity could not be recorded removes the folder
+once its group kill was delivered, keeping it only when the signal was
+refused. The command settles `passed` on exit 0, and `failed` on any other
+exit, past its limit, which kills its whole group, or when it stopped
+without an exit status; each says why, with the last 20 lines it printed.
 `ATELIER_BASE` is `origin/<base>`, as for the gates.
 
 ```rust
@@ -365,11 +371,19 @@ but never published its identity fails closed: `observe` settles `failed`
 with the reason, which reaches the run's comment, and `stop` sends nothing
 and returns no error, so the run still ends. A start over such a folder
 fails with a transient error and keeps it, since the folder is the only
-trace of a command that may still run. `observe`'s reason ends
+trace of a command that may still run. While a start keeps failing this way,
+the run waits at that step; a person ends the run with
+`atelier stop "<pipeline> <issue>"`, and the folder stays for them to check
+and remove, since a later run starts in its own generation's folder.
+`observe`'s reason ends
 `<what>; atelier sent no signal, and the command may still be running in <worktree>`,
-and `stop`'s log line puts the folder before it; both say `in its worktree`
-when the folder records no worktree, and `<what>` names the record that could not
-name a leader. When `signal_group` refuses a target, the kill and abandon log
+and `stop`'s log line puts the folder before it, logged once for that folder
+and reason rather than on every poll; both say `in its worktree` when the
+folder records no worktree, and `<what>` names the record that could not
+name a leader. A kill reports whether a signal was delivered, so a refused
+signal or a failed `/bin/kill` is never read as a stop. A start's fresh
+check keeps a folder whose leader still runs. When `signal_group` refuses a
+target, the kill and abandon log
 `<folder>: atelier refused to signal group <n>; the command may still be running in <worktree>`.
 
 ```rust
@@ -874,12 +888,14 @@ contain the command. macOS resolves a start time to the second, and checking
 before `/bin/kill` runs leaves a window in which the leader can exit and its
 number be reused. A boot identity the system cannot report fails closed, and
 so does a macOS value that is not a UUID: a start kills the command it
-began, and a check sends no signal. A limit or a stop reaches the group only
-while its leader runs. Once the command's top level exits normally, its exit
-status is written and a stop sends nothing, so background processes it left
-behind are not signalled. Neither are descendants that leave the group or
-outlive a leader killed by something else. An unrecorded or legacy command is
-left running, and named in the log and the run's report, each ending
+began and removes its folder once that kill was delivered, keeping it when
+the signal was refused, and a check sends no signal. A limit or a stop
+reaches the group only while its leader runs. Once the command's top level
+exits normally, its exit status is written and a stop sends nothing, so
+background processes it left behind are not signalled. Neither are
+descendants that leave the group or outlive a leader killed by something
+else. An unrecorded or legacy command is left running, and named in the log,
+once for that folder and reason, and in the run's report, each ending
 `; atelier sent no signal, and the command may still be running in <worktree>`,
 or `in its worktree` when the folder records no worktree. This is not
 containment and not a proof of ownership. Tests that start or signal
@@ -926,8 +942,12 @@ assert run was Running, next is not      implies it interrupts and
   limit; a stale or tampered identity, from another boot or another start,
   settles without a signal; a legacy or malformed record fails closed, and a
   start repeated over one fails and keeps it; a start repeated on a folder
-  whose record still names a running command stops it; and the leader is
-  reaped once the command ends.
+  whose record still names a running command stops it; a record whose leader
+  is still stopping keeps the folder until a fresh check finds it gone; a
+  refused signal is not read as a stop; a spawn that fails leaves no folder,
+  and an abandoned start removes its folder once the kill was delivered; the
+  unsignalled line is logged once for that folder and reason; and the leader
+  is reaped once the command ends.
 - `atelier finish` and `atelier stop` against a running daemon in a temporary
   state folder.
 - An older `state.json` read by the new daemon, with each run where it was.

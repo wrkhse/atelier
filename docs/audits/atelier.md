@@ -118,6 +118,8 @@ after it exited successfully, and kills and reaps only that child.
 The deadline kill and a background step's cleanup both use it.
 When it refuses a target, the kill and a start's abandon log
 `<folder>: atelier refused to signal group <n>; the command may still be running in <worktree>`.
+A kill reports whether a signal was delivered, so a refusal or a failed
+`/bin/kill` is never read as a stop.
 Its regression only prepares a command, so removing the guard produces an
 assertion failure without invoking `kill`. A guard is defense in depth, not
 containment: mutation can change the guard too.
@@ -128,11 +130,13 @@ boot, the leader alive and not a zombie, the same start identity, and still
 leading its group. A stale, legacy or malformed record fails closed. The
 boot is the kernel's boot id on Linux and `kern.bootsessionuuid` on macOS; a
 missing boot identity fails closed, as does a macOS value that is not a
-UUID: a start kills the command it began, and a check sends no signal. On
-macOS a start time resolves to the second, and checking before running
-`/bin/kill` leaves a window in which the leader can exit and its number be
-reused. An unrecorded or legacy command is left running, and named in the log
-and the run's report, each ending
+UUID: a start kills the command it began and removes its folder once that
+kill was delivered, keeping it when the signal was refused, and a check
+sends no signal. On macOS a start time resolves to the second, and checking
+before running `/bin/kill` leaves a window in which the leader can exit and
+its number be reused. An unrecorded or legacy command is left running, and
+named in the run's report and, once for that folder and reason, in the log,
+each ending
 `; atelier sent no signal, and the command may still be running in <worktree>`,
 or `in its worktree` when the folder records no worktree. The record is not
 containment and not a proof of ownership.
