@@ -12,7 +12,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use atelier_command::{Signal, signal_group};
@@ -38,9 +38,42 @@ const TAIL_BYTES: u64 = 4096;
 /// How many of those last lines the outcome keeps.
 const TAIL_LINES: usize = 20;
 
+/// The most folders the log remembers an unsignalled line for: the oldest
+/// is dropped first, so a daemon that sees many folders stays bounded.
+const UNSIGNED_KEPT: usize = 256;
+
+/// What the log already said about a folder, and why.
+#[derive(Default)]
+struct Unsigned(Vec<(PathBuf, String)>);
+
+impl Unsigned {
+    /// Whether this reason for `folder` is new to the log, remembering it.
+    fn note(&mut self, folder: &Path, what: &str) -> bool {
+        let entry = (folder.to_path_buf(), what.to_owned());
+
+        if self.0.contains(&entry) {
+            return false;
+        }
+
+        self.0.push(entry);
+
+        if self.0.len() > UNSIGNED_KEPT {
+            self.0.remove(0);
+        }
+
+        true
+    }
+
+    /// Forgets a folder atelier has emptied, so the log's memory of it
+    /// does not outlive its record.
+    fn forget(&mut self, folder: &Path) {
+        self.0.retain(|(kept, _)| kept != folder);
+    }
+}
+
 /// The unsignalled lines the log already has, with the reason each gave,
 /// so a poll that finds the same record does not repeat one.
-static UNSIGNED: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+static UNSIGNED: Mutex<Unsigned> = Mutex::new(Unsigned(Vec::new()));
 
 /// Starts the step's command in `worktree`, keeping what later polls read
 /// in `folder`, emptied first, so a round started again starts clean. A
@@ -120,7 +153,8 @@ fn spawn(folder: &Path, worktree: &Path, base: &str, run: &str) -> std::io::Resu
 /// leader it names gone. A folder whose command is still stopping, or whose
 /// record is a Legacy, Unpublished or Invalid one, is kept, since no later
 /// poll could stop what it names; the error is transient, so a person can
-/// look at the folder and a later poll retries.
+/// look at the folder and a later poll retries. An emptied folder is
+/// forgotten, so the log's memory of it does not outlive its record.
 fn clear(folder: &Path) -> Result<(), PluginError> {
     stop(folder)?;
 
@@ -157,8 +191,12 @@ fn clear(folder: &Path) -> Result<(), PluginError> {
         }
     }
 
-    fs::remove_dir_all(folder)
-        .map_err(|error| PluginError::transient(format!("emptying {}: {error}", folder.display())))
+    fs::remove_dir_all(folder).map_err(|error| {
+        PluginError::transient(format!("emptying {}: {error}", folder.display()))
+    })?;
+    forget(folder);
+
+    Ok(())
 }
 
 /// A record the start cannot verify and stop, kept rather than deleted:
@@ -336,23 +374,23 @@ fn unsigned(folder: &Path, what: &str) {
     }
 }
 
+/// The lines the log already has. A poisoned lock still holds every answer
+/// it gave before: nothing here panics while it is held.
+fn remembered() -> MutexGuard<'static, Unsigned> {
+    match UNSIGNED.lock() {
+        Ok(seen) => seen,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// Whether this reason for `folder` is new to the log, remembering it.
 fn note(folder: &Path, what: &str) -> bool {
-    let entry = (folder.to_path_buf(), what.to_owned());
-    let mut seen = match UNSIGNED.lock() {
-        Ok(seen) => seen,
-        // The list only grows, so a poisoned lock still holds every answer
-        // it gave before.
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    remembered().note(folder, what)
+}
 
-    if seen.contains(&entry) {
-        return false;
-    }
-
-    seen.push(entry);
-
-    true
+/// Forgets a folder atelier has emptied.
+fn forget(folder: &Path) {
+    remembered().forget(folder)
 }
 
 /// What every text about a command atelier left unsignalled says: `what`
@@ -1180,6 +1218,44 @@ mod tests {
         assert!(note(&folder, unpublished));
         assert!(!note(&folder, unpublished));
         assert!(note(std::path::Path::new("/elsewhere"), legacy));
+    }
+
+    /// The list keeps only `UNSIGNED_KEPT` folders: adding one past that
+    /// drops the oldest, so a daemon that sees many folders stays bounded.
+    #[test]
+    fn a_capped_list_drops_its_oldest() {
+        let mut list = Unsigned::default();
+
+        for index in 0..UNSIGNED_KEPT {
+            assert!(list.note(
+                Path::new(&format!("/cap/{index}")),
+                "it has no identity record"
+            ));
+        }
+
+        assert!(!list.note(Path::new("/cap/0"), "it has no identity record"));
+        assert!(list.note(Path::new("/cap/overflow"), "it has no identity record"));
+        assert!(
+            !list.note(Path::new("/cap/1"), "it has no identity record"),
+            "the next oldest was dropped with the oldest"
+        );
+        assert!(
+            list.note(Path::new("/cap/0"), "it has no identity record"),
+            "a folder dropped from the list is new again"
+        );
+    }
+
+    /// A folder atelier has emptied is forgotten, so the same reason is a
+    /// new line if the folder is ever unsignalled again.
+    #[test]
+    fn a_forgotten_folder_is_new_again() {
+        let mut list = Unsigned::default();
+        let folder = PathBuf::from("/forgotten");
+        let what = "it has no identity record";
+
+        assert!(list.note(&folder, what));
+        list.forget(&folder);
+        assert!(list.note(&folder, what));
     }
 
     /// A record whose leader has gone empties the folder, so the next start
