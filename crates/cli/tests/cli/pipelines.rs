@@ -180,3 +180,59 @@ fn a_written_build_runs_its_command_in_the_worktree_and_closes_the_issue_with_ea
             .contains("build github#12 Running → Done: deps settled passed")
     );
 }
+
+// Measurement only: runs the command-step test 40 times beside the rest, so a
+// flake shows as a count of failures.
+macro_rules! repeat_written_build {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                a_written_build_runs_its_command_in_the_worktree_and_closes_the_issue_with_each_outcome();
+            }
+        )*
+    };
+}
+
+repeat_written_build!(
+    written_build_01,
+    written_build_02,
+    written_build_03,
+    written_build_04,
+    written_build_05,
+    written_build_06,
+    written_build_07,
+    written_build_08,
+    written_build_09,
+    written_build_10,
+    written_build_11,
+    written_build_12,
+    written_build_13,
+    written_build_14,
+    written_build_15,
+    written_build_16,
+    written_build_17,
+    written_build_18,
+    written_build_19,
+    written_build_20,
+    written_build_21,
+    written_build_22,
+    written_build_23,
+    written_build_24,
+    written_build_25,
+    written_build_26,
+    written_build_27,
+    written_build_28,
+    written_build_29,
+    written_build_30,
+    written_build_31,
+    written_build_32,
+    written_build_33,
+    written_build_34,
+    written_build_35,
+    written_build_36,
+    written_build_37,
+    written_build_38,
+    written_build_39,
+    written_build_40,
+);
