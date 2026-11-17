@@ -44,7 +44,13 @@ fn a_labelled_issue_gets_one_builder_across_polls_and_a_restart() {
     let daemon = sandbox.daemon();
     sandbox.wait("a builder", Sandbox::building);
     let before = listings(&sandbox);
-    sandbox.wait("a second poll", |sandbox| listings(sandbox) >= before + 2);
+    sandbox.wait("a second poll, reported", |sandbox| {
+        let log = sandbox.log();
+
+        listings(sandbox) >= before + 2
+            && log.contains(" StevenJPx2/demo build github#12 Untracked → Claiming: requested")
+            && log.contains(" StevenJPx2/demo build github#12 Running: worktree settled passed")
+    });
     drop(daemon);
 
     let restarted = sandbox.daemon();

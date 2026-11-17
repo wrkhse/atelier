@@ -151,8 +151,11 @@ fn a_written_build_runs_its_command_in_the_worktree_and_closes_the_issue_with_ea
     );
 
     let daemon = sandbox.daemon();
-    sandbox.wait("the run done", |sandbox| {
+    sandbox.wait("the run done and reported", |sandbox| {
         sandbox.phase("12").as_deref() == Some("done")
+            && sandbox
+                .log()
+                .contains("build github#12 Running → Done: deps settled passed")
     });
     drop(daemon);
 
