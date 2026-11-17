@@ -1,6 +1,7 @@
 //! `atelier.command`: a shell command a pipeline runs in the run's
 //! worktree, with a time limit.
 
+pub mod identity;
 pub mod run;
 
 use atelier_core::{

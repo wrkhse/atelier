@@ -2,31 +2,32 @@
 //! it, and reading how it ended on a later poll.
 //!
 //! Each start runs in its own folder, which holds what a later poll reads:
-//! `started`, the time it started; `group`, its process group; `output`,
-//! what it printed; and `exit`, its exit status once it ends. Its process
-//! group is not the daemon's, so a daemon restarted while it runs leaves it
-//! running.
+//! `started`, the time it started; `identity`, the record of its leader;
+//! `output`, what it printed; and `exit`, its exit status once it ends. Its
+//! process group is not the daemon's, so a daemon restarted while it runs
+//! leaves it running.
 
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use atelier_command::Signal;
+use atelier_command::{Signal, signal_group};
 use atelier_core::{Outcome, PluginError, Settings};
 
 use super::DEFAULT_TIMEOUT_SECS;
+use super::identity::{Identity, Leader};
 
-/// Starts the command in the background and returns: `$1` is the command
-/// and `$2` the worktree. The status file is renamed into place, so a
-/// poll never reads it half written.
-const SCRIPT: &str = r#"date +%s > started
-echo $$ > group
-here=$PWD
-( cd "$2" && sh -c "$1"; echo $? > "$here/exit.tmp"; mv "$here/exit.tmp" "$here/exit" ) \
-  < /dev/null > output 2>&1 &
+/// Runs the command: `$1` is the command and `$2` the worktree. The outer
+/// shell is the group leader and stays alive until the work ends, so the
+/// group lasts as long as the command does. The status file is renamed into
+/// place, so a poll never reads it half written.
+const SCRIPT: &str = r#"here=$PWD
+( cd "$2" && exec sh -c "$1" ) < /dev/null > output 2>&1
+echo $? > "$here/exit.tmp"
+mv "$here/exit.tmp" "$here/exit"
 "#;
 
 /// The most of a failed command's output its outcome tells: its end.
@@ -41,7 +42,8 @@ const TAIL_LINES: usize = 20;
 ///
 /// # Errors
 ///
-/// The folder cannot be made, or `sh` cannot start; both transient.
+/// The folder cannot be made, `sh` cannot start, or the leader's identity
+/// cannot be recorded; all transient.
 pub fn start(
     folder: &Path,
     worktree: &Path,
@@ -58,8 +60,10 @@ pub fn start(
     }
 
     fs::create_dir_all(folder).map_err(|error| failed("making", error))?;
+    fs::write(folder.join("started"), now().to_string())
+        .map_err(|error| failed("writing the start time in", error))?;
 
-    let status = Command::new("sh")
+    let mut child = Command::new("/bin/sh")
         .args(["-c", SCRIPT, "atelier-command", run])
         .arg(worktree)
         .current_dir(folder)
@@ -68,17 +72,28 @@ pub fn start(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0)
-        .status()
+        .spawn()
         .map_err(|error| failed("starting a command in", error))?;
+    let leader = child.id();
+    let recorded = Identity::of(leader).and_then(|identity| {
+        fs::write(folder.join("identity.tmp"), identity.render())
+            .map_err(|error| format!("writing it: {error}"))?;
+        fs::rename(folder.join("identity.tmp"), folder.join("identity"))
+            .map_err(|error| format!("publishing it: {error}"))
+    });
 
-    if status.success() {
-        Ok(())
-    } else {
-        Err(PluginError::transient(format!(
-            "the command in {} could not start",
+    if let Err(why) = recorded {
+        abandon(&mut child);
+
+        return Err(PluginError::transient(format!(
+            "the command in {} could not record its identity: {why}",
             folder.display()
-        )))
+        )));
     }
+
+    reap(child);
+
+    Ok(())
 }
 
 /// How the command started in `folder` ended, if it has: `passed` on
@@ -88,46 +103,73 @@ pub fn start(
 ///
 /// # Errors
 ///
-/// No command was started in `folder`.
+/// No command was started in `folder`, or its leader cannot be checked.
 pub fn observe(folder: &Path, settings: &Settings) -> Result<Option<Outcome>, PluginError> {
     if let Some(outcome) = ended(folder) {
         return Ok(Some(outcome));
     }
 
-    let read = |name: &str| {
-        fs::read_to_string(folder.join(name))
-            .ok()
-            .and_then(|text| text.trim().parse::<u64>().ok())
-    };
-    let (Some(started), Some(group)) = (read("started"), read("group")) else {
-        return Err(PluginError::permanent(format!(
-            "no command was started in {}",
-            folder.display()
-        )));
+    let identity = match record(folder) {
+        Ok(identity) => identity,
+        Err(Unrecorded::Absent) => {
+            return Err(PluginError::permanent(format!(
+                "no command was started in {}",
+                folder.display()
+            )));
+        }
+        Err(Unrecorded::Legacy) => {
+            return Ok(Some(failed(
+                "it has no identity record, so atelier sent it no signal".into(),
+            )));
+        }
+        Err(Unrecorded::Unreadable(error)) => {
+            return Err(PluginError::transient(format!(
+                "reading the command's identity in {}: {error}",
+                folder.display()
+            )));
+        }
+        Err(Unrecorded::Invalid(why)) => return Ok(Some(invalid(&why))),
     };
 
-    if !alive(group) {
-        return Ok(Some(ended(folder).unwrap_or_else(|| {
-            failed("it stopped before it exited, as on a restart of the computer".into())
-        })));
-    }
-
-    let timeout = settings
-        .number("", "timeout")
+    let started = fs::read_to_string(folder.join("started"))
         .ok()
-        .flatten()
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
-    let limit = u64::try_from(timeout).unwrap_or(u64::MAX);
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    let Some(started) = started else {
+        return Ok(Some(invalid("no start time")));
+    };
 
-    if now().saturating_sub(started) >= limit {
-        kill(group);
-        return Ok(Some(failed(format!(
-            "it ran past its {timeout}-second limit{}",
-            tail(folder)
-        ))));
+    match identity.check() {
+        Err(why) => Err(PluginError::transient(format!(
+            "checking the command's leader: {why}"
+        ))),
+        Ok(Leader::Rebooted) => Ok(Some(ended(folder).unwrap_or_else(|| {
+            failed("it stopped before it exited, as on a restart of the computer".into())
+        }))),
+        Ok(Leader::Gone) => {
+            Ok(Some(ended(folder).unwrap_or_else(|| {
+                failed("it stopped before it exited".into())
+            })))
+        }
+        Ok(Leader::Running) => {
+            let timeout = settings
+                .number("", "timeout")
+                .ok()
+                .flatten()
+                .unwrap_or(DEFAULT_TIMEOUT_SECS);
+            let limit = u64::try_from(timeout).unwrap_or(u64::MAX);
+
+            if now().saturating_sub(started) >= limit {
+                kill(identity.leader);
+
+                return Ok(Some(failed(format!(
+                    "it ran past its {timeout}-second limit{}",
+                    tail(folder)
+                ))));
+            }
+
+            Ok(None)
+        }
     }
-
-    Ok(None)
 }
 
 /// Cancels a command still running in this attempt's folder. A command
@@ -135,34 +177,108 @@ pub fn observe(folder: &Path, settings: &Settings) -> Result<Option<Outcome>, Pl
 ///
 /// # Errors
 ///
-/// Its group file cannot be read, or does not name a process group.
+/// A permanent error when the record is from an earlier version or cannot
+/// name a leader, and a transient error when the record cannot be read or
+/// the leader cannot be checked. Nothing is signalled in any error case.
 pub fn stop(folder: &Path) -> Result<(), PluginError> {
     if folder.join("exit").exists() {
         return Ok(());
     }
 
-    let text = match fs::read_to_string(folder.join("group")) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
+    let identity = match record(folder) {
+        Ok(identity) => identity,
+        Err(Unrecorded::Absent) => return Ok(()),
+        Err(Unrecorded::Legacy) => {
+            return Err(PluginError::permanent(
+                "the command has no identity record; atelier sent it no signal",
+            ));
+        }
+        Err(Unrecorded::Unreadable(error)) => {
             return Err(PluginError::transient(format!(
-                "reading command group: {error}"
+                "reading the command's identity: {error}"
+            )));
+        }
+        Err(Unrecorded::Invalid(why)) => {
+            return Err(PluginError::permanent(format!(
+                "the command's identity record is invalid: {why}; atelier sent it no signal"
             )));
         }
     };
-    let group = command_group(&text)?;
 
-    kill(u64::from(group));
-    Ok(())
+    match identity.check() {
+        Err(why) => Err(PluginError::transient(format!(
+            "checking the command's leader: {why}"
+        ))),
+        Ok(Leader::Running) => {
+            // Checking and then signalling leaves a window in which the
+            // leader can exit and its number be reused: the record narrows,
+            // but does not close, that window.
+            kill(identity.leader);
+
+            Ok(())
+        }
+        Ok(Leader::Rebooted | Leader::Gone) => Ok(()),
+    }
 }
 
-/// Refuses special signal targets before any process is signalled.
-fn command_group(text: &str) -> Result<u32, PluginError> {
-    text.trim()
-        .parse::<u32>()
-        .ok()
-        .filter(|group| *group > 1)
-        .ok_or_else(|| PluginError::permanent("the command's group is invalid"))
+/// What reading a command's identity found instead of one.
+enum Unrecorded {
+    /// Nothing was started in the folder.
+    Absent,
+    /// A record from an earlier version, which named the group.
+    Legacy,
+    /// The record could not be read.
+    Unreadable(std::io::Error),
+    /// The record cannot name a leader.
+    Invalid(String),
+}
+
+/// The identity of the command started in `folder`.
+fn record(folder: &Path) -> Result<Identity, Unrecorded> {
+    let text = match fs::read_to_string(folder.join("identity")) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(if folder.join("group").exists() {
+                Unrecorded::Legacy
+            } else {
+                Unrecorded::Absent
+            });
+        }
+        Err(error) => return Err(Unrecorded::Unreadable(error)),
+    };
+
+    Identity::parse(&text).map_err(Unrecorded::Invalid)
+}
+
+/// Ends a command whose identity could not be recorded: no later poll could
+/// find its group, so it must not outlive this call.
+fn abandon(child: &mut Child) {
+    if let Some(mut signal) = signal_group(Signal::Kill, u64::from(child.id())) {
+        let _ = signal.status();
+    }
+
+    // The child is unreaped, so its number cannot be reused yet.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Reaps the leader once it ends, so it is never a zombie.
+fn reap(mut child: Child) {
+    // An unreaped leader only shows as a zombie, which the identity check
+    // reads as gone once it exits, so a thread that cannot start is safe
+    // to ignore.
+    let _ = std::thread::Builder::new()
+        .name("atelier-command-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+}
+
+/// The outcome of a record that cannot name a leader: no signal is sent.
+fn invalid(why: &str) -> Outcome {
+    failed(format!(
+        "its identity record is invalid ({why}), so atelier sent it no signal"
+    ))
 }
 
 /// The outcome its exit status gives, once it has one.
@@ -215,19 +331,11 @@ fn tail(folder: &Path) -> String {
     }
 }
 
-/// Whether any process of the group is left.
-fn alive(group: u64) -> bool {
-    signal(Signal::Probe, group)
-}
-
 /// Kills the group's every process.
-fn kill(group: u64) {
-    signal(Signal::Kill, group);
-}
-
-fn signal(signal: Signal, group: u64) -> bool {
-    atelier_command::signal_group(signal, group)
-        .is_some_and(|mut command| command.status().is_ok_and(|status| status.success()))
+fn kill(group: u32) {
+    if let Some(mut signal) = signal_group(Signal::Kill, u64::from(group)) {
+        let _ = signal.status();
+    }
 }
 
 fn now() -> u64 {
@@ -289,18 +397,31 @@ mod tests {
             }
         }
 
+        /// The process group of the command started here.
         fn group(&self) -> u64 {
-            fs::read_to_string(self.folder().join("group"))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap()
+            let text = fs::read_to_string(self.folder().join("identity")).unwrap();
+            let identity = Identity::parse(&text).unwrap();
+
+            u64::from(identity.leader)
         }
     }
 
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Whether any process of the group is left.
+    fn alive(group: u64) -> bool {
+        signal_group(Signal::Probe, group)
+            .is_some_and(|mut signal| signal.status().is_ok_and(|status| status.success()))
+    }
+
+    /// Kills the group's every process.
+    fn kill(group: u64) {
+        if let Some(mut signal) = signal_group(Signal::Kill, group) {
+            let _ = signal.status();
         }
     }
 
@@ -382,30 +503,143 @@ mod tests {
     }
 
     #[test]
-    fn command_groups_exclude_special_signal_targets() {
-        // Check the parser without signalling: a broken guard must not
-        // turn this regression into a signal to unrelated processes.
-        for text in ["0", "1", "-1", "not a group", "4294967296"] {
-            assert!(command_group(text).unwrap_err().is_permanent(), "{text}");
+    fn abandoning_a_start_kills_its_whole_group() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = u64::from(child.id());
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(alive(group), "the group never started");
+
+        abandon(&mut child);
+
+        let begun = Instant::now();
+
+        while alive(group) && begun.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(20));
         }
 
-        assert_eq!(command_group(" 2\n").unwrap(), 2);
-        assert_eq!(command_group("4294967295").unwrap(), u32::MAX);
+        assert!(!alive(group), "abandon left the group running");
     }
 
     #[test]
-    fn cleanup_refuses_an_invalid_or_unreadable_group() {
-        let scratch = Scratch::new("bad-group");
-        fs::create_dir_all(scratch.folder()).unwrap();
-        fs::write(scratch.folder().join("group"), "0").unwrap();
+    fn the_identity_is_published_before_start_returns() {
+        let scratch = Scratch::new("identity");
+        scratch.start("sleep 30", None);
+        let folder = scratch.folder();
+        let text = fs::read_to_string(folder.join("identity")).unwrap();
+        let identity = Identity::parse(&text).unwrap();
 
-        let invalid = stop(&scratch.folder()).unwrap_err();
-        fs::remove_file(scratch.folder().join("group")).unwrap();
-        fs::create_dir(scratch.folder().join("group")).unwrap();
-        let unreadable = stop(&scratch.folder()).unwrap_err();
+        assert!(!folder.join("identity.tmp").exists());
+        assert_eq!(identity.check().unwrap(), Leader::Running);
 
-        assert!(invalid.is_permanent());
-        assert!(!unreadable.is_permanent());
+        kill(u64::from(identity.leader));
+    }
+
+    #[test]
+    fn a_mismatched_identity_fails_closed_without_signalling() {
+        let scratch = Scratch::new("mismatched");
+        let settings = scratch.start("sleep 30", Some(1));
+        let folder = scratch.folder();
+        let text = fs::read_to_string(folder.join("identity")).unwrap();
+        let real = Identity::parse(&text).unwrap();
+        let group = u64::from(real.leader);
+        let wrong_start = Identity {
+            leader: real.leader,
+            boot: real.boot,
+            start: "0".into(),
+        };
+        let wrong_boot = Identity {
+            leader: real.leader,
+            boot: "another boot".into(),
+            start: real.start,
+        };
+
+        fs::write(folder.join("identity"), wrong_start.render()).unwrap();
+        thread::sleep(Duration::from_millis(1100));
+
+        let stopped = observe(&folder, &settings).unwrap().unwrap();
+        assert_eq!(stopped.name, "failed");
+        assert_eq!(stopped.why, "it stopped before it exited");
+        assert!(stop(&folder).is_ok());
+        assert!(alive(group), "a mismatched identity signalled the group");
+
+        fs::write(folder.join("identity"), wrong_boot.render()).unwrap();
+
+        let rebooted = observe(&folder, &settings).unwrap().unwrap();
+        assert_eq!(
+            rebooted.why,
+            "it stopped before it exited, as on a restart of the computer"
+        );
+        assert!(alive(group), "a rebooted identity signalled the group");
+
+        kill(group);
+        let begun = Instant::now();
+        while alive(group) && begun.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(!alive(group));
+    }
+
+    #[test]
+    fn legacy_and_invalid_records_fail_closed() {
+        let scratch = Scratch::new("unrecorded");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("started"), "1").unwrap();
+        fs::write(folder.join("group"), "4242").unwrap();
+
+        let legacy = observe(&folder, &Settings::default()).unwrap().unwrap();
+        assert_eq!(
+            legacy.why,
+            "it has no identity record, so atelier sent it no signal"
+        );
+        assert!(stop(&folder).unwrap_err().is_permanent());
+
+        fs::write(
+            folder.join("identity"),
+            "atelier-command-identity 1\nleader 1\nboot b\nstart s\n",
+        )
+        .unwrap();
+
+        let invalid = observe(&folder, &Settings::default()).unwrap().unwrap();
+        assert!(
+            invalid.why.starts_with("its identity record is invalid"),
+            "{invalid:?}"
+        );
+        assert!(stop(&folder).unwrap_err().is_permanent());
+
+        fs::remove_file(folder.join("identity")).unwrap();
+        fs::create_dir(folder.join("identity")).unwrap();
+        assert!(!stop(&folder).unwrap_err().is_permanent());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_leader_is_reaped_once_the_command_ends() {
+        let scratch = Scratch::new("reaped");
+        let settings = scratch.start("true", None);
+        let leader = scratch.group();
+
+        assert_eq!(scratch.outcome(&settings).name, "passed");
+
+        let path = std::path::PathBuf::from(format!("/proc/{leader}"));
+        let begun = Instant::now();
+
+        while path.exists() {
+            assert!(
+                begun.elapsed() < Duration::from_secs(5),
+                "the leader was not reaped"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]
@@ -427,10 +661,7 @@ mod tests {
         let outcome = scratch.outcome(&settings);
 
         assert_eq!(outcome.name, "failed");
-        assert_eq!(
-            outcome.why,
-            "it stopped before it exited, as on a restart of the computer"
-        );
+        assert_eq!(outcome.why, "it stopped before it exited");
     }
 
     #[test]

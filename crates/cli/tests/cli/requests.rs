@@ -3,6 +3,8 @@
 
 use std::fs;
 
+use atelier_command::{Signal, signal_group};
+
 use crate::labelled;
 use crate::sandbox::{REPO, Sandbox};
 
@@ -266,10 +268,15 @@ run = "sleep 300 & wait"
     sandbox.wait("command running", |sandbox| {
         sandbox.step("12", "wait").as_deref() == Some("running")
     });
-    let group = sandbox
+    let identity = sandbox
         .home
-        .join(".local/state/atelier/steps/StevenJPx2/demo/issue-12/build/1/wait/group");
-    let group = fs::read_to_string(group).unwrap();
+        .join(".local/state/atelier/steps/StevenJPx2/demo/issue-12/build/1/wait/identity");
+    let identity = fs::read_to_string(identity).unwrap();
+    let leader = identity
+        .lines()
+        .find_map(|line| line.strip_prefix("leader "))
+        .and_then(|leader| leader.trim().parse::<u64>().ok())
+        .expect("an identity record names its leader");
     let stopped = sandbox.atelier(&["stop", "build github#12"]);
     assert!(
         stopped.status.success(),
@@ -281,15 +288,14 @@ run = "sleep 300 & wait"
     });
     drop(daemon);
 
-    let alive = std::process::Command::new("kill")
-        .args(["-0", "--", &format!("-{}", group.trim())])
-        .stderr(std::process::Stdio::null())
+    let alive = signal_group(Signal::Probe, leader)
+        .expect("a group to probe")
         .status()
         .unwrap()
         .success();
     if alive {
-        std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", group.trim())])
+        signal_group(Signal::Kill, leader)
+            .expect("a group to kill")
             .status()
             .unwrap();
     }

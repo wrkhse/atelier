@@ -338,6 +338,43 @@ pub fn observe(folder: &Path, settings: &Settings)
     -> Result<Option<Outcome>, PluginError>;
 ```
 
+The command's shell leads its own process group and stays alive until the
+command's top level ends, then writes `exit`; the leader's identity record
+sits beside it, written atomically before the start returns, with the
+leader's pid, boot and start identity. A reaper thread waits on the leader,
+so it is reaped once it ends; if that thread cannot start, the leader stays a
+zombie until the daemon exits, and the identity check reads a zombie as gone.
+Before `observe` or `stop` sends a signal, it checks the record: the same
+boot, the leader alive and not a zombie, the same start identity, and still
+leading its group. A record from another boot, or for a leader that is gone,
+settles `failed` without a signal; a legacy folder with only `group`, a
+malformed record, or a leader outside `2..=i32::MAX` fails closed: `observe`
+settles `failed` and says no signal was sent, and `stop` returns a permanent
+error.
+
+```rust
+pub struct Identity {
+    pub leader: u32,
+    pub boot: String,
+    pub start: String,
+}
+
+pub enum Leader {
+    Running,
+    Rebooted,
+    Gone,
+}
+
+impl Identity {
+    pub fn of(leader: u32) -> Result<Self, String>;
+    pub fn render(&self) -> String;
+    pub fn parse(text: &str) -> Result<Self, String>;
+    pub fn check(&self) -> Result<Leader, String>;
+}
+
+pub fn stop(folder: &Path) -> Result<(), PluginError>;
+```
+
 ### The `build` pipeline
 
 Built in, and written in the same terms. A project that writes
@@ -806,6 +843,16 @@ parsing; its regression constructs commands without executing them. This guard d
 replace process isolation. [The incident record](../../audits/atelier.md#host-mutation-signal-incident)
 keeps the evidence and containment rule.
 
+The identity record narrows which process a signal reaches; it does not
+contain the command. macOS resolves a start time to the second, and checking
+before `/bin/kill` runs leaves a window in which the leader can exit and its
+number be reused. A limit or a stop reaches the group only while its leader
+runs. Once the command's top level exits normally, its exit status is written
+and a stop sends nothing, so background processes it left behind are not
+signalled. Neither are descendants that leave the group or outlive a leader
+killed by something else. This is not containment and not a proof of ownership.
+Tests that start or signal processes run only in the contained CI gates.
+
 On the development Mac, only editing, `git`, `gh` and `cargo fmt` are allowed.
 No compile, Clippy, test, metadata, docs build, Kani, mutants or atelier binary
 runs locally. Linux CI does not prove
@@ -844,7 +891,9 @@ assert run was Running, next is not      implies it interrupts and
 ```
 
 - `atelier.command`: a passing command, a failing one, and one past its time
-  limit.
+  limit; a stale or tampered identity, from another boot or another start,
+  settles without a signal; a legacy or malformed record fails closed; and
+  the leader is reaped once the command ends.
 - `atelier finish` and `atelier stop` against a running daemon in a temporary
   state folder.
 - An older `state.json` read by the new daemon, with each run where it was.

@@ -115,6 +115,14 @@ regression only prepares a command, so removing the guard produces an
 assertion failure without invoking `kill`. A guard is defense in depth, not
 containment: mutation can change the guard too.
 
+A command step's group is identified by its retained leader's identity
+record, checked before any `observe` or `stop` sends a signal: the same
+boot, the leader alive and not a zombie, the same start identity, and still
+leading its group. A stale, legacy or malformed record fails closed. On
+macOS a start time resolves to the second, and checking before running
+`/bin/kill` leaves a window in which the leader can exit and its number be
+reused. The record is not containment and not a proof of ownership.
+
 The planner and every gate run on GitHub-hosted Linux runners inside
 non-root containers with private PID namespaces, dropped capabilities,
 no-new-privileges, no Docker socket or host network, no credentials, and
