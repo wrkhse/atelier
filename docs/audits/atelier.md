@@ -101,7 +101,7 @@ both say 5.
 
 **Status: Containment required for CI, developers and the installed
 daemon's proof runs; mutation, fuzzing and process-signalling checks run
-only in contained CI (owner's proof contract, 2026-11-17).** On
+only in contained CI (owner's proof contract, 2026-11-15).** On
 2026-11-13, local mutation testing for PR #57 changed command-group validation
 to return group 1. The cleanup regression reached `kill -KILL -- -1` on the
 Mac: a broadcast target, not one command's process group. The mutation log
@@ -148,7 +148,7 @@ candidate installation and start. Linux containment does not establish
 Darwin-specific signalling behavior; disposable macOS verification requires
 separate approval. Historical audit results above retain their original scope.
 
-By the owner's proof contract of 2026-11-17, end-to-end proofs use the real
+By the owner's proof contract of 2026-11-15, end-to-end proofs use the real
 projects `wrkhse/atelier` and `wrkhse/chauffeur`: the installed daemon
 orchestrates their issues, branches, agent sessions and pull requests, and
 their gates, mutants and Kani included, run in contained CI, which the
