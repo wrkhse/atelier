@@ -28,10 +28,7 @@ fn alive(leader: u64) -> bool {
         return true;
     };
 
-    match signal.status() {
-        Ok(status) => status.success(),
-        Err(_) => true,
-    }
+    signal.status().map_or(true, |status| status.success())
 }
 
 #[test]
