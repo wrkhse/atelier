@@ -110,18 +110,25 @@ Kani and mutant checks are not passing evidence.
 
 Every group signal is built by `atelier_command::signal_group`, which
 refuses 0, 1 and any number `kill` would truncate to them, independently of
-parsing; the deadline kill and a background step's cleanup both use it. Its
-regression only prepares a command, so removing the guard produces an
-assertion failure without invoking `kill`. A guard is defense in depth, not
-containment: mutation can change the guard too.
+parsing. It also refuses atelier's own pid, its parent's pid and its own
+process group, read once; with no group readable, it refuses every target.
+The deadline kill and a background step's cleanup both use it. Its regression
+only prepares a command, so removing the guard produces an assertion failure
+without invoking `kill`. A guard is defense in depth, not containment:
+mutation can change the guard too.
 
 A command step's group is identified by its retained leader's identity
 record, checked before any `observe` or `stop` sends a signal: the same
 boot, the leader alive and not a zombie, the same start identity, and still
-leading its group. A stale, legacy or malformed record fails closed. On
+leading its group. A stale, legacy or malformed record fails closed. The
+boot is the kernel's boot id on Linux and `kern.bootsessionuuid` on macOS; a
+missing boot identity fails closed, as does a macOS value that is not a
+UUID: a start kills the command it began, and a check sends no signal. On
 macOS a start time resolves to the second, and checking before running
 `/bin/kill` leaves a window in which the leader can exit and its number be
-reused. The record is not containment and not a proof of ownership.
+reused. An unrecorded or legacy command is left running, and named in the log
+and the run's report. The record is not containment and not a proof of
+ownership.
 
 The planner and every gate run on GitHub-hosted Linux runners inside
 non-root containers with private PID namespaces, dropped capabilities,
