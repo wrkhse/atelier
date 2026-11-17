@@ -17,7 +17,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -226,12 +226,19 @@ fn read_pgid_with_ps() -> Option<u32> {
         .spawn()
         .ok()?;
 
+    parse_pgid(&read_child(&mut child, PS_DEADLINE)?)
+}
+
+/// Reads what a child prints once it exits in `deadline`, killing and
+/// reaping the child this call owns when the deadline comes first. Output
+/// is returned only for a child that exited successfully.
+fn read_child(child: &mut Child, deadline: Duration) -> Option<String> {
     let started = Instant::now();
 
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() >= PS_DEADLINE => {
+            Ok(None) if started.elapsed() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
 
@@ -242,17 +249,15 @@ fn read_pgid_with_ps() -> Option<u32> {
         }
     };
 
-    let status = status?;
-
-    if !status.success() {
+    if !status?.success() {
         return None;
     }
 
     let mut stdout = child.stdout.take()?;
-    let mut ps = String::new();
-    stdout.read_to_string(&mut ps).ok()?;
+    let mut printed = String::new();
+    stdout.read_to_string(&mut printed).ok()?;
 
-    parse_pgid(&ps)
+    Some(printed)
 }
 
 /// The process group in a `/proc/<pid>/stat` line: the third field after
@@ -489,5 +494,49 @@ mod tests {
             error.message.contains("/no/such/tool could not start"),
             "{error}"
         );
+    }
+
+    /// Spawns `/bin/sh -c <script>` with its output piped and no input, for
+    /// a test to read with its own deadline.
+    fn short_child(script: &str) -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a shell")
+    }
+
+    #[test]
+    fn a_child_that_exits_in_time_is_read() {
+        let mut child = short_child("echo 42");
+
+        assert_eq!(
+            read_child(&mut child, Duration::from_secs(5)),
+            Some("42\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_child_past_the_deadline_is_killed() {
+        let mut child = short_child("sleep 1; echo 42");
+
+        assert_eq!(read_child(&mut child, Duration::from_millis(100)), None);
+    }
+
+    #[test]
+    fn a_child_that_fails_is_not_read() {
+        let mut child = short_child("echo 42; exit 1");
+
+        assert_eq!(read_child(&mut child, Duration::from_secs(5)), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_ps_reader_agrees_with_proc() {
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("/proc/self/stat");
+
+        assert_eq!(read_pgid_with_ps(), parse_pgrp(&stat));
     }
 }
