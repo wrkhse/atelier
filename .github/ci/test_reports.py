@@ -647,6 +647,22 @@ class WrapperTests(unittest.TestCase):
         )
         self.assertEqual(cargo.changed_files(), ["a.md", "b.rs"])
 
+    def test_a_failed_diff_never_reaches_the_canary(self) -> None:
+        self.canary()
+
+        def fail() -> list[str]:
+            raise ValueError("git diff against abc failed: fatal: bad")
+
+        cargo.changed_files = fail
+        cargo.listed = lambda args: [{"name": "c"}] if "--file" in args else []
+
+        with self.assertRaisesRegex(
+            ValueError, r"^git diff against abc failed: fatal: bad$"
+        ):
+            cargo.arguments(["mutants", "--in-diff", "d"])
+
+        self.assertFalse((self.root / "reports" / "mutants-selection.json").exists())
+
     def test_a_diff_with_mutants_runs_as_configured(self) -> None:
         cargo.listed = lambda args: [{"name": "b"}, {"name": "a"}]
         args = ["mutants", "--in-diff", "d", "--jobs", "3"]
@@ -784,6 +800,11 @@ class ContainmentTests(unittest.TestCase):
             "cap added": ("HostConfig", "CapAdd", ["SYS_ADMIN"]),
             "caps kept": ("HostConfig", "CapDrop", []),
             "new privileges": ("HostConfig", "SecurityOpt", []),
+            "extra security opt": (
+                "HostConfig",
+                "SecurityOpt",
+                ["no-new-privileges", "seccomp=unconfined"],
+            ),
             "privileged": ("HostConfig", "Privileged", True),
             "host pid": ("HostConfig", "PidMode", "host"),
             "host ipc": ("HostConfig", "IpcMode", "host"),
