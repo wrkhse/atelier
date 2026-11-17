@@ -1258,6 +1258,19 @@ mod tests {
         assert!(list.note(&folder, what));
     }
 
+    /// The wrapper a start uses forgets through the shared list, so a folder
+    /// atelier emptied is a new line if it is ever unsignalled again.
+    #[test]
+    fn a_forgotten_folder_is_new_through_the_shared_list() {
+        let folder = PathBuf::from("/forgotten-by-a-start");
+        let what = "it has no identity record";
+
+        assert!(note(&folder, what));
+        assert!(!note(&folder, what));
+        forget(&folder);
+        assert!(note(&folder, what), "a forgotten folder is new again");
+    }
+
     /// A record whose leader has gone empties the folder, so the next start
     /// begins clean.
     #[test]
