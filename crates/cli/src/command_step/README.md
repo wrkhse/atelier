@@ -25,7 +25,12 @@ run::observe(&folder, &step.settings)?;
 ```
 
 - **In the background.** A start returns at once; a later poll reads how it
-  ended from the step's folder: `started`, `identity`, `output` and `exit`.
+  ended from the step's folder: `started`, `worktree`, `identity`, `output`
+  and `exit`.
+- **Starting again.** A start on a folder that already exists first stops
+  whatever command the folder still names, through the same identity check,
+  then empties it, so a start repeated after a daemon crash cannot orphan a
+  running command.
 - **Its own process group,** not the daemon's, so a daemon restarted while it
   runs leaves it running. While its leader runs, its limit signals every
   process still in that group, not descendants that create a different group
@@ -42,18 +47,22 @@ run::observe(&folder, &step.settings)?;
 
 A background command runs under a shell that leads its own process group
 and stays alive until the command's top level ends, then writes `exit`. The
-daemon records `started` before it spawns that shell, and writes the
-leader's identity before the start returns, as `identity.tmp` renamed to
-`identity`: the leader's pid, which is the group's, the boot it runs on and
-the leader's own start identity. A reaper thread waits on the leader, so it
-is reaped once it ends; if that thread cannot start, the leader stays a
-zombie until the daemon exits, and the identity check reads a zombie as gone.
+daemon records `started` and `worktree` before it spawns that shell, and
+publishes the leader's identity before the start returns, by writing
+`identity.tmp`, syncing it, renaming it to `identity`, and syncing the
+folder. The record holds the leader's pid, which is the group's, the boot
+it runs on and the leader's own start identity. A reaper thread waits on the
+leader, so it is reaped once it ends; if that thread cannot start, the
+leader stays a zombie until the daemon exits, and the identity check reads a
+zombie as gone.
 
-A crash between the spawn and the rename leaves `started`, and perhaps
-`identity.tmp`, without `identity`: the command may still be running, and
-atelier sends it no signal. `observe` settles the step failed, saying it
-started but its identity was never recorded; `stop` sends nothing, and the
-log names it.
+A crash between the spawn and the rename leaves `started` and `worktree`,
+and perhaps `identity.tmp`, without `identity`: the command may still be
+running, and atelier sends it no signal. `observe` settles the step failed
+with a reason that says it started but its identity was never recorded.
+The reason ends `; atelier sent no signal, and the command may still be
+running in <worktree>`, or `in its worktree` when no worktree is recorded;
+`stop` sends nothing, and its log line ends the same way.
 
 ```text
 atelier-command-identity 1
@@ -68,10 +77,12 @@ leading its group. A record from another boot settles `failed` with "it
 stopped before it exited, as on a restart of the computer"; a leader that is
 gone settles `failed` with "it stopped before it exited". Neither sends a
 signal. A folder holding only the older `group` file, a malformed record, or
-a leader outside `2..=i32::MAX` fails closed: `observe` settles `failed` and
-says no signal was sent, and `stop` sends nothing. A running command past
-its limit is signalled through `/bin/kill -KILL -- -<leader>`, which
-`atelier_command::signal_group` builds.
+a leader outside `2..=i32::MAX` fails closed: `observe` settles `failed`
+with the same ending, and `stop` sends nothing and logs it. A running
+command past its limit is signalled through `/bin/kill -KILL -- -<leader>`,
+which `atelier_command::signal_group` builds. When that refuses a target,
+the kill and a start's abandon log `<folder>: atelier refused to signal
+group <n>; the command may still be running in <worktree>`.
 
 Linux reads the boot identity from `/proc/sys/kernel/random/boot_id`, and
 the leader's start ticks, group and state from `/proc/<pid>/stat`. macOS

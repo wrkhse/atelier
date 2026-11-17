@@ -2,13 +2,13 @@
 //! it, and reading how it ended on a later poll.
 //!
 //! Each start runs in its own folder, which holds what a later poll reads:
-//! `started`, the time it started; `identity`, the record of its leader;
-//! `output`, what it printed; and `exit`, its exit status once it ends. Its
-//! process group is not the daemon's, so a daemon restarted while it runs
-//! leaves it running.
+//! `started`, the time it started; `worktree`, where it runs; `identity`,
+//! the record of its leader; `output`, what it printed; and `exit`, its
+//! exit status once it ends. Its process group is not the daemon's, so a
+//! daemon restarted while it runs leaves it running.
 
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -38,12 +38,16 @@ const TAIL_BYTES: u64 = 4096;
 const TAIL_LINES: usize = 20;
 
 /// Starts the step's command in `worktree`, keeping what later polls read
-/// in `folder`, emptied first, so a round started again starts clean.
+/// in `folder`, emptied first, so a round started again starts clean. A
+/// start repeated on a folder whose record still names a command stops it
+/// first, so a daemon restarted between a start and the run state it could
+/// not save cannot orphan what it started.
 /// `ATELIER_BASE` names `origin/<base>`, as for the gates.
 ///
 /// # Errors
 ///
-/// The folder cannot be made, `sh` cannot start, or the leader's identity
+/// The command an earlier start left in `folder` cannot be stopped, the
+/// folder cannot be made, `sh` cannot start, or the leader's identity
 /// cannot be recorded; all transient.
 pub fn start(
     folder: &Path,
@@ -57,12 +61,15 @@ pub fn start(
     };
 
     if folder.exists() {
+        stop(folder)?;
         fs::remove_dir_all(folder).map_err(|error| failed("emptying", error))?;
     }
 
     fs::create_dir_all(folder).map_err(|error| failed("making", error))?;
     fs::write(folder.join("started"), now().to_string())
         .map_err(|error| failed("writing the start time in", error))?;
+    fs::write(folder.join("worktree"), worktree.display().to_string())
+        .map_err(|error| failed("writing the worktree in", error))?;
 
     let mut child = Command::new("/bin/sh")
         .args(["-c", SCRIPT, "atelier-command", run])
@@ -76,15 +83,10 @@ pub fn start(
         .spawn()
         .map_err(|error| failed("starting a command in", error))?;
     let leader = child.id();
-    let recorded = Identity::of(leader).and_then(|identity| {
-        fs::write(folder.join("identity.tmp"), identity.render())
-            .map_err(|error| format!("writing it: {error}"))?;
-        fs::rename(folder.join("identity.tmp"), folder.join("identity"))
-            .map_err(|error| format!("publishing it: {error}"))
-    });
+    let recorded = Identity::of(leader).and_then(|identity| publish(folder, &identity.render()));
 
     if let Err(why) = recorded {
-        abandon(&mut child);
+        abandon(folder, &mut child);
 
         return Err(PluginError::transient(format!(
             "the command in {} could not record its identity: {why}",
@@ -120,15 +122,16 @@ pub fn observe(folder: &Path, settings: &Settings) -> Result<Option<Outcome>, Pl
             )));
         }
         Err(Unrecorded::Legacy) => {
-            return Ok(Some(failed(
-                "it has no identity record, so atelier sent it no signal".into(),
-            )));
+            return Ok(Some(failed(unsignalled(
+                folder,
+                "it has no identity record",
+            ))));
         }
         Err(Unrecorded::Unpublished) => {
-            return Ok(Some(failed(
-                "it started but its identity was never recorded, so atelier sent it no signal"
-                    .into(),
-            )));
+            return Ok(Some(failed(unsignalled(
+                folder,
+                "it started but its identity was never recorded",
+            ))));
         }
         Err(Unrecorded::Unreadable(error)) => {
             return Err(PluginError::transient(format!(
@@ -136,14 +139,14 @@ pub fn observe(folder: &Path, settings: &Settings) -> Result<Option<Outcome>, Pl
                 folder.display()
             )));
         }
-        Err(Unrecorded::Invalid(why)) => return Ok(Some(invalid(&why))),
+        Err(Unrecorded::Invalid(why)) => return Ok(Some(invalid(folder, &why))),
     };
 
     let started = fs::read_to_string(folder.join("started"))
         .ok()
         .and_then(|text| text.trim().parse::<u64>().ok());
     let Some(started) = started else {
-        return Ok(Some(invalid("no start time")));
+        return Ok(Some(invalid(folder, "no start time")));
     };
 
     match identity.check() {
@@ -167,7 +170,7 @@ pub fn observe(folder: &Path, settings: &Settings) -> Result<Option<Outcome>, Pl
             let limit = u64::try_from(timeout).unwrap_or(u64::MAX);
 
             if now().saturating_sub(started) >= limit {
-                kill(identity.leader);
+                kill(folder, identity.leader);
 
                 return Ok(Some(failed(format!(
                     "it ran past its {timeout}-second limit{}",
@@ -231,7 +234,7 @@ pub fn stop(folder: &Path) -> Result<(), PluginError> {
             // Checking and then signalling leaves a window in which the
             // leader can exit and its number be reused: the record narrows,
             // but does not close, that window.
-            kill(identity.leader);
+            kill(folder, identity.leader);
 
             Ok(())
         }
@@ -244,11 +247,33 @@ pub fn stop(folder: &Path) -> Result<(), PluginError> {
 fn unsigned(folder: &Path, what: &str) {
     log(
         "atelier.command",
-        &format!(
-            "{}: {what}; atelier sent no signal, and the command may still be running",
-            folder.display()
-        ),
+        &format!("{}: {}", folder.display(), unsignalled(folder, what)),
     );
+}
+
+/// What every text about a command atelier left unsignalled says: `what`
+/// names the record that could not say which leader to signal, and where
+/// the command runs follows, since it may still.
+fn unsignalled(folder: &Path, what: &str) -> String {
+    format!(
+        "{what}; atelier sent no signal, and the command may still be running {}",
+        where_it_runs(folder)
+    )
+}
+
+/// Where the command in `folder` runs, from the record `start` writes, or
+/// `its worktree` when that is missing, unreadable or empty.
+fn where_it_runs(folder: &Path) -> String {
+    let recorded = fs::read_to_string(folder.join("worktree")).ok();
+
+    match recorded
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        Some(path) => format!("in {path}"),
+        None => "in its worktree".to_owned(),
+    }
 }
 
 /// What reading a command's identity found instead of one.
@@ -285,11 +310,35 @@ fn record(folder: &Path) -> Result<Identity, Unrecorded> {
     Identity::parse(&text).map_err(Unrecorded::Invalid)
 }
 
+/// Writes the leader's identity beside `started`: `identity.tmp`
+/// flushed to the disk, then renamed to `identity`, then the folder
+/// flushed, so a record a later poll reads is whole after a crash.
+fn publish(folder: &Path, text: &str) -> Result<(), String> {
+    let temporary = folder.join("identity.tmp");
+
+    File::create(&temporary)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })
+        .map_err(|error| format!("writing it: {error}"))?;
+    fs::rename(&temporary, folder.join("identity"))
+        .map_err(|error| format!("publishing it: {error}"))?;
+    File::open(folder)
+        .map_err(|error| format!("opening the folder: {error}"))?
+        .sync_all()
+        .map_err(|error| format!("flushing the folder: {error}"))
+}
+
 /// Ends a command whose identity could not be recorded: no later poll could
 /// find its group, so it must not outlive this call.
-fn abandon(child: &mut Child) {
-    if let Some(mut signal) = signal_group(Signal::Kill, u64::from(child.id())) {
+fn abandon(folder: &Path, child: &mut Child) {
+    let group = child.id();
+
+    if let Some(mut signal) = signal_group(Signal::Kill, u64::from(group)) {
         let _ = signal.status();
+    } else {
+        refused(folder, group);
     }
 
     // The child is unreaped, so its number cannot be reused yet.
@@ -310,9 +359,10 @@ fn reap(mut child: Child) {
 }
 
 /// The outcome of a record that cannot name a leader: no signal is sent.
-fn invalid(why: &str) -> Outcome {
-    failed(format!(
-        "its identity record is invalid ({why}), so atelier sent it no signal"
+fn invalid(folder: &Path, why: &str) -> Outcome {
+    failed(unsignalled(
+        folder,
+        &format!("its identity record is invalid ({why})"),
     ))
 }
 
@@ -366,11 +416,27 @@ fn tail(folder: &Path) -> String {
     }
 }
 
-/// Kills the group's every process.
-fn kill(group: u32) {
+/// Kills the group's every process, and, when atelier refuses the target,
+/// says in the log that it did.
+fn kill(folder: &Path, group: u32) {
     if let Some(mut signal) = signal_group(Signal::Kill, u64::from(group)) {
         let _ = signal.status();
+    } else {
+        refused(folder, group);
     }
+}
+
+/// Says in the log that atelier would not signal `group` for the command
+/// in `folder`, so it may still be running.
+fn refused(folder: &Path, group: u32) {
+    log(
+        "atelier.command",
+        &format!(
+            "{}: atelier refused to signal group {group}; the command may still be running {}",
+            folder.display(),
+            where_it_runs(folder)
+        ),
+    );
 }
 
 fn now() -> u64 {
@@ -460,6 +526,11 @@ mod tests {
         }
     }
 
+    /// How every text about an unsignalled command ends, when the folder
+    /// records no worktree.
+    const MAY_STILL_RUN: &str =
+        "; atelier sent no signal, and the command may still be running in its worktree";
+
     #[test]
     fn a_command_that_exits_0_passes_and_runs_in_the_worktree_with_its_base() {
         let scratch = Scratch::new("passes");
@@ -539,6 +610,7 @@ mod tests {
 
     #[test]
     fn abandoning_a_start_kills_its_whole_group() {
+        let scratch = Scratch::new("abandon");
         let mut child = Command::new("/bin/sh")
             .args(["-c", "sleep 30 & sleep 30"])
             .stdin(Stdio::null())
@@ -552,7 +624,7 @@ mod tests {
         thread::sleep(Duration::from_millis(100));
         assert!(alive(group), "the group never started");
 
-        abandon(&mut child);
+        abandon(&scratch.folder(), &mut child);
 
         let begun = Instant::now();
 
@@ -572,6 +644,10 @@ mod tests {
         let identity = Identity::parse(&text).unwrap();
 
         assert!(!folder.join("identity.tmp").exists());
+        assert_eq!(
+            fs::read_to_string(folder.join("worktree")).unwrap(),
+            scratch.worktree().display().to_string()
+        );
         assert_eq!(identity.check().unwrap(), Leader::Running);
 
         kill(u64::from(identity.leader));
@@ -634,7 +710,7 @@ mod tests {
         let legacy = observe(&folder, &Settings::default()).unwrap().unwrap();
         assert_eq!(
             legacy.why,
-            "it has no identity record, so atelier sent it no signal"
+            format!("it has no identity record{MAY_STILL_RUN}")
         );
         assert!(stop(&folder).is_ok());
 
@@ -646,7 +722,8 @@ mod tests {
 
         let invalid = observe(&folder, &Settings::default()).unwrap().unwrap();
         assert!(
-            invalid.why.starts_with("its identity record is invalid"),
+            invalid.why.starts_with("its identity record is invalid")
+                && invalid.why.ends_with(MAY_STILL_RUN),
             "{invalid:?}"
         );
         assert!(stop(&folder).is_ok());
@@ -666,7 +743,7 @@ mod tests {
         let unpublished = observe(&folder, &Settings::default()).unwrap().unwrap();
         assert_eq!(
             unpublished.why,
-            "it started but its identity was never recorded, so atelier sent it no signal"
+            format!("it started but its identity was never recorded{MAY_STILL_RUN}")
         );
         assert!(stop(&folder).is_ok());
 
@@ -692,7 +769,7 @@ mod tests {
 
         assert_eq!(
             outcome.why,
-            "its identity record is invalid (no start time), so atelier sent it no signal"
+            format!("its identity record is invalid (no start time){MAY_STILL_RUN}")
         );
     }
 
@@ -755,5 +832,26 @@ mod tests {
             "{never}"
         );
         kill(scratch.group());
+    }
+
+    /// A daemon that crashed between a start and the run state it could not
+    /// save repeats that start; the command the folder still names must not
+    /// be orphaned.
+    #[test]
+    fn starting_again_stops_the_command_the_folder_still_names() {
+        let scratch = Scratch::new("restarted");
+        scratch.start("sleep 30", None);
+        let first = scratch.group();
+        scratch.start("sleep 30", None);
+        let second = scratch.group();
+        let begun = Instant::now();
+
+        while alive(first) && begun.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(!alive(first), "the first command is still running");
+
+        kill(second);
     }
 }

@@ -314,12 +314,16 @@ impl Tree for BranchTree {}
 ```
 
 A command runs in the background, in its own process group, so a poll never
-waits on it and a daemon restarted while it runs leaves it running. A start
-empties the step's folder and starts the command there; a later poll reads how
-it ended. It settles `passed` on exit 0, and `failed` on any other exit, past
-its limit, which kills its whole group, or when it stopped without an exit
-status; each says why, with the last 20 lines it printed. `ATELIER_BASE` is
-`origin/<base>`, as for the gates.
+waits on it and a daemon restarted while it runs leaves it running. Its step's
+folder holds `started`, `worktree`, `identity`, `output` and `exit`; a start
+writes `started` and `worktree` before it spawns the command there, and a
+later poll reads how it ended. A start on a folder that already exists first
+stops whatever command the folder still names, through the same identity
+check, then empties it, so a start repeated after a daemon crash cannot
+orphan a running command. It settles `passed` on exit 0, and `failed` on any
+other exit, past its limit, which kills its whole group, or when it stopped
+without an exit status; each says why, with the last 20 lines it printed.
+`ATELIER_BASE` is `origin/<base>`, as for the gates.
 
 ```rust
 pub struct Outcome {
@@ -340,7 +344,8 @@ pub fn observe(folder: &Path, settings: &Settings)
 
 The command's shell leads its own process group and stays alive until the
 command's top level ends, then writes `exit`; the leader's identity record
-sits beside it, written atomically before the start returns, with the
+sits beside it, written before the start returns: `identity.tmp` is
+written, synced, renamed to `identity`, and the folder synced. It holds the
 leader's pid, boot and start identity. The boot is the kernel's boot id on
 Linux and `kern.bootsessionuuid` on macOS. A reaper thread waits on the
 leader, so it is reaped once it ends; if that thread cannot start, the leader
@@ -352,9 +357,13 @@ gone, settles `failed` without a signal. A legacy folder with only `group`, a
 malformed record, a leader outside `2..=i32::MAX`, or a command that started
 but never published its identity fails closed: `observe` settles `failed`
 with the reason, which reaches the run's comment, and `stop` sends nothing
-and returns no error, so the run still ends. It logs
-`<folder>: <what>; atelier sent no signal, and the command may still be
-running`, where `<what>` says which record could not name a leader.
+and returns no error, so the run still ends. That reason ends
+`<what>; atelier sent no signal, and the command may still be running in
+<worktree>`, and `stop`'s log line puts the folder before it; both say
+`in its worktree` when the folder records no worktree, and `<what>` names
+the record that could not name a leader. When `signal_group` refuses a
+target, the kill and abandon log `<folder>: atelier refused to signal group
+<n>; the command may still be running in <worktree>`.
 
 ```rust
 pub struct Identity {
@@ -844,9 +853,11 @@ group 1. A cleanup test reached `kill -KILL -- -1` on the Mac. Every group
 signal is built by `atelier_command::signal_group`, which refuses groups 0
 and 1 and numbers `kill` would truncate to them, independently of file
 parsing. It also refuses atelier's own pid, its parent's pid and its own
-process group, read once; with no group readable, it refuses every target.
-Its regression constructs commands without executing them. This guard does
-not replace process isolation. [The incident record](../../audits/atelier.md#host-mutation-signal-incident)
+process group, keeping the group only from a read that succeeded, so a
+failed read refuses every target until a later read succeeds; on macOS that
+read gives up after 5 s and needs `ps` to succeed. Its regression constructs
+commands without executing them. This guard does not replace process
+isolation. [The incident record](../../audits/atelier.md#host-mutation-signal-incident)
 keeps the evidence and containment rule.
 
 The identity record narrows which process a signal reaches; it does not
@@ -859,9 +870,11 @@ while its leader runs. Once the command's top level exits normally, its exit
 status is written and a stop sends nothing, so background processes it left
 behind are not signalled. Neither are descendants that leave the group or
 outlive a leader killed by something else. An unrecorded or legacy command is
-left running, and named in the log and the run's report. This is not
-containment and not a proof of ownership. Tests that start or signal processes
-run only in the contained CI gates.
+left running, and named in the log and the run's report, each ending
+`; atelier sent no signal, and the command may still be running in
+<worktree>`, or `in its worktree` when the folder records no worktree. This
+is not containment and not a proof of ownership. Tests that start or signal
+processes run only in the contained CI gates.
 
 On the development Mac, only editing, `git`, `gh` and `cargo fmt` are allowed.
 No compile, Clippy, test, metadata, docs build, Kani, mutants or atelier binary
@@ -902,8 +915,9 @@ assert run was Running, next is not      implies it interrupts and
 
 - `atelier.command`: a passing command, a failing one, and one past its time
   limit; a stale or tampered identity, from another boot or another start,
-  settles without a signal; a legacy or malformed record fails closed; and
-  the leader is reaped once the command ends.
+  settles without a signal; a legacy or malformed record fails closed; a
+  start repeated on a folder whose record still names a running command
+  stops it; and the leader is reaped once the command ends.
 - `atelier finish` and `atelier stop` against a running daemon in a temporary
   state folder.
 - An older `state.json` read by the new daemon, with each run where it was.

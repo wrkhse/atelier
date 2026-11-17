@@ -111,9 +111,13 @@ Kani and mutant checks are not passing evidence.
 Every group signal is built by `atelier_command::signal_group`, which
 refuses 0, 1 and any number `kill` would truncate to them, independently of
 parsing. It also refuses atelier's own pid, its parent's pid and its own
-process group, read once; with no group readable, it refuses every target.
-The deadline kill and a background step's cleanup both use it. Its regression
-only prepares a command, so removing the guard produces an assertion failure
+process group, keeping the group only from a read that succeeded, so a
+failed read refuses every target until a later read succeeds; on macOS that
+read gives up after 5 s and needs `ps` to succeed. The deadline kill and a
+background step's cleanup both use it. When it refuses a target, the kill
+and a start's abandon log `<folder>: atelier refused to signal group <n>;
+the command may still be running in <worktree>`. Its regression only
+prepares a command, so removing the guard produces an assertion failure
 without invoking `kill`. A guard is defense in depth, not containment:
 mutation can change the guard too.
 
@@ -127,7 +131,9 @@ UUID: a start kills the command it began, and a check sends no signal. On
 macOS a start time resolves to the second, and checking before running
 `/bin/kill` leaves a window in which the leader can exit and its number be
 reused. An unrecorded or legacy command is left running, and named in the log
-and the run's report. The record is not containment and not a proof of
+and the run's report, each ending `; atelier sent no signal, and the command
+may still be running in <worktree>`, or `in its worktree` when the folder
+records no worktree. The record is not containment and not a proof of
 ownership.
 
 The planner and every gate run on GitHub-hosted Linux runners inside
