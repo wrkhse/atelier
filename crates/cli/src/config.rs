@@ -271,21 +271,22 @@ fn checks(file: &File) -> Result<Vec<CheckSpec>> {
         .collect()
 }
 
-/// The marks atelier sets itself, which a pipeline may not take: a label's
-/// name on GitHub ignores case.
-const MARKS: [&str; 2] = ["working", "blocked"];
+/// The labels atelier keeps for itself, which a pipeline may not be named
+/// after: a pipeline's trigger takes the `labels.<name>` key, and GitHub
+/// compares label names ignoring case.
+const MARKS: [&str; 3] = ["working", "blocked", "improvement"];
 
 fn is_own_mark(name: &str) -> bool {
     MARKS.iter().any(|mark| name.eq_ignore_ascii_case(mark))
 }
 
 /// The built-in `build` first, unless the config writes `[pipeline.build]`,
-/// then each pipeline the config writes, by name. A written `working` or
-/// `blocked` is refused, since atelier sets those as its own marks.
+/// then each pipeline the config writes, by name. A written `working`,
+/// `blocked` or `improvement` is refused, since atelier keeps those labels.
 fn pipelines(written: &BTreeMap<String, PipelineFile>) -> Result<Vec<Written>> {
     if let Some(name) = written.keys().find(|name| is_own_mark(name)) {
         bail!(
-            "{CONFIG}: pipeline.{name}: {name} is atelier's own mark; name the pipeline otherwise"
+            "{CONFIG}: pipeline.{name}: {name} is atelier's own label; name the pipeline otherwise"
         );
     }
 
@@ -519,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pipeline_named_after_one_of_atelier_marks_is_refused() {
+    fn a_pipeline_named_after_an_atelier_label_is_refused() {
         let read = |name: &str| {
             let file = PipelineFile::default();
 
@@ -527,12 +528,18 @@ mod tests {
         };
         let refusal = |name: &str| {
             format!(
-                "{CONFIG}: pipeline.{name}: {name} is atelier's own mark; \
+                "{CONFIG}: pipeline.{name}: {name} is atelier's own label; \
                  name the pipeline otherwise"
             )
         };
 
-        for name in ["working", "blocked", "Working"] {
+        for name in [
+            "working",
+            "blocked",
+            "improvement",
+            "Working",
+            "Improvement",
+        ] {
             let error = read(name).unwrap_err().to_string();
 
             assert_eq!(error, refusal(name), "{name:?}");

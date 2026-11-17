@@ -7,8 +7,7 @@ follows as slice 4 ([#42](https://github.com/wrkhse/atelier/issues/42)).
 Pipelines run on [rungs](https://github.com/wrkhse/rungs) `v0.1.0`, and
 an earlier rc's `state.json` is read into runs of `build`. Agents settle
 their steps with `atelier finish`, and a person stops a run with
-`atelier stop`. Left: a trigger mark for each pipeline; until then the build
-mark starts `build`.
+`atelier stop`.
 
 ## You can
 
@@ -507,15 +506,142 @@ kind with the plugin a role's kind resolved to:
 
 ### Triggers and runs
 
-- **A tracker's mark starts a run.** An item carrying `atelier:<pipeline>`
-  starts that pipeline, so `atelier:build` keeps its meaning. `atelier init`
-  creates a label for each pipeline. In this slice the tracker's listing finds
-  them, as today; from slice 4 the trigger role does, with sourcefed's events
+- **Each pipeline has its trigger mark.** On GitHub it is the label
+  `atelier:<pipeline>`, and a project renames it as `labels.<pipeline>`.
+  `atelier init` creates a label for each of the project's pipelines. A
+  blocked comment names the run's pipeline, not its trigger label, which a
+  project may rename, so it asks for that pipeline's trigger mark whatever
+  the label reads.
+- **A tracker's listing finds the marks.** Each poll lists each tracker once
+  per pipeline, for that pipeline's trigger, and once for `working`, so an
+  item an earlier atelier took is found too. A trigger listing with a
+  tracker query filter is a GitHub search, which answers no etag, so each
+  pipeline costs one search call per poll against search's 30 a minute:
+  about seven pipelines at the 15-second minimum poll. The `working` listing
+  stays REST, with an etag like a trigger listing without a filter. From
+  slice 4 the trigger role finds them from sourcefed's events
   ([#42](https://github.com/wrkhse/atelier/issues/42)), and the listing only
   reconciles.
+- **A trigger mark starts its pipeline.** An item carrying `atelier:audit`
+  starts `audit`, so `atelier:build` keeps its meaning.
+- **An open item carrying two pipelines' triggers starts neither.** It waits
+  until a person leaves one. The daemon logs
+  `github#12: carries the trigger marks of build, audit; atelier starts none until one is left`
+  whenever atelier reads the item again: when a listing that holds it
+  changes, again after a poll whose etags were not kept because another
+  item failed, and on every poll while a listing that holds it keeps no
+  etag, which happens for a listing of more than one page or one answered
+  from a search. The line does not repeat while every listing answers
+  unchanged.
+- **A working run goes on.** A run that gains another pipeline's trigger
+  while it works keeps its own pipeline; the other waits until the run is
+  over and the item is open.
+- **A Done or Blocked run that sees a trigger starts that pipeline in a new
+  generation**, keeping each step's last session.
+- **A pipeline named `working`, `blocked` or `improvement`, in any case, is
+  refused**, and so is a label that collides with another's name once a
+  project renames it, ignoring case, and a trigger label over GitHub's 50
+  characters.
 - **A run** is one pass of a pipeline for one item, such as `build github#12`.
   It replaces "an issue" in `state.json` and `atelier status`. An item has at
   most one working run at a time.
+
+#### Structure
+
+A tracker carries a mark as a `Tag`: a pipeline's trigger by name, or atelier's
+own `working` or `blocked`. `Mark::on` turns the mark an action carries into
+the tag of the pipeline its run is for, so a claim's `Unmark(Mark::Requested)`
+takes that pipeline's trigger and leaves any other. `Marks` is what an item
+carries, as a poll saw it.
+
+```rust
+pub enum Tag<'a> {
+    Trigger(&'a str),
+    Working,
+    Blocked,
+}
+
+impl Mark {
+    pub const fn on(self, pipeline: &str) -> Tag<'_>;
+}
+
+pub struct Marks {
+    working: bool,
+    blocked: bool,
+    triggers: BTreeSet<String>,
+}
+
+impl Marks {
+    pub fn has(&self, tag: Tag<'_>) -> bool;
+    pub fn with(self, tag: Tag<'_>) -> Self;
+    pub fn without(self, tag: Tag<'_>) -> Self;
+    pub fn triggers(&self) -> impl Iterator<Item = &str>;
+}
+```
+
+A tracker lists the open items carrying one tag that match a filter, and
+marks or unmarks an item with one; adding a mark that is there, or removing
+one that is not, succeeds. `issues` answers `Unchanged` while the listing's
+etag still holds.
+
+```rust
+pub trait Tracker {
+    fn issues(
+        &self,
+        repo: &Repo,
+        tag: Tag<'_>,
+        filter: &Filter,
+        etag: Option<&str>,
+    ) -> Result<Listing, PluginError>;
+    fn issue(&self, repo: &Repo, id: &str) -> Result<Issue, PluginError>;
+    fn mark(&self, repo: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError>;
+    fn unmark(&self, repo: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError>;
+    fn comment(&self, repo: &Repo, id: &str, text: &str) -> Result<(), PluginError>;
+    fn close(&self, repo: &Repo, id: &str) -> Result<(), PluginError>;
+    fn reference(&self, issue: &Issue) -> String;
+    fn brief(&self, repo: &Repo, issue: &Issue) -> String;
+}
+```
+
+A listing atelier keeps the etag of is one pipeline's trigger or `working`,
+and the state keeps each one by its tracker.
+
+```rust
+pub enum Listed {
+    Trigger(String),
+    Working,
+}
+
+pub struct State {
+    pub runs: BTreeMap<IssueKey, Record>,
+    pub etags: BTreeMap<(String, Listed), String>,
+}
+```
+
+A poll's report names each move, each failure, and each item whose triggers
+atelier starts none of, with those pipelines in the project's order.
+
+```rust
+pub struct Report {
+    pub moves: Vec<Move>,
+    pub failures: Vec<(IssueKey, PluginError)>,
+    pub ambiguous: Vec<(IssueKey, Vec<String>)>,
+}
+```
+
+A plugin registers its tracker as a constructor, so each project builds its
+own from its `[[tracker]]` settings and its pipelines' names, in the project's
+order.
+
+```rust
+impl<'a> MakeTracker<'a> {
+    pub fn make(
+        &self,
+        settings: &Settings,
+        pipelines: &[&str],
+    ) -> Result<Box<dyn Tracker + 'a>, SettingsError>;
+}
+```
 
 ### The machine
 
@@ -607,9 +733,9 @@ impl StepSpec {
 
 A run is its phase and its steps' progress. `step` is pure and total: an
 event that does not apply leaves the run and names nothing. A request claims
-with fresh progress; a claim that fails also takes the build mark, so it is
-not requested again until a person asks. A failed round under a step's
-`rounds` names `Start` again; `last` makes it final at once, as a pull
+with fresh progress; a claim that fails also takes that pipeline's trigger,
+so it is not requested again until a person asks. A failed round under a
+step's `rounds` names `Start` again; `last` makes it final at once, as a pull
 request closed without merging does. `Pushed` restarts only a settled step.
 
 ```rust
@@ -794,7 +920,7 @@ pub enum Command {
 pub struct Observation {
     pub issues: BTreeMap<IssueKey, Watched>,
     pub requests: BTreeMap<IssueKey, Vec<Request>>,
-    pub etags: BTreeMap<(String, Mark), String>,
+    pub etags: BTreeMap<(String, Listed), String>,
 }
 ```
 
@@ -835,6 +961,13 @@ pub fn by_key(paths: &Paths, selector: &str, repo: Option<&str>) -> Result<Targe
 an older file into the written-out `build`: Building is `builder` running; Open
 is `builder` settled `opened` and `checks` running; Green is `ready` running;
 and Ready is `merge` running.
+
+A trigger mark is written as `requested`, and an earlier rc's `build` mark
+reads as `requested`. A listing tag keeps its pipeline's name, so an earlier
+file's `build` listing is the `build` pipeline's trigger. An older rc cannot
+read `requested`: its daemon refuses to start, naming `state.json` and the
+parse error, and the Homebrew service's `keep_alive` starts it again, which
+refuses again. Rolling back past this rc needs the state file restored first.
 
 Files: `crates/cli/src/state/`.
 
@@ -950,6 +1083,15 @@ assert run was Running, next is not      implies it interrupts and
   is reaped once the command ends.
 - `atelier finish` and `atelier stop` against a running daemon in a temporary
   state folder.
+- Each pipeline's trigger in its own label: `atelier:audit` on an open item
+  starts `audit`; an item carrying `atelier:build` and `atelier:audit` starts
+  neither, is logged with both, and starts `build` once a person takes
+  `atelier:audit` off. `atelier init` makes a label for each pipeline's
+  trigger, in the project's order, and a trigger renamed by
+  `labels.<pipeline>` is the one the tracker lists and marks by.
+- The refusals: a pipeline called `working`, `blocked` or `improvement`, in
+  any case, is refused with its name; so are two labels that collide after a
+  rename, ignoring case, and a trigger label over GitHub's 50 characters.
 - An older `state.json` read by the new daemon, with each run where it was.
 
 ## End to end

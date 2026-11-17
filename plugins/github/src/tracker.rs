@@ -5,14 +5,14 @@ use std::process::Command;
 use std::time::Duration;
 
 use atelier_core::{
-    Filter, Issue, IssueKey, Listing, Mark, Marks, PluginError, Repo, Settings, SettingsError,
+    Filter, Issue, IssueKey, Listing, Marks, PluginError, Repo, Settings, SettingsError, Tag,
     Tracker,
 };
 use serde::Deserialize;
 
 use crate::GitHub;
 use crate::api::{api, encode, owner_and_name};
-use crate::labels::Labels;
+use crate::labels::{Label, Labels};
 
 /// The most pages one listing reads, 100 issues each.
 const MAX_PAGES: usize = 10;
@@ -28,13 +28,18 @@ pub struct GitHubTracker {
 }
 
 impl GitHub {
-    /// This project's tracker, from its `[[tracker]]` settings.
+    /// This project's tracker, from its `[[tracker]]` settings and its
+    /// pipelines' names, in the project's order.
     ///
     /// # Errors
     ///
     /// A setting it cannot use; see [`Labels::from_settings`].
-    pub fn tracker(&self, settings: &Settings) -> Result<GitHubTracker, SettingsError> {
-        let labels = Labels::from_settings(settings)?;
+    pub fn tracker(
+        &self,
+        settings: &Settings,
+        pipelines: &[&str],
+    ) -> Result<GitHubTracker, SettingsError> {
+        let labels = Labels::from_settings(settings, pipelines)?;
 
         Ok(GitHubTracker {
             program: self.program.clone(),
@@ -68,13 +73,10 @@ impl Raw {
             return None;
         }
 
-        let marks = [Mark::Requested, Mark::Working, Mark::Blocked]
-            .into_iter()
-            .filter(|mark| {
-                self.labels
-                    .iter()
-                    .any(|found| found.name == labels.mark(*mark).name)
-            })
+        let marks = self
+            .labels
+            .iter()
+            .filter_map(|found| labels.tag_of(&found.name))
             .collect::<Marks>();
 
         Some(Issue {
@@ -99,6 +101,20 @@ impl GitHubTracker {
     #[must_use]
     pub const fn labels(&self) -> &Labels {
         &self.labels
+    }
+
+    /// The label `tag` names, or a failure naming the tag when this
+    /// project has no such label.
+    fn label(&self, tag: Tag<'_>) -> Result<&Label, PluginError> {
+        self.labels.tag(tag).ok_or_else(|| {
+            let missing = match tag {
+                Tag::Trigger(pipeline) => format!("the {pipeline} pipeline's trigger"),
+                Tag::Working => "working".to_owned(),
+                Tag::Blocked => "blocked".to_owned(),
+            };
+
+            PluginError::permanent(format!("this project has no label for {missing}"))
+        })
     }
 
     fn api(&self, args: &[&str]) -> Result<crate::api::Reply, PluginError> {
@@ -168,10 +184,10 @@ impl GitHubTracker {
         Ok(Listing::Changed { issues, etag })
     }
 
-    fn search(&self, repo: &Repo, mark: Mark, filter: &Filter) -> Result<Listing, PluginError> {
+    fn search(&self, repo: &Repo, label: &Label, filter: &Filter) -> Result<Listing, PluginError> {
         let query = filter.query.as_deref().unwrap_or_default();
         let mut terms = vec![format!("repo:{}", repo.0), "is:issue is:open".into()];
-        terms.push(format!("label:\"{}\"", self.labels.mark(mark).name));
+        terms.push(format!("label:\"{}\"", label.name));
         terms.extend(
             filter
                 .labels
@@ -206,17 +222,19 @@ impl Tracker for GitHubTracker {
     fn issues(
         &self,
         repo: &Repo,
-        mark: Mark,
+        tag: Tag<'_>,
         filter: &Filter,
         etag: Option<&str>,
     ) -> Result<Listing, PluginError> {
         owner_and_name(repo)?;
 
+        let label = self.label(tag)?;
+
         if filter.query.is_some() {
-            return self.search(repo, mark, filter);
+            return self.search(repo, label, filter);
         }
 
-        let mut labels = vec![self.labels.mark(mark).name.clone()];
+        let mut labels = vec![label.name.clone()];
         labels.extend(filter.labels.iter().cloned());
 
         let mut query = vec![
@@ -253,9 +271,10 @@ impl Tracker for GitHubTracker {
             .ok_or_else(|| PluginError::permanent(format!("#{id} is a pull request")))
     }
 
-    fn mark(&self, repo: &Repo, id: &str, mark: Mark) -> Result<(), PluginError> {
+    fn mark(&self, repo: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError> {
+        let label = self.label(tag)?;
         let path = format!("repos/{}/issues/{}/labels", repo.0, encode(id));
-        let field = format!("labels[]={}", self.labels.mark(mark).name);
+        let field = format!("labels[]={}", label.name);
 
         self.api(&["--method", "POST", &path, "--raw-field", &field])?
             .ok(&format!("labelling #{id}"))?;
@@ -263,13 +282,19 @@ impl Tracker for GitHubTracker {
         Ok(())
     }
 
-    /// A label already gone answers 404, which is success here.
-    fn unmark(&self, repo: &Repo, id: &str, mark: Mark) -> Result<(), PluginError> {
+    /// A label already gone answers 404, which is success here, and so is a
+    /// tag this project has no label for: that is a pipeline it no longer
+    /// has. Its trigger is ignored, so the unmark settles.
+    fn unmark(&self, repo: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError> {
+        let Some(label) = self.labels.tag(tag) else {
+            return Ok(());
+        };
+
         let path = format!(
             "repos/{}/issues/{}/labels/{}",
             repo.0,
             encode(id),
-            encode(&self.labels.mark(mark).name)
+            encode(&label.name)
         );
         let reply = self.api(&["--method", "DELETE", &path])?;
 
@@ -330,18 +355,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn atelier_s_labels_are_its_marks_and_others_are_ignored() {
+    fn each_trigger_label_is_its_pipeline_and_other_labels_are_ignored() {
         let raw: Raw = serde_json::from_str(
-            r#"{"number": 12, "title": "Fix", "state": "closed", "pull_request": null,
-                "labels": [{"name": "atelier:working"}, {"name": "bug"}, {"name": "atelier:blocked"}]}"#,
+            r#"{"number": 12, "title": "Audit", "state": "closed", "pull_request": null,
+                "labels": [{"name": "atelier:audit"}, {"name": "atelier:gone"},
+                           {"name": "atelier:working"}, {"name": "atelier:blocked"}]}"#,
         )
         .unwrap();
 
-        let issue = raw.issue(&Labels::default()).unwrap();
+        let issue = raw.issue(&Labels::new(&["build", "audit"])).unwrap();
 
         assert_eq!(
             issue.marks,
-            Marks::default().with(Mark::Working).with(Mark::Blocked)
+            Marks::default()
+                .with(Tag::Trigger("audit"))
+                .with(Tag::Working)
+                .with(Tag::Blocked)
         );
         assert!(!issue.open);
     }

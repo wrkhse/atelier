@@ -3,7 +3,7 @@
 use atelier_core::rungs::{Outcome, Progress, Status};
 use atelier_core::{
     Action, Failure, Filter, IssueKey, Mark, Marks, Observed, Phase, PullRequest, Reason, Record,
-    Rollup, State, StepRecord, act, observe,
+    Rollup, State, StepRecord, Tag, act, observe,
 };
 
 use crate::world::{World, list, step, table};
@@ -31,7 +31,7 @@ fn status(state: &State, id: &str) -> Option<Status> {
 }
 
 fn building() -> (World, State) {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
     let mut state = State::default();
     world.poll(&world.project(), &mut state);
     (world, state)
@@ -85,7 +85,7 @@ fn a_requested_issue_starts_one_builder_across_many_polls() {
     assert_eq!(record.branch, "issue-12-fix-the-dead-link");
     assert_eq!(*world.started.borrow(), ["worktree", "builder"]);
     assert_eq!(world.sessions.borrow().len(), 1);
-    assert_eq!(ticket.marks, Marks::default().with(Mark::Working));
+    assert_eq!(ticket.marks, Marks::default().with(Tag::Working));
     assert_eq!(ticket.comments.len(), 1);
     assert!(ticket.comments[0].contains("`builder`"));
     assert!(ticket.comments[0].contains("ses_0"));
@@ -105,7 +105,7 @@ fn a_stop_after_any_save_resumes_to_the_same_end() {
     let (clean, clean_state) = building();
 
     for crash_at in 1..=12 {
-        let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
+        let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
         let project = world.project();
         let plugins = world.plugins();
         let mut saved = State::default();
@@ -175,7 +175,7 @@ fn a_stale_listing_of_a_closed_or_unmarked_item_starts_no_run() {
     use std::collections::BTreeMap;
 
     for (open, marks) in [
-        (false, Marks::default().with(Mark::Working)),
+        (false, Marks::default().with(Tag::Working)),
         (true, Marks::default()),
     ] {
         let world = World::with_issue("12", "Fix the dead link", &[]);
@@ -183,7 +183,7 @@ fn a_stale_listing_of_a_closed_or_unmarked_item_starts_no_run() {
             key: key(),
             title: "Fix the dead link".into(),
             open,
-            marks,
+            marks: marks.clone(),
         };
         let watched = Watched {
             issue,
@@ -209,7 +209,7 @@ fn a_stale_listing_of_a_closed_or_unmarked_item_starts_no_run() {
         .unwrap();
 
         assert_eq!(report.moves, []);
-        assert!(state.runs.is_empty());
+        assert_eq!(state.runs.len(), 0);
     }
 }
 
@@ -219,15 +219,15 @@ fn a_stale_listing_of_a_closed_or_unmarked_item_starts_no_run() {
 )]
 fn requested(
     world: &World,
+    project: &atelier_core::Project,
     state: &mut State,
     request: atelier_core::Request,
 ) -> atelier_core::Report {
-    let project = world.project();
     let plugins = world.plugins();
-    let mut observation = observe(&project, &plugins, state).unwrap();
+    let mut observation = observe(project, &plugins, state).unwrap();
     observation.requests.insert(key(), vec![request]);
 
-    act(&observation, state, &project, &plugins, &mut |_| {
+    act(&observation, state, project, &plugins, &mut |_| {
         Ok::<(), ()>(())
     })
     .unwrap()
@@ -259,12 +259,12 @@ fn a_finish_request_settles_its_step_and_is_harmless_when_replayed() {
     let (world, mut state) = building();
     let request = finish(&state, "nothing");
 
-    requested(&world, &mut state, request.clone());
-    let done = state.clone();
-    requested(&world, &mut state, request);
+    requested(&world, &world.project(), &mut state, request.clone());
+    let runs = state.runs.clone();
+    requested(&world, &world.project(), &mut state, request);
 
     assert_eq!(phase(&state), Phase::Done);
-    assert_eq!(state, done);
+    assert_eq!(state.runs, runs);
     assert_eq!(status(&state, "builder"), Some(Status::Settled(Outcome(1))));
     assert!(
         world
@@ -293,18 +293,18 @@ fn stale_or_invalid_finish_requests_leave_the_run_alone() {
     let unknown = finish(&state, "unknown");
 
     for request in [old_pass, old_session, old_round, unknown] {
-        let before = state.clone();
+        let before = state.runs.clone();
 
-        let report = requested(&world, &mut state, request);
+        let report = requested(&world, &world.project(), &mut state, request);
 
-        assert_eq!(state, before);
+        assert_eq!(state.runs, before);
         assert_eq!(report.moves, []);
     }
 }
 
 #[test]
 fn a_stop_request_preempts_pending_starts_and_removes_the_request_mark() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
     let mut state = State::default();
     let mut record = Record::new(&key(), "Fix the dead link", "build");
     record.begin(&world.project().pipelines[0]);
@@ -316,7 +316,7 @@ fn a_stop_request_preempts_pending_starts_and_removes_the_request_mark() {
     };
     state.runs.insert(key(), record);
 
-    requested(&world, &mut state, request);
+    requested(&world, &world.project(), &mut state, request);
 
     assert_eq!(phase(&state), Phase::Stopped);
     assert_eq!(world.ticket("12").marks, Marks::default());
@@ -329,7 +329,7 @@ fn a_finish_waits_for_a_pending_start_and_cannot_settle_its_replacement() {
     let request = finish(&state, "nothing");
     state.runs.get_mut(&key()).unwrap().pending = vec![Action::Start(1)];
 
-    requested(&world, &mut state, request);
+    requested(&world, &world.project(), &mut state, request);
 
     assert_eq!(phase(&state), Phase::Running);
     assert_eq!(world.sessions.borrow().len(), 2);
@@ -363,7 +363,7 @@ fn a_stop_request_takes_priority_over_a_queued_finish() {
 
 #[test]
 fn a_transient_failure_retries_and_keeps_the_listing_unconfirmed() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
     let project = world.project();
     let mut state = State::default();
     *world.fail.borrow_mut() = Some((3, Failure::Transient));
@@ -373,7 +373,7 @@ fn a_transient_failure_retries_and_keeps_the_listing_unconfirmed() {
     assert_eq!(report.failures.len(), 1);
     assert_eq!(phase(&state), Phase::Running);
     assert_eq!(status(&state, "worktree"), Some(Status::Running));
-    assert!(state.etags.is_empty());
+    assert_eq!(state.etags.len(), 0);
 
     let report = world.poll(&project, &mut state);
 
@@ -384,7 +384,7 @@ fn a_transient_failure_retries_and_keeps_the_listing_unconfirmed() {
 
 #[test]
 fn a_permanent_start_failure_blocks_the_run() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
     let project = world.project();
     let mut state = State::default();
     *world.fail.borrow_mut() = Some((3, Failure::Permanent));
@@ -393,15 +393,15 @@ fn a_permanent_start_failure_blocks_the_run() {
 
     let ticket = world.ticket("12");
     assert_eq!(phase(&state), Phase::Blocked(Reason::Start(0)));
-    assert_eq!(ticket.marks, Marks::default().with(Mark::Blocked));
+    assert_eq!(ticket.marks, Marks::default().with(Tag::Blocked));
     assert!(ticket.comments[0].contains("could not start `worktree`"));
     assert!(ticket.comments[0].contains("call 3 fails"));
-    assert!(world.sessions.borrow().is_empty());
+    assert_eq!(*world.sessions.borrow(), []);
 }
 
 #[test]
 fn a_claim_that_fails_for_good_blocks_the_run() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
     let mut state = State::default();
     *world.fail.borrow_mut() = Some((1, Failure::Permanent));
 
@@ -428,7 +428,7 @@ fn a_fresh_pass_keeps_each_steps_own_previous_session() {
 
 #[test]
 fn a_blocked_run_requested_again_continues_on_its_branch() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
     let project = world.project();
     let mut state = State::default();
     *world.fail.borrow_mut() = Some((3, Failure::Permanent));
@@ -436,7 +436,7 @@ fn a_blocked_run_requested_again_continues_on_its_branch() {
     *world.fail.borrow_mut() = None;
 
     world.edit("12", |ticket| {
-        ticket.marks = ticket.marks.with(Mark::Requested)
+        ticket.marks = std::mem::take(&mut ticket.marks).with(Tag::Trigger("build"));
     });
     world.poll(&project, &mut state);
 
@@ -444,7 +444,7 @@ fn a_blocked_run_requested_again_continues_on_its_branch() {
     assert_eq!(status(&state, "builder"), Some(Status::Running));
     assert_eq!(
         world.ticket("12").marks,
-        Marks::default().with(Mark::Working)
+        Marks::default().with(Tag::Working)
     );
     assert_eq!(state.runs[&key()].branch, "issue-12-fix-the-dead-link");
 }
@@ -454,13 +454,13 @@ fn removing_the_working_mark_stops_the_run_and_removes_its_worktree() {
     let (world, mut state) = building();
 
     world.edit("12", |ticket| {
-        ticket.marks = ticket.marks.without(Mark::Working);
+        ticket.marks = std::mem::take(&mut ticket.marks).without(Tag::Working);
     });
     world.poll(&world.project(), &mut state);
 
     assert_eq!(phase(&state), Phase::Stopped);
     stopped(&world, "lost its working mark or was closed");
-    assert!(world.worktrees.borrow().is_empty());
+    assert_eq!(world.worktrees.borrow().len(), 0);
 }
 
 #[test]
@@ -472,7 +472,7 @@ fn closing_the_issue_stops_the_builder_and_drops_the_working_mark() {
 
     assert_eq!(phase(&state), Phase::Stopped);
     stopped(&world, "lost its working mark or was closed");
-    assert!(!world.ticket("12").marks.has(Mark::Working));
+    assert!(!world.ticket("12").marks.has(Tag::Working));
 }
 
 #[test]
@@ -496,7 +496,7 @@ fn failed_rounds_up_to_the_limit_block_the_run() {
     }
 
     let ticket = world.ticket("12");
-    assert_eq!(ticket.marks, Marks::default().with(Mark::Blocked));
+    assert_eq!(ticket.marks, Marks::default().with(Tag::Blocked));
     assert!(
         ticket
             .comments
@@ -505,7 +505,7 @@ fn failed_rounds_up_to_the_limit_block_the_run() {
             .contains("`checks` failed: CI failed on 3 commits")
     );
     stopped(&world, "CI failed on 3 commits");
-    assert!(world.worktrees.borrow().is_empty());
+    assert_eq!(world.worktrees.borrow().len(), 0);
 }
 
 #[test]
@@ -563,8 +563,8 @@ fn passing_checks_and_a_ready_pull_request_reach_the_merge_which_closes_it() {
     let report = &ticket.comments[ticket.comments.len() - 1];
     assert_eq!(phase(&state), Phase::Done);
     assert!(!ticket.open);
-    assert!(!ticket.marks.has(Mark::Working));
-    assert!(world.worktrees.borrow().is_empty());
+    assert!(!ticket.marks.has(Tag::Working));
+    assert_eq!(world.worktrees.borrow().len(), 0);
     stopped(&world, "atelier finished this run of build");
     assert!(report.starts_with("atelier finished `build`:"), "{report}");
     assert!(
@@ -619,7 +619,7 @@ fn passed(why: &str) -> Observed {
 
 #[test]
 fn a_pipeline_without_forge_steps_does_not_ask_the_forge() {
-    let world = World::with_issue("12", "Audit", &[Mark::Requested]);
+    let world = World::with_issue("12", "Audit", &[Tag::Trigger("build")]);
     let mut project = world.project_with(&audit());
     project.forge = "another-plugin".into();
     let mut state = State::default();
@@ -633,7 +633,7 @@ fn a_pipeline_without_forge_steps_does_not_ask_the_forge() {
 
 #[test]
 fn steps_whose_needs_hold_together_start_in_the_same_poll() {
-    let world = World::with_issue("12", "Audit", &[Mark::Requested]);
+    let world = World::with_issue("12", "Audit", &[Tag::Trigger("build")]);
     let project = world.project_with(&audit());
     let mut state = State::default();
 
@@ -678,7 +678,7 @@ fn steps_whose_needs_hold_together_start_in_the_same_poll() {
 
 #[test]
 fn a_step_whose_needs_cannot_hold_is_skipped_and_the_run_is_done() {
-    let world = World::with_issue("12", "Audit", &[Mark::Requested]);
+    let world = World::with_issue("12", "Audit", &[Tag::Trigger("build")]);
     let project = world.project_with(&audit());
     let mut state = State::default();
     world
@@ -701,7 +701,7 @@ fn a_step_whose_needs_cannot_hold_is_skipped_and_the_run_is_done() {
 
 #[test]
 fn a_command_that_settles_an_outcome_it_lacks_is_reported() {
-    let world = World::with_issue("12", "Audit", &[Mark::Requested]);
+    let world = World::with_issue("12", "Audit", &[Tag::Trigger("build")]);
     let project = world.project_with(&audit());
     let mut state = State::default();
     world.commands.borrow_mut().insert(
@@ -726,14 +726,14 @@ fn a_command_that_settles_an_outcome_it_lacks_is_reported() {
 
 #[test]
 fn an_issue_marked_working_that_atelier_never_took_is_blocked() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Working]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Working]);
     let mut state = State::default();
 
     world.poll(&world.project(), &mut state);
 
     let ticket = world.ticket("12");
     assert_eq!(phase(&state), Phase::Blocked(Reason::LostTrack));
-    assert_eq!(ticket.marks, Marks::default().with(Mark::Blocked));
+    assert_eq!(ticket.marks, Marks::default().with(Tag::Blocked));
     assert!(ticket.comments[0].contains("no record"));
 }
 
@@ -745,7 +745,7 @@ fn an_unmarked_issue_is_left_alone() {
     let report = world.poll(&world.project(), &mut state);
 
     assert_eq!(report.moves, []);
-    assert!(state.runs.is_empty());
+    assert_eq!(state.runs.len(), 0);
     assert_eq!(*world.changes.borrow(), 0);
 }
 
@@ -790,7 +790,7 @@ fn running(steps: &[&str]) -> Record {
 
 #[test]
 fn a_builder_without_a_worktree_is_blocked_not_started() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Working]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Working]);
     let mut state = State::default();
     let mut record = running(&["worktree", "builder", "checks", "ready", "merge"]);
     record.pending = vec![Action::Start(1)];
@@ -808,7 +808,7 @@ fn a_builder_without_a_worktree_is_blocked_not_started() {
 
 #[test]
 fn a_run_whose_pipeline_changed_under_it_is_blocked() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Working]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Working]);
     let mut state = State::default();
     state
         .runs
@@ -823,7 +823,7 @@ fn a_run_whose_pipeline_changed_under_it_is_blocked() {
 #[test]
 fn removing_a_pipeline_blocks_its_running_or_claiming_run() {
     for before in [Phase::Running, Phase::Claiming] {
-        let world = World::with_issue("12", "Fix the dead link", &[Mark::Working]);
+        let world = World::with_issue("12", "Fix the dead link", &[Tag::Working]);
         let mut state = State::default();
         let mut record = running(&["worktree", "builder", "checks", "ready", "merge"]);
         record.phase = before;
@@ -839,7 +839,7 @@ fn removing_a_pipeline_blocks_its_running_or_claiming_run() {
 
 #[test]
 fn saved_progress_the_pipeline_cannot_resume_blocks_its_run() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Working]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Working]);
     let mut state = State::default();
     let mut record = running(&["worktree", "builder", "checks", "ready", "merge"]);
     record.progress.status[0] = Status::Pending;
@@ -852,12 +852,12 @@ fn saved_progress_the_pipeline_cannot_resume_blocks_its_run() {
 
 #[test]
 fn the_filter_narrows_requests_but_not_lost_track() {
-    let world = World::with_issue("12", "Fix the dead link", &[Mark::Requested]);
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
     world.edit("12", |ticket| ticket.assignee = Some("someone-else".into()));
     let copy = world.ticket("12");
     world.tickets.borrow_mut().insert("13".into(), copy);
     world.edit("13", |ticket| {
-        ticket.marks = Marks::default().with(Mark::Working);
+        ticket.marks = Marks::default().with(Tag::Working);
     });
     *world.filter.borrow_mut() = Filter {
         assignee: Some("me".into()),
@@ -873,4 +873,415 @@ fn the_filter_narrows_requests_but_not_lost_track() {
     };
     assert!(!state.runs.contains_key(&key()));
     assert_eq!(state.runs[&lost].phase, Phase::Blocked(Reason::LostTrack));
+}
+
+/// A project whose pipelines are the built-in build and the audit
+/// pipeline, in that order.
+fn two_pipelines(world: &World) -> atelier_core::Project {
+    let build = crate::world::build();
+    let audit = audit();
+
+    world.project_with_pipelines(&[("build", build.as_slice()), ("audit", audit.as_slice())])
+}
+
+#[test]
+fn an_issue_carrying_a_pipelines_trigger_starts_that_pipeline() {
+    let world = World::with_issue("12", "Audit", &[Tag::Trigger("audit")]);
+    let project = two_pipelines(&world);
+    let mut state = State::default();
+
+    let report = world.poll(&project, &mut state);
+
+    let record = &state.runs[&key()];
+    let ticket = world.ticket("12");
+
+    assert_eq!(record.pipeline, "audit");
+    assert_eq!(record.phase, Phase::Running);
+    assert_eq!(
+        report.moves.first().map(|moved| moved.pipeline.as_str()),
+        Some("audit")
+    );
+    assert_eq!(*world.started.borrow(), ["worktree", "deps", "lint"]);
+    assert!(!ticket.marks.has(Tag::Trigger("audit")));
+    assert!(ticket.marks.has(Tag::Working));
+}
+
+#[test]
+fn several_triggers_start_nothing_and_are_reported_ambiguous() {
+    let world = World::with_issue(
+        "12",
+        "Audit",
+        &[Tag::Trigger("audit"), Tag::Trigger("build")],
+    );
+    let project = two_pipelines(&world);
+    let mut state = State::default();
+
+    let report = world.poll(&project, &mut state);
+
+    assert_eq!(report.moves, []);
+    assert_eq!(report.failures, []);
+    assert_eq!(report.ambiguous.len(), 1);
+
+    let ambiguous = report.ambiguous.first().unwrap();
+
+    assert_eq!(ambiguous.0, key());
+    assert_eq!(ambiguous.1, ["build", "audit"]);
+    assert_eq!(state.runs.len(), 0);
+    assert_eq!(*world.changes.borrow(), 0);
+    assert_eq!(state.etags.len(), 3);
+
+    // The listing did not change, so atelier reports nothing again: the
+    // daemon's line repeats only when a listing changes.
+    let report = world.poll(&project, &mut state);
+
+    assert_eq!(report.ambiguous, []);
+    assert_eq!(report.moves, []);
+    assert_eq!(report.failures, []);
+    assert_eq!(*world.changes.borrow(), 0);
+    assert_eq!(state.runs.len(), 0);
+    assert_eq!(state.etags.len(), 3);
+
+    world.edit("12", |ticket| {
+        ticket.marks = std::mem::take(&mut ticket.marks).without(Tag::Trigger("audit"));
+    });
+    world.poll(&project, &mut state);
+
+    assert_eq!(state.runs[&key()].pipeline, "build");
+    assert_eq!(
+        world.ticket("12").marks,
+        Marks::default().with(Tag::Working)
+    );
+}
+
+#[test]
+fn a_finished_build_asked_for_audit_runs_audit_in_a_new_generation() {
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
+    let project = two_pipelines(&world);
+    let mut state = State::default();
+    world.poll(&project, &mut state);
+    let generation = state.runs[&key()].generation;
+    let finish = finish(&state, "nothing");
+
+    requested(&world, &project, &mut state, finish);
+
+    assert_eq!(phase(&state), Phase::Done);
+    assert!(!world.ticket("12").open);
+
+    world.edit("12", |ticket| {
+        ticket.open = true;
+        ticket.marks = std::mem::take(&mut ticket.marks).with(Tag::Trigger("audit"));
+    });
+    world.poll(&project, &mut state);
+
+    let record = &state.runs[&key()];
+    let ticket = world.ticket("12");
+
+    assert_eq!(record.pipeline, "audit");
+    assert_eq!(record.generation, generation.saturating_add(1));
+    assert_eq!(record.phase, Phase::Running);
+    assert!(!ticket.marks.has(Tag::Trigger("audit")));
+    assert!(ticket.marks.has(Tag::Working));
+}
+
+#[test]
+fn a_running_build_that_gains_audit_runs_on_and_audit_waits_its_turn() {
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
+    let project = two_pipelines(&world);
+    let mut state = State::default();
+    world.poll(&project, &mut state);
+    let generation = state.runs[&key()].generation;
+
+    world.edit("12", |ticket| {
+        ticket.marks = std::mem::take(&mut ticket.marks).with(Tag::Trigger("audit"));
+    });
+    let report = world.poll(&project, &mut state);
+
+    assert_eq!(report.ambiguous, []);
+    assert_eq!(report.moves, []);
+    assert_eq!(phase(&state), Phase::Running);
+    assert_eq!(state.runs[&key()].pipeline, "build");
+    assert_eq!(state.runs[&key()].generation, generation);
+    assert!(world.ticket("12").marks.has(Tag::Trigger("audit")));
+
+    let finish = finish(&state, "nothing");
+    requested(&world, &project, &mut state, finish);
+    assert_eq!(phase(&state), Phase::Done);
+
+    world.edit("12", |ticket| ticket.open = true);
+    world.poll(&project, &mut state);
+
+    assert_eq!(state.runs[&key()].pipeline, "audit");
+    assert_eq!(state.runs[&key()].generation, generation.saturating_add(1));
+}
+
+/// A working run is not ambiguous, even when its item gains both
+/// pipelines' triggers: it has nothing pending, so it goes on with its own
+/// pipeline and changes no mark.
+#[test]
+fn a_running_build_that_gains_both_triggers_is_not_ambiguous() {
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
+    let project = two_pipelines(&world);
+    let mut state = State::default();
+    world.poll(&project, &mut state);
+
+    let generation = state.runs[&key()].generation;
+    let changes = *world.changes.borrow();
+
+    // The first poll left the builder running with nothing pending, so only
+    // its working mark keeps it from being free to start.
+    assert_eq!(phase(&state), Phase::Running);
+    assert_eq!(state.runs[&key()].pending, []);
+
+    world.edit("12", |ticket| {
+        ticket.marks = std::mem::take(&mut ticket.marks)
+            .with(Tag::Trigger("build"))
+            .with(Tag::Trigger("audit"));
+    });
+
+    let report = world.poll(&project, &mut state);
+
+    assert_eq!(report.ambiguous, []);
+    assert_eq!(report.moves, []);
+    assert_eq!(report.failures, []);
+    assert_eq!(*world.changes.borrow(), changes);
+    assert_eq!(*world.started.borrow(), ["worktree", "builder"]);
+    assert_eq!(phase(&state), Phase::Running);
+    assert_eq!(state.runs[&key()].pipeline, "build");
+    assert_eq!(state.runs[&key()].generation, generation);
+    assert_eq!(
+        world.ticket("12").marks,
+        Marks::default()
+            .with(Tag::Working)
+            .with(Tag::Trigger("build"))
+            .with(Tag::Trigger("audit"))
+    );
+}
+
+/// An audit run takes the audit trigger off when it starts. A build
+/// trigger that arrives while it runs is another pipeline's, so stopping
+/// the run leaves it alone; the issue is closed, so nothing starts it
+/// again in the same poll.
+#[test]
+fn a_stop_unmarks_the_runs_own_trigger_and_not_the_one_asked_for() {
+    let world = World::with_issue("12", "Audit", &[Tag::Trigger("audit")]);
+    let project = two_pipelines(&world);
+    let mut state = State::default();
+    world.poll(&project, &mut state);
+    assert_eq!(state.runs[&key()].pipeline, "audit");
+
+    world.edit("12", |ticket| {
+        ticket.open = false;
+        ticket.marks = std::mem::take(&mut ticket.marks).with(Tag::Trigger("build"));
+    });
+    let stop = atelier_core::Request {
+        generation: state.runs[&key()].generation,
+        command: atelier_core::Command::Stop,
+    };
+    requested(&world, &project, &mut state, stop);
+
+    let ticket = world.ticket("12");
+
+    assert_eq!(phase(&state), Phase::Stopped);
+    assert!(ticket.marks.has(Tag::Trigger("build")));
+    assert!(!ticket.marks.has(Tag::Working));
+}
+
+/// A claim that fails for good takes the run's own trigger mark off, and
+/// leaves another pipeline's where it is.
+#[test]
+fn a_failed_claim_unmarks_only_the_runs_own_trigger() {
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
+    let project = two_pipelines(&world);
+    let mut state = State::default();
+    let mut record = Record::new(&key(), "Fix the dead link", "build");
+    record.phase = Phase::Claiming;
+    record.pending = vec![Action::Mark(Mark::Working), Action::Unmark(Mark::Requested)];
+    state.runs.insert(key(), record);
+    world.edit("12", |ticket| {
+        ticket.open = false;
+        ticket.marks = std::mem::take(&mut ticket.marks).with(Tag::Trigger("audit"));
+    });
+    *world.fail.borrow_mut() = Some((1, Failure::Permanent));
+
+    world.poll(&project, &mut state);
+
+    let ticket = world.ticket("12");
+
+    assert_eq!(phase(&state), Phase::Blocked(Reason::Claim));
+    assert!(!ticket.marks.has(Tag::Trigger("build")));
+    assert!(ticket.marks.has(Tag::Trigger("audit")));
+    assert!(ticket.marks.has(Tag::Blocked));
+    assert!(!ticket.marks.has(Tag::Working));
+}
+
+/// A claiming run with actions pending goes on with its own pipeline, even
+/// when the item gains another pipeline's trigger.
+#[test]
+fn a_claiming_run_that_gains_another_trigger_keeps_its_pipeline() {
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
+    let project = two_pipelines(&world);
+    let mut state = State::default();
+    let mut record = Record::new(&key(), "Fix the dead link", "build");
+    record.begin(&project.pipelines[0]);
+    record.phase = Phase::Claiming;
+    record.pending = vec![Action::Mark(Mark::Working), Action::Unmark(Mark::Requested)];
+    let generation = record.generation;
+    state.runs.insert(key(), record);
+    world.edit("12", |ticket| {
+        ticket.marks = std::mem::take(&mut ticket.marks).with(Tag::Trigger("audit"));
+    });
+
+    let report = world.poll(&project, &mut state);
+
+    let ticket = world.ticket("12");
+
+    assert_eq!(report.ambiguous, []);
+    assert_eq!(report.failures, []);
+    assert_eq!(phase(&state), Phase::Running);
+    assert_eq!(state.runs[&key()].pipeline, "build");
+    assert_eq!(state.runs[&key()].generation, generation);
+    assert!(!ticket.marks.has(Tag::Trigger("build")));
+    assert!(ticket.marks.has(Tag::Trigger("audit")));
+    assert!(ticket.marks.has(Tag::Working));
+}
+
+/// A blocked run whose item asks for another pipeline starts that
+/// pipeline, afresh, in the next poll.
+#[test]
+fn a_blocked_run_asked_for_another_pipeline_starts_it_in_a_new_generation() {
+    let world = World::with_issue("12", "Audit", &[Tag::Trigger("build")]);
+    let project = two_pipelines(&world);
+    let mut state = State::default();
+    *world.fail.borrow_mut() = Some((3, Failure::Permanent));
+    world.poll(&project, &mut state);
+    *world.fail.borrow_mut() = None;
+
+    let record = &state.runs[&key()];
+    let generation = record.generation;
+
+    assert_eq!(record.phase, Phase::Blocked(Reason::Start(0)));
+    assert_eq!(record.pipeline, "build");
+
+    world.edit("12", |ticket| {
+        ticket.marks = std::mem::take(&mut ticket.marks).with(Tag::Trigger("audit"));
+    });
+    let report = world.poll(&project, &mut state);
+
+    let record = &state.runs[&key()];
+
+    assert_eq!(report.ambiguous, []);
+    assert_eq!(report.failures, []);
+    assert_eq!(record.phase, Phase::Running);
+    assert_eq!(record.pipeline, "audit");
+    assert_eq!(record.generation, generation.saturating_add(1));
+    assert!(!world.ticket("12").marks.has(Tag::Trigger("audit")));
+    assert!(world.ticket("12").marks.has(Tag::Working));
+}
+
+/// An ambiguous item changes nothing, even when a run of it is already
+/// done or blocked.
+#[test]
+fn an_ambiguous_item_with_a_done_or_blocked_run_is_still_reported() {
+    let world = World::with_issue(
+        "12",
+        "Fix the dead link",
+        &[Tag::Trigger("build"), Tag::Trigger("audit")],
+    );
+    let project = two_pipelines(&world);
+
+    for before in [Phase::Done, Phase::Blocked(Reason::Failed(2))] {
+        let mut state = State::default();
+        let mut record = Record::new(&key(), "Fix the dead link", "build");
+        record.phase = before;
+        state.runs.insert(key(), record);
+
+        let report = world.poll(&project, &mut state);
+
+        assert_eq!(report.moves, [], "{before:?}");
+        assert_eq!(report.failures, [], "{before:?}");
+        assert_eq!(
+            report.ambiguous,
+            [(key(), vec!["build".to_owned(), "audit".to_owned()])],
+            "{before:?}"
+        );
+        assert_eq!(phase(&state), before, "{before:?}");
+        assert_eq!(*world.changes.borrow(), 0, "{before:?}");
+    }
+}
+
+#[test]
+fn a_trigger_the_project_has_no_pipeline_for_is_ignored() {
+    use atelier_core::{Issue, Observation, Seen, Watched};
+    use std::collections::BTreeMap;
+
+    let world = World::with_issue("12", "Audit", &[]);
+    let marks = Marks::default().with(Tag::Trigger("release"));
+    let watched = Watched {
+        issue: Issue {
+            key: key(),
+            title: "Audit".into(),
+            open: true,
+            marks: marks.clone(),
+        },
+        seen: Seen {
+            open: true,
+            marks,
+            pull_request: None,
+        },
+    };
+    let observation = Observation {
+        issues: BTreeMap::from([(key(), watched)]),
+        ..Observation::default()
+    };
+    let mut state = State::default();
+
+    let report = act(
+        &observation,
+        &mut state,
+        &two_pipelines(&world),
+        &world.plugins(),
+        &mut |_| Ok::<(), ()>(()),
+    )
+    .unwrap();
+
+    assert_eq!(report.moves, []);
+    assert_eq!(report.ambiguous, []);
+    assert_eq!(state.runs.len(), 0);
+    assert_eq!(*world.changes.borrow(), 0);
+}
+
+#[test]
+fn observe_lists_every_pipeline_and_the_working_mark_once() {
+    use atelier_core::Listed;
+
+    let world = World::with_issue("12", "Fix the dead link", &[Tag::Trigger("build")]);
+    world.edit("12", |ticket| ticket.assignee = Some("someone-else".into()));
+    *world.filter.borrow_mut() = Filter {
+        assignee: Some("me".into()),
+        ..Filter::default()
+    };
+    let project = two_pipelines(&world);
+
+    let observation = observe(&project, &world.plugins(), &State::default()).unwrap();
+    let keys: Vec<(String, Listed)> = observation.etags.keys().cloned().collect();
+    let listed = *world.listings.borrow();
+
+    assert_eq!(
+        observation.issues.len(),
+        0,
+        "a trigger's listing takes the source's filter"
+    );
+    assert_eq!(
+        keys,
+        [
+            ("mem".to_owned(), Listed::Trigger("audit".to_owned())),
+            ("mem".to_owned(), Listed::Trigger("build".to_owned())),
+            ("mem".to_owned(), Listed::Working),
+        ]
+    );
+    assert_eq!(
+        listed,
+        project.pipelines.len().saturating_add(1),
+        "each pipeline's trigger and the working mark, once"
+    );
 }

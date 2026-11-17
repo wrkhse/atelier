@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use atelier_core::Listed;
 use atelier_core::rungs::{MAX_STEPS, Outcome, Progress, Status};
 use atelier_core::{Action, IssueKey, Mark, Phase, Reason, Record, Session, State, StepRecord};
 use color_eyre::eyre::{Result, WrapErr};
@@ -73,14 +74,17 @@ struct SessionFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct EtagFile {
     tracker: String,
-    mark: MarkFile,
+    /// `working`, or the name of the pipeline whose trigger it lists.
+    mark: String,
     etag: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MarkFile {
-    Build,
+    /// An `0.1.0-rc.8` file writes this mark as `build`.
+    #[serde(alias = "build")]
+    Requested,
     Working,
     Blocked,
 }
@@ -166,6 +170,23 @@ pub fn write(path: &Path, projects: &BTreeMap<String, State>) -> Result<()> {
     Ok(())
 }
 
+/// The listing tag a file's mark names: `working`, or a pipeline's trigger.
+fn listed(mark: &str) -> Listed {
+    if mark == "working" {
+        Listed::Working
+    } else {
+        Listed::Trigger(mark.to_owned())
+    }
+}
+
+/// A listing tag as the file keeps it.
+fn mark_name(listed: &Listed) -> String {
+    match listed {
+        Listed::Working => "working".to_owned(),
+        Listed::Trigger(name) => name.clone(),
+    }
+}
+
 impl From<ProjectFile> for State {
     fn from(file: ProjectFile) -> Self {
         let older = file.issues.into_iter().map(older::IssueFile::into_record);
@@ -173,7 +194,7 @@ impl From<ProjectFile> for State {
         let etags = file
             .etags
             .into_iter()
-            .map(|tag| ((tag.tracker, tag.mark.into()), tag.etag));
+            .map(|tag| ((tag.tracker, listed(&tag.mark)), tag.etag));
 
         Self {
             runs: runs.collect(),
@@ -188,9 +209,9 @@ impl From<&State> for ProjectFile {
             .runs
             .iter()
             .map(|(key, record)| RunFile::from_record(key, record));
-        let etags = state.etags.iter().map(|((tracker, mark), etag)| EtagFile {
+        let etags = state.etags.iter().map(|((tracker, tag), etag)| EtagFile {
             tracker: tracker.clone(),
-            mark: (*mark).into(),
+            mark: mark_name(tag),
             etag: etag.clone(),
         });
 
@@ -310,7 +331,7 @@ impl From<Status> for StatusFile {
 impl From<MarkFile> for Mark {
     fn from(mark: MarkFile) -> Self {
         match mark {
-            MarkFile::Build => Self::Requested,
+            MarkFile::Requested => Self::Requested,
             MarkFile::Working => Self::Working,
             MarkFile::Blocked => Self::Blocked,
         }
@@ -320,7 +341,7 @@ impl From<MarkFile> for Mark {
 impl From<Mark> for MarkFile {
     fn from(mark: Mark) -> Self {
         match mark {
-            Mark::Requested => Self::Build,
+            Mark::Requested => Self::Requested,
             Mark::Working => Self::Working,
             Mark::Blocked => Self::Blocked,
         }
@@ -417,8 +438,8 @@ impl From<Action> for ActionFile {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_phase_status_and_action_survives_the_file() {
+    /// A project whose runs carry every phase, status and pending action.
+    fn projects_with_every_phase_and_action() -> BTreeMap<String, State> {
         let phases = [
             Phase::Untracked,
             Phase::Claiming,
@@ -478,11 +499,20 @@ mod tests {
         }
         state
             .etags
-            .insert(("github".into(), Mark::Working), "W/\"tag\"".into());
+            .insert(("github".into(), Listed::Working), "W/\"tag\"".into());
+        state.etags.insert(
+            ("github".into(), Listed::Trigger("audit".into())),
+            "W/\"audit\"".into(),
+        );
 
+        BTreeMap::from([("StevenJPx2/demo".to_owned(), state)])
+    }
+
+    #[test]
+    fn every_phase_status_and_action_survives_the_file() {
         let folder = std::env::temp_dir().join(format!("atelier-state-{}", std::process::id()));
         let path = folder.join("state.json");
-        let projects = BTreeMap::from([("StevenJPx2/demo".to_owned(), state)]);
+        let projects = projects_with_every_phase_and_action();
         write(&path, &projects).unwrap();
         let read = load(&path);
         let unreadable = load(&folder);
@@ -491,5 +521,55 @@ mod tests {
         assert_eq!(read.unwrap(), projects);
         assert!(unreadable.is_err());
         assert_eq!(load(&folder.join("missing.json")).unwrap(), BTreeMap::new());
+    }
+
+    #[test]
+    fn build_reads_as_the_requested_mark_and_as_the_build_pipeline_s_trigger() {
+        let action: ActionFile =
+            serde_json::from_str(r#"{"action":"mark","mark":"build"}"#).unwrap();
+        let project: ProjectFile = serde_json::from_str(
+            r#"{"etags":[{"tracker":"github","mark":"build","etag":"W/\"build\""}]}"#,
+        )
+        .unwrap();
+        let state = State::from(project);
+
+        assert_eq!(Action::from(action), Action::Mark(Mark::Requested));
+        assert_eq!(
+            state.etags,
+            BTreeMap::from([(
+                ("github".to_owned(), Listed::Trigger("build".to_owned())),
+                "W/\"build\"".to_owned()
+            )])
+        );
+    }
+
+    #[test]
+    fn a_new_file_writes_requested_and_each_trigger_by_name() {
+        let key = IssueKey {
+            tracker: "github".into(),
+            id: "12".into(),
+        };
+        let mut record = Record::new(&key, "Fix the dead link", "build");
+        record.pending = vec![Action::Unmark(Mark::Requested)];
+        let state = State {
+            runs: BTreeMap::from([(key, record)]),
+            etags: BTreeMap::from([
+                (("github".to_owned(), Listed::Working), "W/\"w\"".to_owned()),
+                (
+                    ("github".to_owned(), Listed::Trigger("audit".to_owned())),
+                    "W/\"a\"".to_owned(),
+                ),
+            ]),
+        };
+        let file = ProjectFile::from(&state);
+        let text = serde_json::to_string(&file).unwrap();
+        let read: ProjectFile = serde_json::from_str(&text).unwrap();
+        let requested = r#"{"action":"unmark","mark":"requested"}"#;
+        let trigger = r#"{"tracker":"github","mark":"audit","etag":"W/\"a\""}"#;
+
+        assert!(text.contains(requested), "{text}");
+        assert!(text.contains(trigger), "{text}");
+        assert!(!text.contains(r#""mark":"build""#), "{text}");
+        assert_eq!(read, file);
     }
 }

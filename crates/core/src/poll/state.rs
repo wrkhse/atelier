@@ -3,14 +3,32 @@ use std::path::PathBuf;
 
 use rungs::Progress;
 
-use crate::{Action, IssueKey, Mark, Phase, Pipeline, Run, Session};
+use crate::{Action, IssueKey, Phase, Pipeline, Run, Session, Tag};
 
 /// What atelier keeps of a project between polls: each item's run and the
 /// trackers' listing tags. The tracker's marks stay the source of truth.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct State {
     pub runs: BTreeMap<IssueKey, Record>,
-    pub etags: BTreeMap<(String, Mark), String>,
+    pub etags: BTreeMap<(String, Listed), String>,
+}
+
+/// A tracker listing atelier keeps the tag of: one pipeline's trigger, or
+/// the working mark.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Listed {
+    Trigger(String),
+    Working,
+}
+
+impl Listed {
+    /// The tag this listing asks a tracker for.
+    pub(super) const fn tag(&self) -> Tag<'_> {
+        match self {
+            Self::Trigger(pipeline) => Tag::Trigger(pipeline.as_str()),
+            Self::Working => Tag::Working,
+        }
+    }
 }
 
 /// One item's run of a pipeline; an item has one run at a time. `pending`

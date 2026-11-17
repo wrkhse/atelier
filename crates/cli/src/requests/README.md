@@ -38,8 +38,8 @@ atelier stop "security-audit github#40" --repo StevenJPx2/atelier
   session and failed-round count, and applies only while that resident step
   runs. A replay after a crash is harmless.
 - **Stop first.** A stop preempts queued finishes and pending starts. It
-  removes the trigger mark as well as the working mark, so it cannot start
-  the run again from the same request.
+  removes the run's trigger mark as well as the working mark, so it cannot
+  start the run again from the same request.
 - **Choosing a step.** Finish infers a unique running agent step declaring
   the outcome; ambiguity names the candidates and requires `--step`.
 - **Queue folder.** `~/.local/state/atelier/requests/<owner>/<repo>/`.

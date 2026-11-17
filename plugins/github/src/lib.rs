@@ -50,7 +50,7 @@ impl Plugin for GitHub {
     }
 
     fn register<'a>(&'a self, registry: &mut Registry<'a>) {
-        registry.tracker(|settings| Ok(Box::new(self.tracker(settings)?)));
+        registry.tracker(|settings, pipelines| Ok(Box::new(self.tracker(settings, pipelines)?)));
         registry.forge(self);
         registry.step(self);
     }

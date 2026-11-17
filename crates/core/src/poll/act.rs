@@ -2,14 +2,11 @@ use std::path::PathBuf;
 
 use rungs::{Outcome, Status};
 
-use super::{Observation, Plugins, Project, Record, State, Watched};
+use super::{Observation, Plugins, Project, Record, State, Watched, trigger};
 use crate::{
     Action, Brief, Event, IssueKey, Observed, Phase, Pipeline, PluginError, PullRequest, Reason,
-    Run, RunContext, Seen, Started, Tracker, step,
+    Run, RunContext, Seen, Started, Tag, Tracker, step,
 };
-
-/// The pipeline the trigger mark starts.
-pub const TRIGGERED: &str = "build";
 
 /// The most moves one run makes in one poll. A start takes a few for each
 /// step, so this only stops a fault from looping.
@@ -20,6 +17,9 @@ const MAX_MOVES: usize = 64;
 pub struct Report {
     pub moves: Vec<Move>,
     pub failures: Vec<(IssueKey, PluginError)>,
+    /// Items carrying several pipelines' triggers, with those pipelines'
+    /// names in the project's order; atelier starts none of them.
+    pub ambiguous: Vec<(IssueKey, Vec<String>)>,
 }
 
 /// One run's move on one event, such as `builder settled opened`.
@@ -45,9 +45,10 @@ type Found = (Event, Option<String>);
 ///
 /// `save` runs after each move and each action, so a stop between
 /// actions loses nothing; the next poll finishes what is pending. One
-/// item's failure is reported and leaves the others to go on. The
-/// trackers' listing tags are kept only when every item succeeded, so an
-/// item that failed is listed again.
+/// item's failure is reported and leaves the others to go on. An item
+/// carrying several pipelines' triggers is reported and left alone, and is
+/// no failure. The trackers' listing tags are kept only when every item
+/// succeeded, so an item that failed is listed again.
 ///
 /// # Errors
 ///
@@ -69,7 +70,7 @@ pub fn act<E>(
             state,
             &context,
             save,
-            &mut report.moves,
+            &mut report,
         )? {
             report.failures.push((key.clone(), error));
         }
@@ -89,18 +90,21 @@ fn drive<E>(
     state: &mut State,
     context: &Context<'_, '_>,
     save: &mut impl FnMut(&State) -> Result<(), E>,
-    moves: &mut Vec<Move>,
+    report: &mut Report,
 ) -> Result<Result<(), PluginError>, E> {
     let issue = &watched.issue;
-    let mut seen = watched.seen;
+    let mut seen = watched.seen.clone();
+    let asked = match asked(report, watched, state, context.project) {
+        Asked::Pipeline(name) => Some(name),
+        Asked::Nothing => None,
+        Asked::Several => return Ok(Ok(())),
+    };
 
     remember_pull_request(watched, state, save)?;
 
     for _ in 0..MAX_MOVES {
         let record = state.runs.get(&issue.key);
-        let name = record
-            .map_or(TRIGGERED, |record| record.pipeline.as_str())
-            .to_owned();
+        let name = pipeline_of(record, asked, context.project);
         let pipeline = context.project.pipeline(&name);
         let run = record.map_or(Run::UNTRACKED, Record::run);
         let pending = record.and_then(|record| record.pending.first().copied());
@@ -115,31 +119,19 @@ fn drive<E>(
 
             match perform(action, watched, &mut seen, record, pipeline, context) {
                 Ok(next) => {
-                    match (next, record.pending.first_mut()) {
-                        (Some(next), Some(first)) => *first = next,
-                        _ => {
-                            record.pending.remove(0);
-                        }
-                    }
+                    carried(record, next);
 
                     save(state)?;
                     continue;
                 }
-                Err(error) if error.is_permanent() => match (run.phase, action) {
-                    (Phase::Claiming, _) => {
-                        record.pending.clear();
-                        (Event::ClaimFailed, None)
-                    }
-                    (_, Action::Start(step)) => {
-                        record.pending.clear();
-                        (Event::StartFailed { step }, Some(error.message))
-                    }
-                    _ => return Ok(Err(error)),
+                Err(error) if error.is_permanent() => match failed(record, run, action, error) {
+                    Ok(found) => found,
+                    Err(error) => return Ok(Err(error)),
                 },
                 Err(error) => return Ok(Err(error)),
             }
         } else {
-            match next_event(run, record, pipeline, watched, &seen, context) {
+            match next_event(run, record, pipeline, watched, &seen, asked, context) {
                 Ok(Some(found)) => found,
                 Ok(None) => break,
                 Err(error) => return Ok(Err(error)),
@@ -160,16 +152,94 @@ fn drive<E>(
         let what = what(event, record, pipeline);
         moved(record, (event, why), pipeline, next, actions);
         save(state)?;
-        moves.push(Move {
-            key: issue.key.clone(),
-            pipeline: name,
-            from: run.phase,
-            to: next.phase,
-            what,
-        });
+        logged(report, &issue.key, name, run, next, what);
     }
 
     Ok(Ok(()))
+}
+
+/// What an item's trigger marks ask for.
+#[derive(Debug, Clone, Copy)]
+enum Asked<'a> {
+    /// The pipeline it asks for, when it carries that trigger and no other.
+    Pipeline(&'a str),
+    /// No pipeline: it carries no trigger.
+    Nothing,
+    /// Several pipelines' triggers, reported; atelier starts none.
+    Several,
+}
+
+/// The pipeline the item asks for: the one whose trigger it alone carries,
+/// none when it carries no trigger, or several, which are reported and
+/// start none until a person leaves one.
+fn asked<'p>(
+    report: &mut Report,
+    watched: &Watched,
+    state: &State,
+    project: &'p Project,
+) -> Asked<'p> {
+    let triggered = trigger::triggered(&watched.seen.marks, project);
+
+    if ambiguous(report, &watched.issue.key, &triggered, state, &watched.seen) {
+        return Asked::Several;
+    }
+
+    match triggered.as_slice() {
+        [pipeline] => Asked::Pipeline(pipeline.name()),
+        _ => Asked::Nothing,
+    }
+}
+
+/// Keeps the action the one just carried out left in its place, or drops
+/// it when it left none.
+fn carried(record: &mut Record, next: Option<Action>) {
+    if let Some(next) = next
+        && let Some(first) = record.pending.first_mut()
+    {
+        *first = next;
+
+        return;
+    }
+
+    record.pending.remove(0);
+}
+
+/// A permanent failure carrying out an action: a claim or a step that
+/// cannot start blocks the run, and any other failure is the item's. The
+/// actions it had pending are dropped either way.
+fn failed(
+    record: &mut Record,
+    run: Run,
+    action: Action,
+    error: PluginError,
+) -> Result<Found, PluginError> {
+    let found = match (run.phase, action) {
+        (Phase::Claiming, _) => (Event::ClaimFailed, None),
+        (_, Action::Start(step)) => (Event::StartFailed { step }, Some(error.message)),
+        _ => return Err(error),
+    };
+
+    record.pending.clear();
+
+    Ok(found)
+}
+
+/// Notes a move in the report, as a person reads it in the log.
+fn logged(
+    report: &mut Report,
+    key: &IssueKey,
+    pipeline: String,
+    run: Run,
+    next: Run,
+    what: String,
+) {
+    report.moves.push(Move {
+        key: key.clone(),
+        pipeline,
+        from: run.phase,
+        to: next.phase,
+        what,
+    });
 }
 
 /// Keeps a move: a request takes the pipeline's steps afresh, and a step's
@@ -196,6 +266,58 @@ fn moved(
     record.pending = actions;
 }
 
+/// The pipeline a run uses: one that is working or has actions pending
+/// keeps its own; otherwise the pipeline the item asks for, then the one it
+/// last ran, then the project's first.
+fn pipeline_of(record: Option<&Record>, asked: Option<&str>, project: &Project) -> String {
+    if let Some(record) = record
+        && (record.phase.is_working() || !record.pending.is_empty())
+    {
+        return record.pipeline.clone();
+    }
+
+    asked
+        .or_else(|| record.map(|record| record.pipeline.as_str()))
+        .or_else(|| project.pipelines.first().map(Pipeline::name))
+        .map_or_default(str::to_owned)
+}
+
+/// Whether a run would take a pipeline now: an item with no run yet, or a
+/// run that is not working and has no action pending.
+fn free_to_start(state: &State, key: &IssueKey) -> bool {
+    state
+        .runs
+        .get(key)
+        .is_none_or(|record| !record.phase.is_working() && record.pending.is_empty())
+}
+
+/// Reports an item carrying several pipelines' triggers, which atelier
+/// starts none of until a person leaves one, and says whether it did. A
+/// working run, or one with an action pending, is not ambiguous: it goes on.
+fn ambiguous(
+    report: &mut Report,
+    key: &IssueKey,
+    triggered: &[&Pipeline],
+    state: &State,
+    seen: &Seen,
+) -> bool {
+    let waiting = seen.open && free_to_start(state, key);
+
+    if triggered.len() < 2 || !waiting {
+        return false;
+    }
+
+    report.ambiguous.push((
+        key.clone(),
+        triggered
+            .iter()
+            .map(|pipeline| pipeline.name().to_owned())
+            .collect(),
+    ));
+
+    true
+}
+
 /// The next event for a run with nothing pending: a claim confirms
 /// itself, a running run hears its steps first and then its item, and a
 /// run not working hears a request.
@@ -205,6 +327,7 @@ fn next_event(
     pipeline: Option<&Pipeline>,
     watched: &Watched,
     seen: &Seen,
+    asked: Option<&str>,
     context: &Context<'_, '_>,
 ) -> Result<Option<Found>, PluginError> {
     let found = |event| Ok(Some((event, None)));
@@ -226,8 +349,8 @@ fn next_event(
         _ => {}
     }
 
-    let requested = seen.open && seen.marks.has(crate::Mark::Requested);
-    let unmarked = !seen.marks.has(crate::Mark::Working);
+    let requested = seen.open && asked.is_some_and(|name| seen.marks.has(Tag::Trigger(name)));
+    let unmarked = !seen.marks.has(Tag::Working);
 
     let event = match run.phase {
         Phase::Running if !seen.open => Event::IssueClosed,
@@ -468,12 +591,16 @@ fn perform(
 
     match action {
         Action::Mark(mark) => {
-            tracker.mark(repo, &issue.key.id, mark)?;
-            seen.marks = seen.marks.with(mark);
+            let tag = mark.on(&record.pipeline);
+
+            tracker.mark(repo, &issue.key.id, tag)?;
+            seen.marks = std::mem::take(&mut seen.marks).with(tag);
         }
         Action::Unmark(mark) => {
-            tracker.unmark(repo, &issue.key.id, mark)?;
-            seen.marks = seen.marks.without(mark);
+            let tag = mark.on(&record.pipeline);
+
+            tracker.unmark(repo, &issue.key.id, tag)?;
+            seen.marks = std::mem::take(&mut seen.marks).without(tag);
         }
         Action::CloseIssue => {
             tracker.close(repo, &issue.key.id)?;
@@ -624,6 +751,7 @@ fn stopped(record: &Record) -> String {
 }
 
 fn blocked(reason: Reason, record: &Record) -> String {
+    let pipeline = &record.pipeline;
     let why = |step: u8| {
         record
             .steps
@@ -633,11 +761,13 @@ fn blocked(reason: Reason, record: &Record) -> String {
     };
 
     match reason {
-        Reason::Claim => "atelier could not claim this issue; its log says why. Add the build \
-                          mark again to retry."
-            .to_owned(),
+        Reason::Claim => format!(
+            "atelier could not claim this issue; its log says why. Add the `{pipeline}` \
+             trigger mark again to retry."
+        ),
         Reason::Start(step) => format!(
-            "atelier could not start `{}` for this issue{}. Add the build mark again to retry.",
+            "atelier could not start `{}` for this issue{}. Add the `{pipeline}` trigger mark \
+             again to retry.",
             record.step_id(step),
             why(step)
         ),
@@ -646,12 +776,14 @@ fn blocked(reason: Reason, record: &Record) -> String {
             record.step_id(step),
             why(step)
         ),
-        Reason::Changed => "atelier stopped this run: its pipeline changed while it ran. Add \
-                            the build mark again to start it over."
-            .to_owned(),
-        Reason::LostTrack => "atelier holds no record of this issue, though it carries the \
-                              working mark. Add the build mark to start it again."
-            .to_owned(),
+        Reason::Changed => format!(
+            "atelier stopped this run: its pipeline changed while it ran. Add the `{pipeline}` \
+             trigger mark again to start it over."
+        ),
+        Reason::LostTrack => format!(
+            "atelier holds no record of this issue, though it carries the working mark. Add the \
+             `{pipeline}` trigger mark to start it again."
+        ),
     }
 }
 

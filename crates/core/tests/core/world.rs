@@ -14,11 +14,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use atelier_core::{
-    Agent, Brief, CiFile, Failure, Filter, Forge, Issue, IssueKey, Kind, Kinds, Listing, Mark,
-    Marks, MemoryTree, Observation, Observed, Outcomes, Pipeline, PluginError, Plugins, Project,
+    Agent, Brief, CiFile, Failure, Filter, Forge, Issue, IssueKey, Kind, Kinds, Listing, Marks,
+    MemoryTree, Observation, Observed, Outcomes, Pipeline, PluginError, Plugins, Project,
     PullRequest, Repo, Report, RunContext, Session, Setting, Settings, SettingsError, Source,
-    Started, State, Step, StepSpec, Tracker, Tree, WorktreeRequest, Worktrees, act, forge_kinds,
-    observe, observe_builder, observe_forge_step, start_forge_step,
+    Started, State, Step, StepSpec, Tag, Tracker, Tree, WorktreeRequest, Worktrees, act,
+    forge_kinds, observe, observe_builder, observe_forge_step, start_forge_step,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +43,8 @@ pub struct World {
     pub changes: RefCell<u32>,
     pub reads: RefCell<u32>,
     pub forge_reads: RefCell<u32>,
+    /// Each listing the poll asked a tracker for.
+    pub listings: RefCell<usize>,
     pub fail: RefCell<Option<(u32, Failure)>>,
     /// The project's filter for this tracker; the world honours its assignee.
     pub filter: RefCell<Filter>,
@@ -111,19 +113,29 @@ pub fn build() -> Vec<Settings> {
 impl World {
     /// A project on base `v2` whose `build` pipeline is `steps`.
     pub fn project_with(&self, steps: &[Settings]) -> Project {
+        self.project_with_pipelines(&[("build", steps)])
+    }
+
+    /// A project on base `v2` with `pipelines`, each named and stepped as
+    /// given, in the project's order.
+    pub fn project_with_pipelines(&self, pipelines: &[(&str, &[Settings])]) -> Project {
         let kinds = Kinds::default()
             .with("git", "mem", self)
             .with("agent", "mem", self)
             .with("forge", "mem", self)
             .with("atelier", "mem", self);
-        let build = Pipeline::read("build", steps, &kinds, &MemoryTree::default()).unwrap();
+        let pipelines = pipelines
+            .iter()
+            .map(|&(name, steps)| Pipeline::read(name, steps, &kinds, &MemoryTree::default()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
         Project {
             repo: Repo("o/r".into()),
             local: PathBuf::from("/local"),
             base: "v2".into(),
             forge: "mem".into(),
-            pipelines: vec![build],
+            pipelines,
             steps: PathBuf::from("/steps"),
         }
     }
@@ -133,14 +145,14 @@ impl World {
         self.project_with(&build())
     }
 
-    pub fn with_issue(id: &str, title: &str, marks: &[Mark]) -> Self {
+    pub fn with_issue(id: &str, title: &str, tags: &[Tag<'_>]) -> Self {
         let world = Self::default();
         world.tickets.borrow_mut().insert(
             id.to_owned(),
             Ticket {
                 title: title.to_owned(),
                 open: true,
-                marks: marks.iter().copied().collect(),
+                marks: tags.iter().copied().collect(),
                 assignee: None,
                 comments: Vec::new(),
             },
@@ -199,7 +211,7 @@ impl World {
             },
             title: ticket.title.clone(),
             open: ticket.open,
-            marks: ticket.marks,
+            marks: ticket.marks.clone(),
         }
     }
 }
@@ -208,22 +220,31 @@ impl Tracker for World {
     fn issues(
         &self,
         _: &Repo,
-        mark: Mark,
+        tag: Tag<'_>,
         filter: &Filter,
-        _: Option<&str>,
+        etag: Option<&str>,
     ) -> Result<Listing, PluginError> {
-        let issues = self
+        *self.listings.borrow_mut() += 1;
+
+        let issues: Vec<Issue> = self
             .tickets
             .borrow()
             .iter()
-            .filter(|(_, ticket)| ticket.open && ticket.marks.has(mark))
+            .filter(|(_, ticket)| ticket.open && ticket.marks.has(tag))
             .filter(|(_, ticket)| filter.assignee.is_none() || filter.assignee == ticket.assignee)
             .map(|(id, ticket)| Self::issue_of(id, ticket))
             .collect();
+        // The tag is the listing as it is now, so an edit that changes it
+        // makes the next poll list the item again.
+        let changed = format!("{issues:?}");
+
+        if etag == Some(changed.as_str()) {
+            return Ok(Listing::Unchanged);
+        }
 
         Ok(Listing::Changed {
             issues,
-            etag: Some(format!("{mark:?}")),
+            etag: Some(changed),
         })
     }
 
@@ -232,15 +253,21 @@ impl Tracker for World {
         Ok(Self::issue_of(id, &self.tickets.borrow()[id]))
     }
 
-    fn mark(&self, _: &Repo, id: &str, mark: Mark) -> Result<(), PluginError> {
+    fn mark(&self, _: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError> {
         self.change()?;
-        self.edit(id, |ticket| ticket.marks = ticket.marks.with(mark));
+        self.edit(id, |ticket| {
+            ticket.marks = std::mem::take(&mut ticket.marks).with(tag);
+        });
+
         Ok(())
     }
 
-    fn unmark(&self, _: &Repo, id: &str, mark: Mark) -> Result<(), PluginError> {
+    fn unmark(&self, _: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError> {
         self.change()?;
-        self.edit(id, |ticket| ticket.marks = ticket.marks.without(mark));
+        self.edit(id, |ticket| {
+            ticket.marks = std::mem::take(&mut ticket.marks).without(tag);
+        });
+
         Ok(())
     }
 

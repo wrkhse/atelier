@@ -50,6 +50,11 @@ pub fn init(paths: &Paths, path: &Path) -> Result<()> {
     let repo = Repo(entry.repo.clone());
     let build = Build::new(paths);
     let forge = build.forge(&resolved.forge)?;
+    let pipelines: Vec<&str> = resolved
+        .pipelines
+        .iter()
+        .map(|written| written.name.as_str())
+        .collect();
 
     match RELEASE_COMMIT {
         Some(commit) => {
@@ -76,14 +81,14 @@ pub fn init(paths: &Paths, path: &Path) -> Result<()> {
         }
 
         let tracker = GitHub::new()
-            .tracker(&spec.settings)
+            .tracker(&spec.settings, &pipelines)
             .map_err(|error| eyre!("the github tracker: {error}"))?;
         tracker.create_labels(&repo)?;
 
         let names: Vec<&str> = tracker
             .labels()
             .all()
-            .iter()
+            .into_iter()
             .map(|label| label.name.as_str())
             .collect();
         println!("{}: labels {}", entry.repo, names.join(", "));
