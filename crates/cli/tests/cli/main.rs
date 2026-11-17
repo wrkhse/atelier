@@ -125,6 +125,9 @@ fn passing_checks_wake_the_builder_to_mark_its_pull_request_ready() {
     sandbox.wait("the builder told", |sandbox| prompts(sandbox).len() >= 2);
     let before = listings(&sandbox);
     sandbox.wait("a later poll", |sandbox| listings(sandbox) >= before + 2);
+    sandbox.wait("the ready step to run", |sandbox| {
+        sandbox.step("12", "ready").as_deref() == Some("running")
+    });
     drop(daemon);
 
     let prompts = prompts(&sandbox);
