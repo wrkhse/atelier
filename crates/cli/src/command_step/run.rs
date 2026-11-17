@@ -10,8 +10,9 @@
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use atelier_command::{Signal, signal_group};
@@ -37,6 +38,10 @@ const TAIL_BYTES: u64 = 4096;
 /// How many of those last lines the outcome keeps.
 const TAIL_LINES: usize = 20;
 
+/// The unsignalled lines the log already has, with the reason each gave,
+/// so a poll that finds the same record does not repeat one.
+static UNSIGNED: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+
 /// Starts the step's command in `worktree`, keeping what later polls read
 /// in `folder`, emptied first, so a round started again starts clean. A
 /// start repeated on a folder whose record still names a command stops it
@@ -46,9 +51,10 @@ const TAIL_LINES: usize = 20;
 ///
 /// # Errors
 ///
-/// The command an earlier start left in `folder` cannot be stopped, the
-/// folder cannot be made, `sh` cannot start, or the leader's identity
-/// cannot be recorded; all transient.
+/// The command an earlier start left in `folder` cannot be stopped or
+/// cannot be confirmed gone because its record still names a leader that
+/// is stopping, the folder cannot be made, `sh` cannot start, or the
+/// leader's identity cannot be recorded; all transient.
 pub fn start(
     folder: &Path,
     worktree: &Path,
@@ -70,17 +76,13 @@ pub fn start(
     fs::write(folder.join("worktree"), worktree.display().to_string())
         .map_err(|error| failed("writing the worktree in", error))?;
 
-    let mut child = Command::new("/bin/sh")
-        .args(["-c", SCRIPT, "atelier-command", run])
-        .arg(worktree)
-        .current_dir(folder)
-        .env("ATELIER_BASE", format!("origin/{base}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|error| failed("starting a command in", error))?;
+    let mut child = spawn(folder, worktree, base, run).map_err(|error| {
+        // Nothing ran, so a folder kept here would refuse every later start
+        // for nothing.
+        let _ = fs::remove_dir_all(folder);
+
+        failed("starting a command in", error)
+    })?;
     let leader = child.id();
     let recorded = Identity::of(leader).and_then(|identity| publish(folder, &identity.render()));
 
@@ -98,15 +100,42 @@ pub fn start(
     Ok(())
 }
 
-/// Empties `folder` for a start, once nothing it names may still be
-/// running. A Legacy, Unpublished or Invalid record is kept, since no later
+/// Starts the step's command in `folder`, in a process group of its own, so
+/// a later poll can signal that group and the daemon's group is left alone.
+/// `$1` is the command and `$2` the worktree, as `SCRIPT` reads them.
+fn spawn(folder: &Path, worktree: &Path, base: &str, run: &str) -> std::io::Result<Child> {
+    Command::new("/bin/sh")
+        .args(["-c", SCRIPT, "atelier-command", run])
+        .arg(worktree)
+        .current_dir(folder)
+        .env("ATELIER_BASE", format!("origin/{base}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+}
+
+/// Empties `folder` for a start, but only once a fresh check finds the
+/// leader it names gone. A folder whose command is still stopping, or whose
+/// record is a Legacy, Unpublished or Invalid one, is kept, since no later
 /// poll could stop what it names; the error is transient, so a person can
 /// look at the folder and a later poll retries.
 fn clear(folder: &Path) -> Result<(), PluginError> {
     stop(folder)?;
 
     match record(folder) {
-        Ok(_) | Err(Unrecorded::Absent) => {}
+        Ok(identity) => match identity.check() {
+            Ok(Leader::Rebooted | Leader::Gone) => {}
+            Ok(Leader::Running) => return Err(still(folder)),
+            Err(why) => {
+                return Err(PluginError::transient(format!(
+                    "checking the command's leader in {}: {why}",
+                    folder.display()
+                )));
+            }
+        },
+        Err(Unrecorded::Absent) => {}
         Err(Unrecorded::Legacy) => return Err(held(folder, "it has no identity record")),
         Err(Unrecorded::Unpublished) => {
             return Err(held(
@@ -139,6 +168,16 @@ fn held(folder: &Path, what: &str) -> PluginError {
         "the command an earlier start left in {} cannot be stopped: {}",
         folder.display(),
         unsignalled(folder, what)
+    ))
+}
+
+/// A record whose leader atelier could not confirm gone: the folder is
+/// kept until a later poll finds it, so a refused or failed signal cannot
+/// orphan the command it names.
+fn still(folder: &Path) -> PluginError {
+    PluginError::transient(format!(
+        "the command an earlier start left in {} is still stopping; atelier keeps the folder until it is gone",
+        folder.display()
     ))
 }
 
@@ -287,11 +326,33 @@ pub fn stop(folder: &Path) -> Result<(), PluginError> {
 
 /// Says in the log that the command in `folder` was not signalled, and
 /// why: `what` names the record that cannot say which leader to signal.
+/// A poll that finds the same record says it once.
 fn unsigned(folder: &Path, what: &str) {
-    log(
-        "atelier.command",
-        &format!("{}: {}", folder.display(), unsignalled(folder, what)),
-    );
+    if note(folder, what) {
+        log(
+            "atelier.command",
+            &format!("{}: {}", folder.display(), unsignalled(folder, what)),
+        );
+    }
+}
+
+/// Whether this reason for `folder` is new to the log, remembering it.
+fn note(folder: &Path, what: &str) -> bool {
+    let entry = (folder.to_path_buf(), what.to_owned());
+    let mut seen = match UNSIGNED.lock() {
+        Ok(seen) => seen,
+        // The list only grows, so a poisoned lock still holds every answer
+        // it gave before.
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if seen.contains(&entry) {
+        return false;
+    }
+
+    seen.push(entry);
+
+    true
 }
 
 /// What every text about a command atelier left unsignalled says: `what`
@@ -370,19 +431,19 @@ fn publish(folder: &Path, text: &str) -> Result<(), String> {
 }
 
 /// Ends a command whose identity could not be recorded: no later poll could
-/// find its group, so it must not outlive this call.
+/// find its group, so it must not outlive this call. The folder is removed
+/// once the group kill was delivered, and kept only when the signal was
+/// refused, since it is then the only trace of the command.
 fn abandon(folder: &Path, child: &mut Child) {
-    let group = child.id();
-
-    if let Some(mut signal) = signal_group(Signal::Kill, u64::from(group)) {
-        let _ = signal.status();
-    } else {
-        log("atelier.command", &refused(folder, group));
-    }
+    let killed = kill(folder, child.id());
 
     // The child is unreaped, so its number cannot be reused yet.
     let _ = child.kill();
     let _ = child.wait();
+
+    if killed {
+        let _ = fs::remove_dir_all(folder);
+    }
 }
 
 /// Reaps the leader once it ends, so it is never a zombie.
@@ -456,13 +517,16 @@ fn tail(folder: &Path) -> String {
 }
 
 /// Kills the group's every process, and, when atelier refuses the target,
-/// says in the log that it did.
-fn kill(folder: &Path, group: u32) {
-    if let Some(mut signal) = signal_group(Signal::Kill, u64::from(group)) {
-        let _ = signal.status();
-    } else {
+/// says in the log that it did. Whether a signal was delivered is
+/// reported, so a caller cannot read a refusal as a stop.
+fn kill(folder: &Path, group: u32) -> bool {
+    let Some(mut signal) = signal_group(Signal::Kill, u64::from(group)) else {
         log("atelier.command", &refused(folder, group));
-    }
+
+        return false;
+    };
+
+    signal.status().is_ok_and(|status| status.success())
 }
 
 /// The line atelier logs when it would not signal `group` for the command
@@ -509,15 +573,42 @@ mod tests {
             self.0.join("worktree")
         }
 
-        fn start(&self, run: &str, timeout: Option<i64>) -> Settings {
+        fn try_start(&self, run: &str, timeout: Option<i64>) -> Result<Settings, PluginError> {
             let mut settings = Settings::default().with("run", Setting::Text(run.into()));
 
             if let Some(secs) = timeout {
                 settings = settings.with("timeout", Setting::Number(secs));
             }
 
-            start(&self.folder(), &self.worktree(), "v2", &settings).unwrap();
-            settings
+            start(&self.folder(), &self.worktree(), "v2", &settings)?;
+
+            Ok(settings)
+        }
+
+        /// Starts again, past a start that finds the folder's last leader still
+        /// stopping: a kill returns before the leader is gone, and the daemon
+        /// retries that start on its next poll.
+        fn start_again(&self, run: &str, timeout: Option<i64>) -> Settings {
+            let begun = Instant::now();
+
+            loop {
+                match self.try_start(run, timeout) {
+                    Ok(settings) => return settings,
+                    Err(error) => {
+                        assert!(error.message.contains("is still stopping"), "{error}");
+                        assert!(
+                            begun.elapsed() < Duration::from_secs(10),
+                            "no start: {error}"
+                        );
+                    }
+                }
+
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        fn start(&self, run: &str, timeout: Option<i64>) -> Settings {
+            self.try_start(run, timeout).unwrap()
         }
 
         /// The outcome, once there is one, within ten seconds.
@@ -556,7 +647,7 @@ mod tests {
     }
 
     /// Kills the group's every process.
-    fn kill(group: u64) {
+    fn kill_group(group: u64) {
         if let Some(mut signal) = signal_group(Signal::Kill, group) {
             let _ = signal.status();
         }
@@ -671,6 +762,46 @@ mod tests {
         assert!(!alive(group), "abandon left the group running");
     }
 
+    /// An abandoned start removes its folder once the group kill was
+    /// delivered: it is no record of anything.
+    #[test]
+    fn an_abandoned_start_removes_its_folder() {
+        let scratch = Scratch::new("abandoned-folder");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 5"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+
+        abandon(&folder, &mut child);
+
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "the child was not reaped"
+        );
+        assert!(!folder.exists());
+    }
+
+    /// A start that cannot spawn its command leaves no folder behind:
+    /// nothing ran, so a kept folder would refuse every later start for
+    /// nothing.
+    #[test]
+    fn a_start_that_cannot_spawn_leaves_no_folder() {
+        let scratch = Scratch::new("cannot-spawn");
+        let folder = scratch.folder();
+        let settings = Settings::default().with("run", Setting::Text("true\0".into()));
+
+        let error = start(&folder, &scratch.worktree(), "v2", &settings).unwrap_err();
+
+        assert!(error.message.contains("starting a command in"), "{error}");
+        assert!(!folder.exists());
+    }
+
     /// A refused signal is the line atelier logs, which names the group
     /// and where the command may still run.
     #[test]
@@ -694,6 +825,20 @@ mod tests {
         );
     }
 
+    /// A refusal reports no signal, not a stop, and leaves the folder it
+    /// named alone: groups 0 and 1 are refused before `/bin/kill` is built,
+    /// so nothing is signalled.
+    #[test]
+    fn a_refused_signal_is_not_a_stop() {
+        let scratch = Scratch::new("refused-kill");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+
+        assert!(!kill(&folder, 1));
+        assert!(!kill(&folder, 0));
+        assert!(folder.exists());
+    }
+
     #[test]
     fn the_identity_is_published_before_start_returns() {
         let scratch = Scratch::new("identity");
@@ -709,7 +854,7 @@ mod tests {
         );
         assert_eq!(identity.check().unwrap(), Leader::Running);
 
-        kill(u64::from(identity.leader));
+        kill_group(u64::from(identity.leader));
     }
 
     #[test]
@@ -749,7 +894,7 @@ mod tests {
         );
         assert!(alive(group), "a rebooted identity signalled the group");
 
-        kill(group);
+        kill_group(group);
         let begun = Instant::now();
         while alive(group) && begun.elapsed() < Duration::from_secs(3) {
             thread::sleep(Duration::from_millis(20));
@@ -813,6 +958,28 @@ mod tests {
         assert!(error.message.contains("cannot be stopped"), "{error}");
         assert!(folder.exists());
         assert!(folder.join("group").exists());
+    }
+
+    /// A record whose start never published its identity is kept as well:
+    /// nothing is known that could be stopped.
+    #[test]
+    fn a_repeated_start_over_an_unpublished_record_refuses_and_keeps_it() {
+        let scratch = Scratch::new("unpublished-held");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("started"), "1").unwrap();
+        fs::write(
+            folder.join("worktree"),
+            scratch.worktree().display().to_string(),
+        )
+        .unwrap();
+        let settings = Settings::default().with("run", Setting::Text("sleep 1".into()));
+
+        let error = start(&folder, &scratch.worktree(), "v2", &settings).unwrap_err();
+
+        assert!(error.message.contains("cannot be stopped"), "{error}");
+        assert!(error.message.contains("never recorded"), "{error}");
+        assert!(folder.exists());
     }
 
     /// An invalid record is kept as well: no later poll could find the
@@ -908,7 +1075,7 @@ mod tests {
         let settings = scratch.start("sleep 30", None);
 
         assert_eq!(observe(&scratch.folder(), &settings).unwrap(), None);
-        kill(scratch.group());
+        kill_group(scratch.group());
     }
 
     #[test]
@@ -916,7 +1083,7 @@ mod tests {
         let scratch = Scratch::new("stopped");
 
         let settings = scratch.start("sleep 30", None);
-        kill(scratch.group());
+        kill_group(scratch.group());
         let outcome = scratch.outcome(&settings);
 
         assert_eq!(outcome.name, "failed");
@@ -930,7 +1097,7 @@ mod tests {
 
         let first = scratch.start("exit 1", None);
         assert_eq!(scratch.outcome(&first).name, "failed");
-        let again = scratch.start("sleep 30", None);
+        let again = scratch.start_again("sleep 30", None);
 
         assert_eq!(observe(&scratch.folder(), &again).unwrap(), None);
         assert!(never.is_permanent());
@@ -938,7 +1105,7 @@ mod tests {
             never.message.starts_with("no command was started in"),
             "{never}"
         );
-        kill(scratch.group());
+        kill_group(scratch.group());
     }
 
     /// A daemon that crashed between a start and the run state it could not
@@ -947,9 +1114,9 @@ mod tests {
     #[test]
     fn starting_again_stops_the_command_the_folder_still_names() {
         let scratch = Scratch::new("restarted");
-        scratch.start("sleep 30", None);
+        scratch.start_again("sleep 30", None);
         let first = scratch.group();
-        scratch.start("sleep 30", None);
+        scratch.start_again("sleep 30", None);
         let second = scratch.group();
         let begun = Instant::now();
 
@@ -959,6 +1126,91 @@ mod tests {
 
         assert!(!alive(first), "the first command is still running");
 
-        kill(second);
+        kill_group(second);
+    }
+
+    /// A record whose leader is still running keeps the folder, so a
+    /// refused or failed signal cannot orphan the command it names.
+    #[test]
+    fn a_record_whose_command_is_still_running_keeps_the_folder() {
+        let scratch = Scratch::new("still-running");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 5"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let identity = Identity::of(child.id()).unwrap();
+        let group = u64::from(child.id());
+
+        fs::write(folder.join("identity"), identity.render()).unwrap();
+        fs::write(
+            folder.join("worktree"),
+            scratch.worktree().display().to_string(),
+        )
+        .unwrap();
+        // An exit file sends no signal, so the check keeps the folder.
+        fs::write(folder.join("exit"), "0\n").unwrap();
+
+        let error = clear(&folder).unwrap_err();
+
+        assert!(error.message.contains("is still stopping"), "{error}");
+        assert!(folder.exists());
+        assert!(folder.join("identity").exists());
+
+        kill_group(group);
+        let _ = child.wait();
+    }
+
+    /// The log says an unsignalled record once, however many polls find it;
+    /// another reason, or the same one in another folder, is a new line.
+    #[test]
+    fn only_a_changed_record_is_said_again() {
+        let scratch = Scratch::new("said-once");
+        let folder = scratch.folder();
+        let legacy = "it has no identity record";
+        let unpublished = "it started but its identity was never recorded";
+
+        assert!(note(&folder, legacy));
+        assert!(!note(&folder, legacy));
+        assert!(note(&folder, unpublished));
+        assert!(!note(&folder, unpublished));
+        assert!(note(std::path::Path::new("/elsewhere"), legacy));
+    }
+
+    /// A record whose leader has gone empties the folder, so the next start
+    /// begins clean.
+    #[test]
+    fn a_record_whose_command_is_gone_empties_the_folder() {
+        let scratch = Scratch::new("gone");
+        let settings = scratch.start("true", None);
+
+        assert_eq!(scratch.outcome(&settings).name, "passed");
+
+        // The wrapper writes `exit` before the leader it is read from dies,
+        // so a poll can find the record still naming a leader that is
+        // stopping.
+        let begun = Instant::now();
+
+        loop {
+            match clear(&scratch.folder()) {
+                Ok(()) => break,
+                Err(error) => {
+                    assert!(error.message.contains("is still stopping"), "{error}");
+                    assert!(
+                        begun.elapsed() < Duration::from_secs(10),
+                        "the folder was never emptied: {error}"
+                    );
+                }
+            }
+
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(!scratch.folder().exists());
     }
 }
