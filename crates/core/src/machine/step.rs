@@ -43,11 +43,7 @@ pub(super) fn outside(run: Run, event: Event) -> Option<(Run, Vec<Action>)> {
         (Phase::Blocked(_), Event::Requested) => claim(Some(Action::Unmark(Mark::Blocked))),
         (Phase::Claiming, Event::ClaimFailed) => block(run, Reason::Claim),
         (_, Event::Changed) if working => block(run, Reason::Changed),
-        (_, Event::Stop) if working => {
-            let (stopped, mut actions) = stop(run);
-            actions.insert(0, Action::Unmark(Mark::Build));
-            (stopped, actions)
-        }
+        (_, Event::Stop) if working => stop_asked(run),
         (_, Event::Unmarked | Event::IssueClosed) if working => stop(run),
         (Phase::Untracked, Event::LostTrack) => block(run, Reason::LostTrack),
         (Phase::Claiming, Event::Claimed)
@@ -238,6 +234,28 @@ fn stop(run: Run) -> (Run, Vec<Action>) {
         ]
     } else {
         vec![Action::Unmark(Mark::Working)]
+    };
+
+    let stopped = Run {
+        phase: Phase::Stopped,
+        ..run
+    };
+
+    (stopped, actions)
+}
+
+/// Stopped, because a person asked: the trigger mark goes too, so the run
+/// is not requested again.
+fn stop_asked(run: Run) -> (Run, Vec<Action>) {
+    let actions = if run.phase == Phase::Running {
+        vec![
+            Action::Unmark(Mark::Build),
+            Action::Interrupt,
+            Action::Unmark(Mark::Working),
+            Action::RemoveWorktree,
+        ]
+    } else {
+        vec![Action::Unmark(Mark::Build), Action::Unmark(Mark::Working)]
     };
 
     let stopped = Run {
@@ -467,6 +485,30 @@ mod tests {
         assert_eq!(unmark, [Action::Unmark(Mark::Working)]);
         assert_eq!(changed.phase, Phase::Blocked(Reason::Changed));
         assert_eq!(lost.phase, Phase::Blocked(Reason::LostTrack));
+    }
+
+    #[test]
+    fn a_stop_a_person_asked_for_takes_the_trigger_mark_too() {
+        let plan = build();
+
+        let (stopped, asked) = step(building(), Event::Stop, &plan);
+        let (claiming, claim) = step(moved(&[Event::Requested]), Event::Stop, &plan);
+
+        assert_eq!(stopped.phase, Phase::Stopped);
+        assert_eq!(
+            asked,
+            [
+                Action::Unmark(Mark::Build),
+                Action::Interrupt,
+                Action::Unmark(Mark::Working),
+                Action::RemoveWorktree,
+            ]
+        );
+        assert_eq!(claiming.phase, Phase::Stopped);
+        assert_eq!(
+            claim,
+            [Action::Unmark(Mark::Build), Action::Unmark(Mark::Working)]
+        );
     }
 
     #[test]
