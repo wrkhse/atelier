@@ -20,12 +20,12 @@ fn request_file(sandbox: &Sandbox) -> std::path::PathBuf {
         .join(".local/state/atelier/requests/StevenJPx2/demo/0.json")
 }
 
+/// Whether the process group led by `leader` still has a process. A probe
+/// that cannot be taken counts as alive, so a wait on it fails at its
+/// deadline instead of passing early.
 fn alive(leader: u64) -> bool {
     signal_group(Signal::Probe, leader)
-        .expect("a group to probe")
-        .status()
-        .unwrap()
-        .success()
+        .is_none_or(|mut signal| signal.status().is_ok_and(|status| status.success()))
 }
 
 #[test]
