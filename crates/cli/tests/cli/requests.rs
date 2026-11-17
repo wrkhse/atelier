@@ -14,6 +14,20 @@ fn worktree(sandbox: &Sandbox) -> std::path::PathBuf {
         .join(".local/share/atelier/worktrees/StevenJPx2/demo/issue-12")
 }
 
+fn request_file(sandbox: &Sandbox) -> std::path::PathBuf {
+    sandbox
+        .home
+        .join(".local/state/atelier/requests/StevenJPx2/demo/0.json")
+}
+
+fn alive(leader: u64) -> bool {
+    signal_group(Signal::Probe, leader)
+        .expect("a group to probe")
+        .status()
+        .unwrap()
+        .success()
+}
+
 #[test]
 fn finish_queues_an_outcome_without_writing_state_and_the_worker_closes_the_run() {
     let sandbox = Sandbox::new(&labelled(&["atelier:build"]));
@@ -41,8 +55,10 @@ fn finish_queues_an_outcome_without_writing_state_and_the_worker_closes_the_run(
     assert_eq!(fs::read(&state).unwrap(), before);
     assert!(String::from_utf8_lossy(&finished.stdout).contains("builder settled nothing"));
     let daemon = sandbox.daemon();
-    sandbox.wait("done", |sandbox| {
-        sandbox.phase("12").as_deref() == Some("done")
+    // The daemon acknowledges the request after its last save, so the wait
+    // must see both before the daemon is dropped.
+    sandbox.wait("done and its request acknowledged", |sandbox| {
+        sandbox.phase("12").as_deref() == Some("done") && !request_file(sandbox).exists()
     });
     drop(daemon);
 
@@ -62,12 +78,7 @@ fn finish_queues_an_outcome_without_writing_state_and_the_worker_closes_the_run(
     assert!(!worktree.exists());
     let already_done = sandbox.atelier(&["stop", "build github#12"]);
     assert!(!already_done.status.success());
-    assert!(
-        !sandbox
-            .home
-            .join(".local/state/atelier/requests/StevenJPx2/demo/0.json")
-            .exists()
-    );
+    assert!(!request_file(&sandbox).exists());
 }
 
 #[test]
@@ -172,9 +183,7 @@ after = ["worktree"]
         "{}",
         String::from_utf8_lossy(&explicit.stderr)
     );
-    let queue = sandbox
-        .home
-        .join(".local/state/atelier/requests/StevenJPx2/demo/0.json");
+    let queue = request_file(&sandbox);
     let request: serde_json::Value = serde_json::from_slice(&fs::read(queue).unwrap()).unwrap();
     assert_eq!(request["command"]["step"], "audit");
     assert_eq!(request["command"]["outcome"], "passed");
@@ -286,15 +295,10 @@ run = "sleep 300 & wait"
     sandbox.wait("stopped", |sandbox| {
         sandbox.phase("12").as_deref() == Some("stopped")
     });
+    sandbox.wait("the command's group to be gone", |_| !alive(leader));
     drop(daemon);
 
-    let alive = signal_group(Signal::Probe, leader)
-        .expect("a group to probe")
-        .status()
-        .unwrap()
-        .success();
-
-    assert!(!alive, "the command process group survived stop");
+    assert!(!alive(leader), "the command process group survived stop");
     assert!(!worktree(&sandbox).exists());
 }
 
@@ -359,11 +363,6 @@ run = "sleep 30"
         .and_then(|comments| comments.last())
         .and_then(|comment| comment.as_str())
         .unwrap_or_default();
-    let alive = signal_group(Signal::Probe, leader)
-        .expect("a group to probe")
-        .status()
-        .unwrap()
-        .success();
     let running_in = format!(
         "it started but its identity was never recorded; atelier sent no signal, \
          and the command may still be running in {}",
@@ -371,7 +370,7 @@ run = "sleep 30"
     );
 
     assert!(comment.contains(&running_in), "{comment}");
-    assert!(alive, "an unrecorded command's group was signalled");
+    assert!(alive(leader), "an unrecorded command's group was signalled");
 }
 #[test]
 fn finish_checks_reason_bounds_and_stop_requires_the_exact_run_key() {
