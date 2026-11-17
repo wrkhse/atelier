@@ -13,14 +13,16 @@ validates the Kani and mutation reports, and a missing or empty one fails.
 [The CI runner](https://github.com/wrkhse/atelier/tree/main/.github/ci)
 describes it. Never weaken a gate or exclude signalling code to obtain a pass.
 
-Developers never run gates on the Mac. The owner decided on 2026-11-14 that
-the installed atelier daemon, once the slice 3 candidate is installed, runs
-its registered projects' pipelines on the Mac, gates and mutants included,
-as the user and with no container. `atelier_command::signal_group` guards
-only the signals atelier itself sends: every kill or group signal goes
-through it, and a change that builds one another way is refused in review.
-Nothing guards the code under test: a project's own commands and tests, and
-file, credential or network damage, are unguarded there.
+Developers never run gates on the Mac. By the owner's proof contract of
+2026-11-17, the installed daemon orchestrates real repositories, while
+mutation, fuzzing and process-signalling checks run only in contained CI,
+which the daemon observes through `forge.checks`. A local command step in
+the proof is benign, bounded and confined to repository data.
+`atelier_command::signal_group` guards only the signals atelier itself
+sends and is defence in depth, not containment: a mutant can change the
+guard itself. Every group signal still goes through it, and a change that
+builds one another way is refused in review; the only other kills are std
+`Child::kill` calls on a single child the caller still owns.
 
 Atelier's own pull requests run the workflow and `.github/ci` they contain,
 so a change to either needs review for what it loosens; CI cannot catch a

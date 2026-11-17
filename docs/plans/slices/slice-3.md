@@ -777,20 +777,63 @@ assert run was Running, next is not      implies it interrupts and
 
 ## End to end
 
-On the installed rc, on atelier:
+On the installed rc, the daemon orchestrates real issues, branches, agent
+sessions and pull requests in `wrkhse/atelier` and `wrkhse/chauffeur`.
+Mutation, fuzzing and process-signalling checks run in contained GitHub CI,
+and the daemon observes their results through `forge.checks`.
 
-1. **`build`, written out:** a small real issue goes from worktree to merge, as
-   in slice 1.
-2. **Parallel steps and outcomes:** `security-audit` on an issue. `deps` and
-   `audit` start in the same poll. One run finds something real and `fix` opens
-   a pull request; a later run with nothing left skips `fix` and closes the
-   issue with each step's outcome.
-3. **A plugin step by role:** `forge.checks` resolves to `github.checks`, as
-   `atelier status` shows.
-4. **The upgrade:** the daemon is upgraded from the previous rc while a `build`
-   run is open, and the run continues.
-5. **Stop:** `atelier stop` on a running audit interrupts both agents within a
-   poll.
+```mermaid
+flowchart LR
+    D["Installed rc"] --> A["Real agent session"]
+    A --> P["Real pull request"]
+    P --> C["Contained CI gates"]
+    C --> F["forge.checks"]
+    F --> R["Ready or merge"]
+```
+
+1. **Proof configuration:** register the real repositories with pipelines
+   that use the existing `agent.session` and `forge.checks` steps; inspect
+   the selected pipeline and agent instructions before starting; neither may
+   invoke local mutation, fuzzing or process-signalling tests; a local
+   command-step demonstration uses a bounded, benign command confined to
+   repository data.
+2. **CI evidence:** record the exact pull request head, workflow run and
+   report artifacts; every selected gate, mutants and Kani included, finishes
+   successfully under its existing thresholds; missing, stale, failed or
+   pending checks cannot advance the pipeline; no gate is bypassed or
+   weakened.
+3. **The five cases:** any case involving process signalling runs in CI or a
+   disposable VM or container, and the Mac portion observes its result; the
+   record names the environment that proves each case; a case the existing
+   implementation cannot meet within these bounds is reported blocked before
+   any adapter is added or acceptance dropped.
+   1. **`build`, written out:** a small real issue goes from worktree to
+      merge, as in slice 1.
+   2. **Parallel steps and outcomes:** `security-audit` on an issue. `deps`
+      and `audit` start in the same poll. One run finds something real and
+      `fix` opens a pull request; a later run with nothing left skips `fix`
+      and closes the issue with each step's outcome.
+   3. **A plugin step by role:** `forge.checks` resolves to `github.checks`,
+      as `atelier status` shows.
+   4. **The upgrade:** the daemon is upgraded from the previous rc while a
+      `build` run is open, and the run continues.
+   5. **Stop:** `atelier stop` on a running audit interrupts both agents
+      within a poll.
+4. **Recording and docs:** show the installed rc, the real repositories, the
+   real model and harness, and linked CI evidence, and say where each
+   operation runs.
+
+**Rules.**
+
+- Host mutation, fuzzing and process-signalling checks are prohibited.
+- `signal_group` is defence in depth, not containment for executed code.
+- The existing `forge.checks` path is used, with no new runtime dependency
+  or CI dispatch adapter.
+- The daemon stays off until the candidate and the proof configuration pass
+  review, and the live Chauffeur daemon and its installed binaries stay
+  untouched.
+- A whole-proof disposable VM is the fallback if existing steps cannot keep
+  acceptance, and choosing it needs an explicit plan decision.
 
 ## Dependencies
 
