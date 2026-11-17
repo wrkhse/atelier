@@ -229,15 +229,19 @@ fn process(pid: u32) -> Result<Option<Process>, String> {
 fn proc_process(pid: u32) -> Result<Option<Process>, String> {
     let path = format!("/proc/{pid}/stat");
 
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if has_gone(&error) => return Ok(None),
-        Err(error) => return Err(format!("reading {path}: {error}")),
-    };
+    read_stat(&path, fs::read_to_string(&path))
+}
 
-    parse_stat(&text)
-        .map(Some)
-        .ok_or_else(|| format!("unreadable {path}"))
+/// What `read` gave for `path`: the process its stat line describes, none
+/// when the process has gone, or why the read failed.
+fn read_stat(path: &str, read: std::io::Result<String>) -> Result<Option<Process>, String> {
+    match read {
+        Ok(text) => parse_stat(&text)
+            .map(Some)
+            .ok_or_else(|| format!("unreadable {path}")),
+        Err(error) if has_gone(&error) => Ok(None),
+        Err(error) => Err(format!("reading {path}: {error}")),
+    }
 }
 
 /// The process `pid` names, if there is one, as `ps` describes it.
@@ -587,6 +591,57 @@ mod tests {
         ] {
             assert_eq!(parse_stat(&broken), None, "{broken:?}");
         }
+    }
+
+    #[test]
+    fn a_stat_line_read_gives_the_process_it_describes() {
+        assert_eq!(
+            read_stat("/proc/4242/stat", Ok(stat("S", "4242", "987654"))),
+            Ok(Some(Process {
+                group: 4242,
+                start: "987654".into(),
+                zombie: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_proc_read_of_a_gone_process_is_no_process() {
+        let path = "/proc/4242/stat";
+
+        assert_eq!(
+            read_stat(
+                path,
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            read_stat(path, Err(std::io::Error::from_raw_os_error(ESRCH))),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_proc_read_that_failed_another_way_is_an_error_not_a_gone_process() {
+        let path = "/proc/4242/stat";
+
+        for error in [
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            std::io::Error::from_raw_os_error(5),
+        ] {
+            let refused = read_stat(path, Err(error)).unwrap_err();
+
+            assert!(
+                refused.starts_with("reading /proc/4242/stat: "),
+                "{refused}"
+            );
+        }
+
+        assert_eq!(
+            read_stat(path, Ok("garbage".into())),
+            Err("unreadable /proc/4242/stat".into())
+        );
     }
 
     #[test]
