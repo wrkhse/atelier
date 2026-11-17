@@ -264,16 +264,12 @@ fn unsignalled(folder: &Path, what: &str) -> String {
 /// Where the command in `folder` runs, from the record `start` writes, or
 /// `its worktree` when that is missing, unreadable or empty.
 fn where_it_runs(folder: &Path) -> String {
-    let recorded = fs::read_to_string(folder.join("worktree")).ok();
-
-    match recorded
+    fs::read_to_string(folder.join("worktree"))
+        .ok()
         .as_deref()
         .map(str::trim)
         .filter(|path| !path.is_empty())
-    {
-        Some(path) => format!("in {path}"),
-        None => "in its worktree".to_owned(),
-    }
+        .map_or_else(|| "in its worktree".to_owned(), |path| format!("in {path}"))
 }
 
 /// What reading a command's identity found instead of one.
