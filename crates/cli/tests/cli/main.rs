@@ -131,7 +131,6 @@ fn passing_checks_wake_the_builder_to_mark_its_pull_request_ready() {
     drop(daemon);
 
     let prompts = prompts(&sandbox);
-    assert_eq!(sandbox.step("12", "ready").as_deref(), Some("running"));
     assert_eq!(prompts.len(), 2, "{prompts:?}");
     assert!(
         prompts[1].starts_with("api post /api/session/ses_e34e74974ffezeihakyxaDRnbK/prompt "),

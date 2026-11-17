@@ -318,7 +318,7 @@ uses = "git.worktree"
 [[pipeline.build.step]]
 id = "wait"
 uses = "atelier.command"
-run = "sleep 30"
+run = "sleep 300"
 "#,
     );
     let daemon = sandbox.daemon();

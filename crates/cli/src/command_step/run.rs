@@ -61,8 +61,7 @@ pub fn start(
     };
 
     if folder.exists() {
-        stop(folder)?;
-        fs::remove_dir_all(folder).map_err(|error| failed("emptying", error))?;
+        clear(folder)?;
     }
 
     fs::create_dir_all(folder).map_err(|error| failed("making", error))?;
@@ -97,6 +96,50 @@ pub fn start(
     reap(child);
 
     Ok(())
+}
+
+/// Empties `folder` for a start, once nothing it names may still be
+/// running. A Legacy, Unpublished or Invalid record is kept, since no later
+/// poll could stop what it names; the error is transient, so a person can
+/// look at the folder and a later poll retries.
+fn clear(folder: &Path) -> Result<(), PluginError> {
+    stop(folder)?;
+
+    match record(folder) {
+        Ok(_) | Err(Unrecorded::Absent) => {}
+        Err(Unrecorded::Legacy) => return Err(held(folder, "it has no identity record")),
+        Err(Unrecorded::Unpublished) => {
+            return Err(held(
+                folder,
+                "it started but its identity was never recorded",
+            ));
+        }
+        Err(Unrecorded::Invalid(why)) => {
+            return Err(held(
+                folder,
+                &format!("its identity record is invalid ({why})"),
+            ));
+        }
+        Err(Unrecorded::Unreadable(error)) => {
+            return Err(PluginError::transient(format!(
+                "reading the command's identity in {}: {error}",
+                folder.display()
+            )));
+        }
+    }
+
+    fs::remove_dir_all(folder)
+        .map_err(|error| PluginError::transient(format!("emptying {}: {error}", folder.display())))
+}
+
+/// A record the start cannot verify and stop, kept rather than deleted:
+/// it is the only trace of a command that may still be running.
+fn held(folder: &Path, what: &str) -> PluginError {
+    PluginError::transient(format!(
+        "the command an earlier start left in {} cannot be stopped: {}",
+        folder.display(),
+        unsignalled(folder, what)
+    ))
 }
 
 /// How the command started in `folder` ended, if it has: `passed` on
@@ -334,7 +377,7 @@ fn abandon(folder: &Path, child: &mut Child) {
     if let Some(mut signal) = signal_group(Signal::Kill, u64::from(group)) {
         let _ = signal.status();
     } else {
-        refused(folder, group);
+        log("atelier.command", &refused(folder, group));
     }
 
     // The child is unreaped, so its number cannot be reused yet.
@@ -418,21 +461,18 @@ fn kill(folder: &Path, group: u32) {
     if let Some(mut signal) = signal_group(Signal::Kill, u64::from(group)) {
         let _ = signal.status();
     } else {
-        refused(folder, group);
+        log("atelier.command", &refused(folder, group));
     }
 }
 
-/// Says in the log that atelier would not signal `group` for the command
+/// The line atelier logs when it would not signal `group` for the command
 /// in `folder`, so it may still be running.
-fn refused(folder: &Path, group: u32) {
-    log(
-        "atelier.command",
-        &format!(
-            "{}: atelier refused to signal group {group}; the command may still be running {}",
-            folder.display(),
-            where_it_runs(folder)
-        ),
-    );
+fn refused(folder: &Path, group: u32) -> String {
+    format!(
+        "{}: atelier refused to signal group {group}; the command may still be running {}",
+        folder.display(),
+        where_it_runs(folder)
+    )
 }
 
 fn now() -> u64 {
@@ -631,6 +671,29 @@ mod tests {
         assert!(!alive(group), "abandon left the group running");
     }
 
+    /// A refused signal is the line atelier logs, which names the group
+    /// and where the command may still run.
+    #[test]
+    fn a_refused_signal_says_which_group_and_where_it_may_still_run() {
+        let scratch = Scratch::new("refused");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("worktree"),
+            scratch.worktree().display().to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            refused(&folder, 9),
+            format!(
+                "{}: atelier refused to signal group 9; the command may still be running in {}",
+                folder.display(),
+                scratch.worktree().display()
+            )
+        );
+    }
+
     #[test]
     fn the_identity_is_published_before_start_returns() {
         let scratch = Scratch::new("identity");
@@ -727,6 +790,54 @@ mod tests {
         fs::remove_file(folder.join("identity")).unwrap();
         fs::create_dir(folder.join("identity")).unwrap();
         assert!(!stop(&folder).unwrap_err().is_permanent());
+    }
+
+    /// A repeated start empties a folder only once nothing it names may
+    /// still run. A legacy record names a group no identity can verify, so
+    /// the start refuses and keeps the only trace of it.
+    #[test]
+    fn a_repeated_start_over_a_legacy_record_refuses_and_keeps_it() {
+        let scratch = Scratch::new("legacy-held");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("group"), "4242").unwrap();
+        fs::write(
+            folder.join("worktree"),
+            scratch.worktree().display().to_string(),
+        )
+        .unwrap();
+        let settings = Settings::default().with("run", Setting::Text("sleep 1".into()));
+
+        let error = start(&folder, &scratch.worktree(), "v2", &settings).unwrap_err();
+
+        assert!(error.message.contains("cannot be stopped"), "{error}");
+        assert!(folder.exists());
+        assert!(folder.join("group").exists());
+    }
+
+    /// An invalid record is kept as well: no later poll could find the
+    /// group it may name.
+    #[test]
+    fn a_repeated_start_over_an_invalid_record_refuses_and_keeps_it() {
+        let scratch = Scratch::new("invalid-held");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("worktree"),
+            scratch.worktree().display().to_string(),
+        )
+        .unwrap();
+        fs::write(folder.join("identity"), "nonsense\n").unwrap();
+        let settings = Settings::default().with("run", Setting::Text("sleep 1".into()));
+
+        let error = start(&folder, &scratch.worktree(), "v2", &settings).unwrap_err();
+
+        assert!(error.message.contains("cannot be stopped"), "{error}");
+        assert!(
+            error.message.contains("its identity record is invalid"),
+            "{error}"
+        );
+        assert!(folder.join("identity").exists());
     }
 
     #[test]
