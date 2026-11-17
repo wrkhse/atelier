@@ -1,8 +1,8 @@
 # Slice 1: a label becomes a ready pull request
 
 **Status: Implemented, `0.1.0-rc.6`.** The core, `crates/git`, the `github`
-plugin ([#6](https://github.com/StevenJPx2/atelier/issues/6)), the `opencode`
-plugin ([#7](https://github.com/StevenJPx2/atelier/issues/7)), and the CLI
+plugin ([#6](https://github.com/wrkhse/atelier/issues/6)), the `opencode`
+plugin ([#7](https://github.com/wrkhse/atelier/issues/7)), and the CLI
 and daemon are built and released, and the [end-to-end runs](#end-to-end) on
 atelier and Chauffeur pass.
 
@@ -35,7 +35,7 @@ sequenceDiagram
 ## Recording
 
 The Homebrew service, rc.3, claims a real issue: atelier
-[#16](https://github.com/StevenJPx2/atelier/issues/16) is labelled
+[#16](https://github.com/wrkhse/atelier/issues/16) is labelled
 `atelier:build` in the left pane, and the right pane follows the daemon's
 log. Under launchd, git in `~/Documents` waits on macOS's folder prompt; once
 it is allowed, the next poll claims the issue and starts a builder. The left
@@ -627,7 +627,7 @@ output stops at its bound; a missing tool fails transiently.
 
 ### The `github` plugin (`plugins/github`)
 
-GitHub as tracker and forge, through `gh` ([#6](https://github.com/StevenJPx2/atelier/issues/6)).
+GitHub as tracker and forge, through `gh` ([#6](https://github.com/wrkhse/atelier/issues/6)).
 Its CI part, `gates.yml`, comes with slice 2.
 
 Files: [`plugins/github/`](../../../plugins/github/README.md).
@@ -760,7 +760,7 @@ runs with it skipped, as CI does.
 ### The `opencode` plugin (`plugins/opencode`)
 
 Each builder as an ordinary OpenCode session, started through `opencode api`
-([#7](https://github.com/StevenJPx2/atelier/issues/7)).
+([#7](https://github.com/wrkhse/atelier/issues/7)).
 
 Files: [`plugins/opencode/`](../../../plugins/opencode/README.md).
 
@@ -1020,20 +1020,20 @@ works from it, and your checkout gains no worktree and no branch.
 
 Each run is a real issue on GitHub, labelled with the owner's approval, and
 followed by the Homebrew service, as
-[the plan](https://github.com/StevenJPx2/atelier/issues/1#end-to-end) lists.
+[the plan](https://github.com/wrkhse/atelier/issues/1#end-to-end) lists.
 
-| Run                                                                                                                             | What happens                                                                                                                                                                                                                                                                                                      |
-| ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [atelier#16](https://github.com/StevenJPx2/atelier/issues/16) → [#17](https://github.com/StevenJPx2/atelier/pull/17)            | Claimed within a poll. The builder's pull request fails mutation testing; the failure reaches it through sourcefed, it fixes the cause, and the next push passes. The merge closes the issue and removes the worktree.                                                                                            |
-| [atelier#19](https://github.com/StevenJPx2/atelier/issues/19)                                                                   | Removing `atelier:working` mid-turn stops the builder within a poll: its turn is aborted and nothing is pushed.                                                                                                                                                                                                   |
-| [atelier#20](https://github.com/StevenJPx2/atelier/issues/20) → [#21](https://github.com/StevenJPx2/atelier/pull/21)            | Five red rounds block the issue: `atelier:blocked` replaces `atelier:working`, atelier comments why, and the builder stands down.                                                                                                                                                                                 |
-| [chauffeur#6](https://github.com/StevenJPx2/chauffeur/issues/6) → [chauffeur#8](https://github.com/StevenJPx2/chauffeur/pull/8) | Chauffeur's whole config is `base = "v2"`: the worktree starts from `origin/v2` and the pull request goes into `v2`. The site build and every check pass; atelier tells the builder, which marks it ready 18 seconds later. The merge into `v2`, not the default branch, still closes the issue, through atelier. |
+| Run                                                                                                                     | What happens                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [atelier#16](https://github.com/wrkhse/atelier/issues/16) → [#17](https://github.com/wrkhse/atelier/pull/17)            | Claimed within a poll. The builder's pull request fails mutation testing; the failure reaches it through sourcefed, it fixes the cause, and the next push passes. The merge closes the issue and removes the worktree.                                                                                            |
+| [atelier#19](https://github.com/wrkhse/atelier/issues/19)                                                               | Removing `atelier:working` mid-turn stops the builder within a poll: its turn is aborted and nothing is pushed.                                                                                                                                                                                                   |
+| [atelier#20](https://github.com/wrkhse/atelier/issues/20) → [#21](https://github.com/wrkhse/atelier/pull/21)            | Five red rounds block the issue: `atelier:blocked` replaces `atelier:working`, atelier comments why, and the builder stands down.                                                                                                                                                                                 |
+| [chauffeur#6](https://github.com/wrkhse/chauffeur/issues/6) → [chauffeur#8](https://github.com/wrkhse/chauffeur/pull/8) | Chauffeur's whole config is `base = "v2"`: the worktree starts from `origin/v2` and the pull request goes into `v2`. The site build and every check pass; atelier tells the builder, which marks it ready 18 seconds later. The merge into `v2`, not the default branch, still closes the issue, through atelier. |
 
 The runs shape three parts of the design. sourcefed suppresses passing
 checks, so atelier tells the builder when every check passed
-([#18](https://github.com/StevenJPx2/atelier/pull/18)). A pull request's
+([#18](https://github.com/wrkhse/atelier/pull/18)). A pull request's
 events still wake an interrupted builder, so atelier tells it to stand down
-([#22](https://github.com/StevenJPx2/atelier/pull/22)). And under launchd,
+([#22](https://github.com/wrkhse/atelier/pull/22)). And under launchd,
 git in a checkout in `~/Documents` waits on macOS's folder prompt, which
 each release brings back, so the daemon works only from
-[its own clones](https://github.com/StevenJPx2/atelier/issues/1#ateliers-own-clones).
+[its own clones](https://github.com/wrkhse/atelier/issues/1#ateliers-own-clones).
