@@ -21,11 +21,17 @@ fn request_file(sandbox: &Sandbox) -> std::path::PathBuf {
 }
 
 /// Whether the process group led by `leader` still has a process. A probe
-/// that cannot be taken counts as alive, so a wait on it fails at its
-/// deadline instead of passing early.
+/// that cannot be taken, and a probe whose wait fails, both count as alive,
+/// so only a probe that ran and exited non-zero reports the group gone.
 fn alive(leader: u64) -> bool {
-    signal_group(Signal::Probe, leader)
-        .is_none_or(|mut signal| signal.status().is_ok_and(|status| status.success()))
+    let Some(mut signal) = signal_group(Signal::Probe, leader) else {
+        return true;
+    };
+
+    match signal.status() {
+        Ok(status) => status.success(),
+        Err(_) => true,
+    }
 }
 
 #[test]
