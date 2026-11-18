@@ -4,6 +4,8 @@ Usage: python3 .github/ci/reports.py <gate> <reports> [--atelier]
        python3 .github/ci/reports.py --partition <shards> <reports>
 <reports> holds kani.json, mutants-selection.json, base.txt and
 mutants.out/outcomes.json, as the gate container wrote them to /reports.
+A diff that deleted tests also writes mutants-safeguard.json and
+mutants-safeguard/mutants.out/outcomes.json; both are checked.
 --partition collects one gate's shards, each in its own directory under
 <reports> with a container/ sub-directory, and proves their reports are one
 complete partition.
@@ -399,6 +401,86 @@ def validate_shard(selection: dict, reports: Path) -> tuple[dict, str]:
     return tested, validate_selection(selection, tested, fallback)
 
 
+def validate_safeguard(selection: dict, reports: Path) -> tuple[dict, str]:
+    """A safeguard's tested mutants and its clause for the summary line."""
+    require(selection.get("mode") == "safeguard", "a safeguard with another mode")
+    shard = selection_shard(selection)
+    expected = shard_slice(shard)
+    outcomes = reports / "mutants-safeguard" / "mutants.out" / "outcomes.json"
+    tested = validate_mutants(read_report(outcomes), expected == 0)
+    selected = array_value(selection.get("selected"), "selected")
+    require(expected == 0 or bool(selected), "the safeguard selected no mutant")
+    require(
+        all(isinstance(name, str) and name for name in selected),
+        "bad safeguard mutant",
+    )
+    require(
+        sorted(selected) == tested["names"],
+        "tested mutants differ from the safeguard's",
+    )
+    if expected is not None:
+        require(
+            len(selected) == expected,
+            f"the safeguard shard tests {len(selected)} mutants, not {expected}",
+        )
+    deleted = array_value(selection.get("deleted"), "deleted")
+    require(bool(deleted), "the safeguard recorded no deleted test")
+    require(
+        all(isinstance(item, str) and item for item in deleted),
+        "bad deleted test",
+    )
+    files = array_value(selection.get("files"), "files")
+    require(bool(files), "the safeguard names no covered file")
+    require(
+        all(isinstance(file, str) and file for file in files),
+        "bad safeguard file",
+    )
+    require(
+        all(file in files for file in tested["files"]),
+        "a safeguard mutated a file it did not name",
+    )
+    total = count(selection.get("total"), "total")
+    if shard is None:
+        require(
+            total == len(selected),
+            "the safeguard total differs from its selection",
+        )
+        return tested, f"; safeguard {total} mutants"
+    return tested, f"; safeguard {shard[1]} shards, {total} mutants"
+
+
+def validate_safeguards(
+    entries: list[tuple[Path, dict, tuple[int, int, int]]], label: str
+) -> int | None:
+    """Prove the safeguard reports are one partition; their whole total."""
+    paths = [container / "mutants-safeguard.json" for container, _, _ in entries]
+    present = [path for path in paths if path.is_file()]
+    if not present:
+        return None
+    require(
+        len(present) == len(entries),
+        f"{label} has {len(present)} safeguards, not {len(entries)}",
+    )
+    totals = set()
+    tested = []
+    for container, _, shard in entries:
+        guard = read_report(container / "mutants-safeguard.json")
+        guard_shard = selection_shard(guard)
+        require(guard_shard is not None, f"{label} safeguard without a shard")
+        require(guard_shard[:2] == shard[:2], f"{label} safeguard shards differ")
+        totals.add(guard_shard[2])
+        report, _ = validate_safeguard(guard, container)
+        tested.extend(report["names"])
+    require(len(totals) == 1, f"{label} safeguard totals differ: {sorted(totals)}")
+    total = totals.pop()
+    require(len(tested) == len(set(tested)), f"{label} safeguards a mutant twice")
+    require(
+        len(tested) == total,
+        f"{label} safeguards {len(tested)} mutants, not {total}",
+    )
+    return total
+
+
 def validate_partition(shards: int, reports: Path) -> str:
     """Prove the shards' own reports are one complete partition of their gate.
 
@@ -465,10 +547,14 @@ def validate_partition(shards: int, reports: Path) -> str:
                 all(file == CANARY for file in files),
                 f"{label} mutated another file",
             )
-        parts.append(
+        part = (
             f"{len(entries)} shards, {len(tested)} mutants, "
             f"{missed} missed, {timeouts} timeouts"
         )
+        guard_total = validate_safeguards(entries, label)
+        if guard_total is not None:
+            part += f"; safeguard {len(entries)} shards, {guard_total} mutants"
+        parts.append(part)
     return "; ".join(parts)
 
 
@@ -484,7 +570,11 @@ def validate(gate: str, reports: Path, atelier: bool) -> str | None:
             selection.get("mode") != "canary" or atelier,
             "the canary is atelier's own",
         )
-        return validate_shard(selection, reports)[1]
+        summary = validate_shard(selection, reports)[1]
+        guard = reports / "mutants-safeguard.json"
+        if guard.is_file():
+            summary += validate_safeguard(read_report(guard), reports)[1]
+        return summary
     return None
 
 

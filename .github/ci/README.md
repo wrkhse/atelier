@@ -121,10 +121,15 @@ artifact. In a fresh offline container, with only that directory mounted
 read-only, `reports.py --partition 4` proves that every shard's report is
 there, that the shard indexes are exactly 0 to 3 once each, that all shards
 agree on the whole total, that no mutant is tested twice, and that the
-tested mutants add up to it. A canary run must still catch one mutant
-across the shards and mutate only the canary. A missing shard report fails
-the gate here. The summary says
-`**partition:** 4 shards, 107 mutants, 0 missed, 0 timeouts`.
+tested mutants add up to it. When any shard wrote a safeguard selection,
+the validator also proves that every shard wrote one, with the same
+indexes as the main selections, one whole total, no mutant tested twice,
+and the tested mutants equal to it. A directory that carries a safeguard
+selection but no main selection fails. A canary run must still catch one
+mutant across the shards and mutate only the canary. A missing shard
+report fails the gate here. The summary says `**partition:** 4 shards, 107
+mutants, 0 missed, 0 timeouts`, then `; safeguard 4 shards, N mutants`
+when a safeguard ran.
 
 Sharding weakens no gate. No gate moved off a pull request, no run adds
 `--baseline=skip` or an exclusion, and no container gained a mount:
@@ -155,7 +160,11 @@ cannot change the validator or the interpreter that runs it.
   and whole-gate total, the shard when the run is sharded, and the names
   it selects. Only a shard whose slice of that total is empty, as
   the partition check proves, may test no mutant; a run that is not
-  sharded still fails on zero.
+  sharded still fails on zero. A diff that deletes tests also writes
+  `/reports/mutants-safeguard/mutants.out/outcomes.json` and
+  `/reports/mutants-safeguard.json`, judged by the same report checks as
+  the main report, and a sharded gate's summary also says `; safeguard 4
+  shards, N mutants`.
 
 Before an empty selection counts, `cargo.py` proves the diff can be made:
 `git diff --name-only "$ATELIER_BASE" --` must succeed, and the repository
@@ -195,3 +204,33 @@ run, or a job stopped by its job-level 90-minute timeout, uploads no report.
 
 Linux containers do not prove Darwin's process-group signalling. That needs a
 separately approved disposable macOS environment.
+
+## Production files of deleted tests
+
+A deleted test cannot fail, so when a diff removes a `#[test]` or a
+`#[kani::proof]`, the gate also mutates the production files those tests
+covered: the diff's own selection no longer proves that code. `cargo.py`
+reads each changed `.rs` file under `crates/` or `plugins/` at the base
+and now, and treats each test name the base held and the tree does not as
+deleted.
+
+A deleted test in a crate's `src/` file covers that file, or its `.rs`
+siblings when the file itself is gone. A deleted test in
+`crates/<crate>/tests/` or `plugins/<crate>/tests/` covers every `.rs`
+file under that crate's `src/`.
+
+The safeguard is a second cargo-mutants run in the same gate, with one
+`--file` per production file and the gate job's shard when it has one,
+written to `/reports/mutants-safeguard/mutants.out`. Its own selection,
+`/reports/mutants-safeguard.json`, names the deleted tests and the covered
+files. A fresh container judges a shard's safeguard report by the same
+report checks as its main report.
+
+`cargo.py` refuses the run when the deleted tests cover no production
+file, when they cover more than 64 files (split the change), and when the
+covered files hold no mutant (restore the tests, or name the equivalents
+in `.cargo/mutants.toml` for review). The safeguard only ever adds work,
+never removes a check: the diff's own selection is still required and
+still judged. A diff whose base is unavailable, so that `base.txt`
+records it as not evaluated, writes no safeguard; the canary runs there
+instead.
