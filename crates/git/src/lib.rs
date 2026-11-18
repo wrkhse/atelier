@@ -23,11 +23,13 @@
 
 mod command;
 mod folder;
+mod paths;
 mod repository;
 mod steps;
 mod tree;
 mod worktree;
 
+pub use paths::{depth, label, normalised, parent, shares_root, under};
 pub use repository::{BranchTree, Repository};
 pub use tree::{Staged, WorkingTree};
 pub use worktree::Git;
