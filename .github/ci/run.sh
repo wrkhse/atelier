@@ -1,8 +1,7 @@
 #!/bin/bash
 # GitHub-hosted Linux only. Never use this runner on a developer machine.
 set -euo pipefail
-if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux \
-  || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]]; then
+if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]]; then
   echo "run.sh runs only on a GitHub-hosted Linux runner; run checks in CI" >&2
   exit 2
 fi
@@ -37,28 +36,37 @@ case "$MODE" in
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
+# login: authenticate to the registry with this run's token; fails when it
+# cannot, and never fails the step by itself.
+login() {
+  if [[ -z "${GH_TOKEN:-}" || -z "${GITHUB_ACTOR:-}" ]]; then
+    return 1
+  fi
+  printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >&2
+}
+
 # The image job builds and publishes the image every gate pulls. It runs on
 # the runner, outside a container, and is the only mode that makes the image
 # instead of consuming it. A registry that refuses the login or the push is
 # never the run's failure: it prints no digest, and the gates build instead.
 if [[ "$MODE" == image ]]; then
   : "${GATE_IMAGE_REPOSITORY:?registry repository for the gate image}"
-  : "${GATE_IMAGE_TAG:?tag of this run's gate image}"
+  : "${GATE_IMAGE_TAG:?tag of the gate image for this run}"
   # Never hand docker anything but a plain ghcr.io repository name.
-  if [[ ! "$GATE_IMAGE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ \
-    || "$GATE_IMAGE_REPOSITORY" == *..* ]]; then
+  if [[ ! "$GATE_IMAGE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
     echo "GATE_IMAGE_REPOSITORY is not a plain ghcr.io name: $GATE_IMAGE_REPOSITORY" >&2
+    exit 2
+  fi
+  if [[ "$GATE_IMAGE_REPOSITORY" == *..* ]]; then
+    echo "GATE_IMAGE_REPOSITORY must not contain ..: $GATE_IMAGE_REPOSITORY" >&2
     exit 2
   fi
   image="$GATE_IMAGE_REPOSITORY:$GATE_IMAGE_TAG"
   docker build --build-arg TOOLS=1 --tag "$image" \
     --file "$support/Dockerfile" "$support" >&2
   reason=
-  if [[ -z "${GH_TOKEN:-}" || -z "${GITHUB_ACTOR:-}" ]]; then
-    reason="no token"
-  elif ! printf '%s' "$GH_TOKEN" |
-    docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >&2; then
-    reason="login refused"
+  if ! login; then
+    reason="no token or login refused"
   elif ! docker push "$image" >&2; then
     reason="push refused"
   fi
@@ -77,10 +85,8 @@ fi
 gate_image() {
   local reason="no image published" pulled
   if [[ -n "${GATE_IMAGE:-}" ]]; then
-    if [[ -n "${GH_TOKEN:-}" && -n "${GITHUB_ACTOR:-}" ]] \
-      && ! printf '%s' "$GH_TOKEN" |
-        docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >&2; then
-      reason="login refused"
+    if ! login; then
+      reason="no token or login refused"
     elif ! docker pull "$GATE_IMAGE" >&2; then
       reason="pull refused"
     else
