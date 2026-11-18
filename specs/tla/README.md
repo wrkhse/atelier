@@ -12,9 +12,9 @@ and the second look is what keeps the start from orphaning a command that is
 still running.
 
 Two model checkers check the same spec, TLC as the reference and
-[everystate](https://github.com/mattzcarey/everystate) as the one a plugin
-would drive, and CI compares what they say. Two broken variants show what
-the guards buy.
+[everystate](https://github.com/mattzcarey/everystate) as the second, and CI
+compares what they say. Three broken variants show what each guard buys, and
+what the design's two windows cost.
 
 | File | Holds |
 | --- | --- |
@@ -25,8 +25,10 @@ the guards buy.
 | `CommandStopClearBroken.cfg` | The same bounds, for the first broken variant |
 | `CommandStopClearLoose.tla` | The protocol with `ClearingUnrecorded` added |
 | `CommandStopClearLoose.cfg` | The same bounds, for the second broken variant |
+| `CommandStopClearCrash.tla` | The protocol with `DaemonCrashing` added |
+| `CommandStopClearCrash.cfg` | The same bounds, for the third broken variant |
 | `Dockerfile` | TLC and everystate, pinned by version and checksum, installed only in CI |
-| `check.sh` | Runs both checkers over the four configurations, and compares them |
+| `check.sh` | Runs both checkers over the five configurations, and compares them |
 
 ## The race
 
@@ -71,6 +73,7 @@ command, which is `ClearingUnrecorded` in `CommandStopClearLoose.tla`.
 | `Publishing` | `Identity::of` and `publish` |
 | `Abandoning` | `abandon`, when the identity cannot be recorded |
 | `SpawnFailing` | A start that cannot spawn, and the folder it removes |
+| `DaemonCrashing` | A crash between the spawn and the publication |
 | `Ending(p)` | The shell writing `exit` once the top level ends |
 | `LeaderExiting(p)` | The leader exiting; `check` reads a zombie as gone |
 | `LeaderVanishing(p)` | A leader ended by something else, which writes no `exit` |
@@ -112,15 +115,25 @@ may still run. A command that writes its exit needs no signal, and neither
 does a record from another boot, a leader that has gone or become a zombie,
 or a number another process took.
 
-What is not here: the commands inside a group, so a signalled group leaves
-nothing behind; descendants that create their own group; the child a start
-holds between the spawn and the publication, which is the one thing a crash
-would lose while it runs, and which atelier answers by keeping a folder it
-cannot read; and the window between the check and `/bin/kill`, because
-reading the record and signalling the group it names are one action, as they
-are one call. The kill window is the follow-up, and with `Foreign` in place
-it is expressible as a third variant that checks and then signals: it would
-fail `NoUnconfirmedSignal`, which is the residual the code names itself.
+The commands inside a group are not modelled, so a signalled group leaves
+nothing behind here, and neither does a descendant that creates its own
+group. Two windows are left out, and both are residuals of the design rather
+than of the model:
+
+- **Between the check and the kill.** Reading the record and signalling the
+  group it names are one action here, as they are one call, so the moment in
+  which the leader can exit and its number be reused is not checked. A
+  fourth variant that splits the two would fail `NoUnconfirmedSignal`.
+- **Between the spawn and the publication.** A daemon that dies here leaves
+  the command running, the folder holding `started` and `worktree` with no
+  number, and no later poll able to signal that group: atelier keeps the
+  folder, sends nothing, and reports the worktree, so the run waits at that
+  step until a person ends it. That orphans the group, so the good
+  specification leaves `DaemonCrashing` out of `Next`, and
+  `CommandStopClearCrash.tla` is the variant that adds it. Both checkers
+  report the violation in three states. Until the spawn and the publication
+  are ordered so a crash cannot land between them, this is the design's
+  residual, and #72 carries a draft issue for it.
 
 A folder whose record cannot name a leader is never emptied, and the start
 over it fails transiently for good. `Init` chooses an empty folder or one of
@@ -139,10 +152,11 @@ why every configuration sets `CHECK_DEADLOCK FALSE`.
 
 The first two are state predicates over the reachable states, and each
 broken variant fails `NoOrphanedLeader` by removing one guard, with no flag
-and no other change: emptying a folder while its command runs, or emptying a
-folder whose record atelier cannot act on behind a command that still runs.
-The third is the one liveness claim the code itself makes, in its own
-configuration, with a fairness assumption for each number's reaper.
+and no other change: emptying a folder while its command runs, emptying a
+folder whose record atelier cannot act on behind a command that still runs,
+or losing the only record of a group that was never published. The third
+check is the one liveness claim the code itself makes, with a fairness
+assumption for each number's reaper.
 
 ## Running it
 
@@ -162,32 +176,35 @@ On the Mac: none of it. Neither checker is installed there and neither is
 run there, and no gate and no required check depends on this folder.
 
 `check.sh` fails the job when the good spec is not a pass on both checkers,
-when either broken variant is not the safety violation that TLC reports as
-exit status 12 on both, when TLC does not clear the property, or when a
-checker counts no states. A checker that finds a liveness violation where
-the other does not also fails. A tool that will not check a property at all
-is reported as a finding rather than a failure, because what each tool does
+when a broken variant is not the safety violation that TLC reports as exit
+status 12 on both, when TLC does not clear the property, or when a checker
+counts no states. A checker that finds a liveness violation where the other
+does not also fails. A tool that will not check a property at all is
+reported as a finding rather than a failure, because what each tool does
 with `PROPERTY` is one of the things this experiment exists to find out.
 
 ## Result
 
-A run of `.github/workflows/tla.yml` (run 44233059137) counted:
+A run of `.github/workflows/tla.yml` (run 44239959847, the commit whose spec
+files these are) counted:
 
 | What | Checker | Verdict | Generated | Distinct | Wall clock |
 | --- | --- | --- | --- | --- | --- |
-| Invariants | TLC | passed, exit 0 | 517,722 | 188,376 | 3.8 s |
+| Invariants | TLC | passed, exit 0 | 517,722 | 188,376 | 3.6 s |
 | Invariants | everystate | passed, exit 0 | 517,722 | 188,376 | 1.5 s |
-| No fresh check | TLC | violated, exit 12 | 173 | 111 | 919 ms |
+| No fresh check | TLC | violated, exit 12 | 173 | 111 | 857 ms |
 | No fresh check | everystate | violated, exit 12 | 173 | 111 | 5 ms |
-| Record it cannot act on | TLC | violated, exit 12 | 25 | 23 | 885 ms |
-| Record it cannot act on | everystate | violated, exit 12 | 25 | 23 | 5 ms |
-| Liveness | TLC | passed, exit 0 | 517,722 | 188,376 | 16.2 s |
-| Liveness | everystate | passed, exit 0 | 517,722 | 188,376 | 1.7 s |
+| Record it cannot act on | TLC | violated, exit 12 | 25 | 23 | 830 ms |
+| Record it cannot act on | everystate | violated, exit 12 | 25 | 23 | 4 ms |
+| A crash before publishing | TLC | violated, exit 12 | 44 | 42 | 859 ms |
+| A crash before publishing | everystate | violated, exit 12 | 44 | 42 | 5 ms |
+| Liveness | TLC | passed, exit 0 | 517,722 | 188,376 | 13.1 s |
+| Liveness | everystate | passed, exit 0 | 517,722 | 188,376 | 1.6 s |
 
 The two agree everywhere: the same verdict, the same states generated and
-distinct, and the same search depth, 35 for the safe graph, 4 for the first
-broken variant and 2 for the second. everystate checks `PROPERTY`, fairness
-included, and its answer is TLC's.
+distinct, and the same search depth, 35 for the safe graph, 4, 2 and 3 for
+the three broken variants. everystate checks `PROPERTY`, fairness included,
+and its answer is TLC's.
 
 The counts repeat exactly from run to run; the times move by a few hundred
 milliseconds with the runner.
@@ -204,12 +221,18 @@ number 2 still a leader and `<<2, 0, 1>>` in `ours`; and
 group. That is the whole of the guard the design keeps around a record it
 cannot act on, and one action is enough to lose it.
 
+The third is three states: no folder; `Spawning(2)`; and `DaemonCrashing`,
+which drops the child the start holds and changes nothing else, so the
+folder is `unpublished`, names no number, and number 2 runs on with nothing
+able to signal it.
+
 Neither checker finds a violation in the protocol as written, across 188,376
-states: the design holds, and each guard is load-bearing.
+states: the design holds, each guard is load-bearing, and the crash window is
+the one place the model shows the design's own residual.
 
 Time is where they part: at this size TLC takes 2.5 times as long on the
-graph and 9.5 times as long with the property, and it pays about 700 ms of
-JVM start on every run while everystate starts in about a millisecond.
+graph and 8 times as long with the property, and it pays about 700 ms of JVM
+start on every run while everystate starts in about a millisecond.
 
 ## everystate, as it stands
 
@@ -233,21 +256,32 @@ JVM start on every run while everystate starts in about a millisecond.
 
 ## For #3
 
-Both checkers speak TLC's contract: exit statuses 0, 10, 11, 12, 13 and 150
-or 151 for a parse or config error, the same summary lines, the same state
-counts on this spec, and `everystate java` as a drop-in command line. The
-plugin does not have to choose between them to start, and it should order
-them instead:
+The owner decided on 2026-11-18 that #3 requires both checkers: TLC and
+everystate are gates for the `tla` plugin, everystate is pinned to a version
+and checksum, a disagreement between the two fails the pull request, a tool
+that declines a property is reported rather than hidden, and trace
+conformance stays a follow-up.
 
-1. **TLC is the checker #3 requires.** It is the reference the other is
-   measured against, it is one jar with a checksum, the gate container
-   already carries a JVM, and no conformance question attaches to it.
-2. **everystate is an optional second checker**, behind a setting, so a spec
-   can be checked twice in one job and the two compared, as this folder
-   does. It is five days old, pre-1.0 and one maintainer: worth running
-   beside TLC, and too young to be the only checker a plugin trusts.
-3. **The follow-up worth having is trace conformance**, not more speed:
-   everystate reads a trace and says whether a spec allows it, which would
-   let a run's own record of what happened be checked against the spec, not
-   only the spec against itself. #71 puts that out of scope, and it is the
-   reason the tool matters more than its start-up time.
+What this folder measured is what that decision rests on:
+
+- Both checkers speak TLC's contract: exit statuses 0, 10, 11, 12, 13, and
+  150 or 151 for a parse or config error; the same summary lines; the same
+  state counts; and `everystate java` as a drop-in for
+  `java -cp tla2tools.jar tlc2.TLC`.
+- On this spec they agree on everything that can be compared: verdict, states
+  generated and distinct, search depth and trace, across five
+  configurations and 188,376 reachable states.
+- everystate checks `PROPERTY` with fairness, so a plugin can ask both tools
+  for the same properties.
+
+The facts a plugin carries: everystate is 0.3.1, published five days after
+its repository was created, by one contributor, pre-1.0, with an open issue
+on evaluation order; it keeps every state in memory, runs one worker, and
+does not check TLAPS proofs, Java module overrides or subexpression
+selectors. Running both is what covers that, with TLC as the reference the
+other is measured against and a disagreement between them failing the build.
+
+The follow-up worth having is still trace conformance: everystate reads a
+trace and says whether a spec allows it, which would let a run's own record
+of what happened be checked against the spec, not only the spec against
+itself. #71 puts that out of scope.
