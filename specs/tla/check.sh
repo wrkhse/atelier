@@ -1,6 +1,6 @@
 #!/bin/bash
-# Checks the spec, its broken variant and its liveness property with TLC and
-# with everystate, and compares what the two say. It runs only in this
+# Checks the spec, its two broken variants and its liveness property with TLC
+# and with everystate, and compares what the two say. It runs only in this
 # experiment's container: it reads /specs, writes nothing outside /tmp,
 # needs no network, and runs no atelier code. Neither checker is a
 # dependency of atelier, and neither is a required gate.
@@ -73,6 +73,8 @@ check tlc-safety tlc CommandStopClear.tla CommandStopClear.cfg
 check everystate-safety every_state CommandStopClear.tla CommandStopClear.cfg
 check tlc-broken tlc CommandStopClearBroken.tla CommandStopClearBroken.cfg
 check everystate-broken every_state CommandStopClearBroken.tla CommandStopClearBroken.cfg
+check tlc-loose tlc CommandStopClearLoose.tla CommandStopClearLoose.cfg
+check everystate-loose every_state CommandStopClearLoose.tla CommandStopClearLoose.cfg
 check tlc-live tlc CommandStopClear.tla CommandStopClearLive.cfg
 check everystate-live every_state CommandStopClear.tla CommandStopClearLive.cfg
 
@@ -93,10 +95,12 @@ expect() {
 expect tlc-safety 0
 expect everystate-safety 0
 
-# The broken variant is a safety violation on both. TLC reports one as exit
+# Each broken variant is a safety violation on both. TLC reports one as exit
 # status 12, and everystate uses TLC's statuses.
 expect tlc-broken 12
 expect everystate-broken 12
+expect tlc-loose 12
+expect everystate-loose 12
 
 # TLC's answer on the one liveness claim the design makes.
 expect tlc-live 0
@@ -132,8 +136,10 @@ row() {
 
 row tlc-safety tlc 'invariants' 1
 row everystate-safety everystate 'invariants' 1
-row tlc-broken tlc 'the broken variant' 1
-row everystate-broken everystate 'the broken variant' 1
+row tlc-broken tlc 'no fresh check' 1
+row everystate-broken everystate 'no fresh check' 1
+row tlc-loose tlc 'record it cannot act on' 1
+row everystate-loose everystate 'record it cannot act on' 1
 row tlc-live tlc 'the liveness property' 1
 row everystate-live everystate 'the liveness property' 0
 
@@ -148,6 +154,7 @@ same() {
 
 same tlc-safety everystate-safety
 same tlc-broken everystate-broken
+same tlc-loose everystate-loose
 
 if [[ ${exit_code[everystate-live]:-none} == 0 ]]; then
     same tlc-live everystate-live
@@ -160,7 +167,7 @@ else
 fi
 
 # The counterexamples, so the two can be compared without the artifact.
-for key in tlc-broken everystate-broken; do
+for key in tlc-broken everystate-broken tlc-loose everystate-loose; do
     printf 'tla: **%s**:\n\n' "$key"
     awk '/violated/ { seen = 1 }
          seen { print "tla:   " $0; if (++n >= 24) exit }' "$scratch/$key.log"

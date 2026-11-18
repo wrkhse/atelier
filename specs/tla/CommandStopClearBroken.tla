@@ -17,13 +17,14 @@ BrokenNext ==
     \/ \E p \in Pids : LeaderExiting(p)
     \/ \E p \in Pids : LeaderVanishing(p)
     \/ \E p \in Pids : Reaping(p)
+    \/ \E p \in Pids : Foreign(p)
     \/ Publishing
     \/ Abandoning
-    \/ Crashing
     \/ Rebooting
     \/ Stopping
     \/ TimingOut
     \/ ClearingUnchecked
+    \/ SpawnFailing
 
 BrokenSpec == Init /\ [][BrokenNext]_vars
 
