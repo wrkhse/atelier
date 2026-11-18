@@ -341,7 +341,7 @@ run = "sleep 300"
         .expect("an identity record names its leader");
     drop(daemon);
 
-    // A crash between the start and the identity's publishing leaves
+    // A folder an older atelier left, whose identity was never published:
     // `started`, and no `identity`.
     fs::remove_file(folder.join("identity")).unwrap();
 

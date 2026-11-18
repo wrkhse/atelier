@@ -28,18 +28,21 @@
 \* group leaves nothing behind here, and neither does a descendant that
 \* outlives its leader.
 \*
-\* Two windows are left out, and specs/tla/README.md names both as
-\* follow-ups. The first is the one between the check and /bin/kill: reading
-\* the record and signalling the group it names are one action here, as they
-\* are one call.
+\* A leader whose prologue cannot publish exits before it runs anything, and
+\* the daemon ends that start: SpawningDenied and Abandoning model it, so a
+\* write that fails leaves no command running.
 \*
-\* The second is a daemon crash between the spawn and the publication of the
-\* identity, which orphans the group. The command runs on, the folder holds
-\* started and worktree and no number, and no later poll can signal it, so
-\* atelier keeps the folder, sends nothing, and reports the worktree. That is
-\* a residual of the design and not an artefact of this model, which is why
-\* the good specification leaves DaemonCrashing out of Next: adding it fails
-\* NoOrphanedLeader, and CommandStopClearCrash.tla does exactly that.
+\* One window is left out, and specs/tla/README.md names it as a follow-up:
+\* the one between the check and /bin/kill, because reading the record and
+\* signalling the group it names are one action here, as they are one call.
+\*
+\* The crash window is not left out. The leader publishes its own identity as
+\* its first act, before it runs anything, so the folder names the group from
+\* the moment the process can do anything: that is why Spawning may publish in
+\* the same step as it spawns, since nothing can run before the publish.
+\* DaemonCrashing is part of the good specification's Next. CommandStopClearCrash.tla keeps the order
+\* atelier ran before that, where only the daemon wrote the record, and there
+\* the same crash still fails NoOrphanedLeader.
 
 EXTENDS Naturals
 
@@ -152,11 +155,59 @@ Init ==
         /\ ours = IF f = "absent" THEN {} ELSE {<<p, 0, 1>>}
         /\ signalled = {}
 
-\* A start finds no folder, writes `started` and `worktree`, and spawns the
-\* command's shell in a process group of its own. The identity is not
-\* published yet, and the child is unreaped, so its number cannot be reused
-\* while this start still holds it.
+\* A start finds no folder, writes `starting`, `started` and `worktree`, and
+\* spawns the command's shell in a process group of its own. The leader's
+\* first act publishes its own identity, before it runs anything, so the
+\* folder names the group from the moment the process can do anything; the
+\* daemon still holds the child unreaped until it confirms the record.
 Spawning(p) ==
+    /\ folder = "absent"
+    /\ spawned = 0
+    /\ p \in Pids
+    /\ proc[p] = "free"
+    /\ start[p] < Stamp
+    /\ proc' = [proc EXCEPT ![p] = "leader"]
+    /\ start' = [start EXCEPT ![p] = start[p] + 1]
+    /\ folder' = "published"
+    /\ recPid' = p
+    /\ recBoot' = boot
+    /\ recStart' = start[p] + 1
+    /\ spawned' = p
+    /\ ours' = ours \cup {<<p, boot, start[p] + 1>>}
+    /\ exited' = FALSE
+    /\ UNCHANGED <<boot, signalled>>
+
+\* The leader's prologue cannot publish, so it exits before it runs the
+\* command: nothing is running, the folder says a start was made, and the
+\* daemon ends it with Abandoning. The shell was a group leader, so its
+\* identity goes in `ours`, and Abandoning's signal is one atelier started.
+SpawningDenied(p) ==
+    /\ folder = "absent"
+    /\ spawned = 0
+    /\ p \in Pids
+    /\ proc[p] = "free"
+    /\ start[p] < Stamp
+    /\ folder' = "unpublished"
+    /\ spawned' = p
+    /\ proc' = [proc EXCEPT ![p] = "zombie"]
+    /\ start' = [start EXCEPT ![p] = start[p] + 1]
+    /\ ours' = ours \cup {<<p, boot, start[p] + 1>>}
+    /\ UNCHANGED <<boot, recPid, recBoot, recStart, exited, signalled>>
+
+\* The daemon writes its own reading of the record and lets the reaper wait
+\* on the leader. The record is the one the leader published, so this changes
+\* what the daemon holds, not what the folder says.
+Confirming ==
+    /\ spawned /= 0
+    /\ spawned' = 0
+    /\ UNCHANGED <<boot, proc, start, folder, recPid, recBoot, recStart,
+                   exited, ours, signalled>>
+
+\* The start as atelier ran it before the leader published its own identity:
+\* the folder names the group only once the daemon writes the record, so a
+\* daemon that dies first leaves a group nothing can name. The third broken
+\* variant uses this and Publishing.
+SpawningUnpublished(p) ==
     /\ folder = "absent"
     /\ spawned = 0
     /\ p \in Pids
@@ -170,9 +221,10 @@ Spawning(p) ==
     /\ exited' = FALSE
     /\ UNCHANGED <<boot, recPid, recBoot, recStart, signalled>>
 
-\* The start records the child's identity before it returns: the child
-\* leads its own group, and the record holds the number, the boot and the
-\* start identity the system reports for it.
+\* The daemon writes the record of the child it still holds: the order
+\* CommandStopClearCrash.tla keeps, where the folder names the group only
+\* once this has run. In the good specification the leader has published the
+\* same record already, so Confirming is this without the folder changing.
 Publishing ==
     /\ folder = "unpublished"
     /\ spawned /= 0
@@ -188,7 +240,9 @@ Publishing ==
 \* and reaps that child, and removes the folder once the signal was
 \* delivered. When the guard refuses the group or /bin/kill fails, the
 \* child is still killed and reaped, but the folder stays: the group it
-\* names may still run, and the folder is then the only trace of it.
+\* names may still run, and the folder is then the only trace of it. A leader
+\* whose prologue could not publish leaves this with nothing in the group, and
+\* the start fails transiently rather than keeping a folder nothing can use.
 Abandoning ==
     /\ folder = "unpublished"
     /\ spawned /= 0
@@ -211,12 +265,11 @@ SpawnFailing ==
     /\ UNCHANGED <<boot, proc, start, recPid, recBoot, recStart, exited,
                    spawned, ours, signalled>>
 
-\* The daemon dies between the spawn and the publication, so its child handle
-\* is gone while the command runs on. The folder holds `started` and
-\* `worktree` with no number, no later poll can name the group, and atelier
-\* sends it no signal and keeps the folder. This orphans the group, so the
-\* good specification leaves the action out of Next; the third broken variant
-\* adds it.
+\* The daemon dies, and the child handle it held is gone. The leader published
+\* its own identity before it ran anything, so the folder still names the
+\* group and a later poll can check it and signal it: nothing is lost. In the
+\* order CommandStopClearCrash.tla keeps, where only the daemon wrote the
+\* record, the same crash orphans the group.
 DaemonCrashing ==
     /\ spawned /= 0
     /\ spawned' = 0
@@ -354,12 +407,14 @@ ClearingUnrecorded ==
 
 Next ==
     \/ \E p \in Pids : Spawning(p)
+    \/ \E p \in Pids : SpawningDenied(p)
     \/ \E p \in Pids : Ending(p)
     \/ \E p \in Pids : LeaderExiting(p)
     \/ \E p \in Pids : LeaderVanishing(p)
     \/ \E p \in Pids : Reaping(p)
     \/ \E p \in Pids : Foreign(p)
-    \/ Publishing
+    \/ Confirming
+    \/ DaemonCrashing
     \/ Abandoning
     \/ Rebooting
     \/ Stopping

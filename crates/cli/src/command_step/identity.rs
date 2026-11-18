@@ -167,8 +167,9 @@ pub fn judge(identity: &Identity, boot: &str, process: Option<&Process>) -> Lead
 }
 
 /// The boot that is running now: the kernel's boot id on Linux, and
-/// `kern.bootsessionuuid` on macOS.
-fn boot() -> Result<String, String> {
+/// `kern.bootsessionuuid` on macOS. A start hands it to the leader, which
+/// records it in the identity it publishes itself.
+pub fn boot() -> Result<String, String> {
     if cfg!(target_os = "linux") {
         proc_boot()
     } else if cfg!(target_os = "macos") {
@@ -229,7 +230,25 @@ fn process(pid: u32) -> Result<Option<Process>, String> {
 fn proc_process(pid: u32) -> Result<Option<Process>, String> {
     let path = format!("/proc/{pid}/stat");
 
-    read_stat(&path, fs::read_to_string(&path))
+    read_stat_again(&path, || fs::read_to_string(&path))
+}
+
+/// Reads `path` with `read`, and once more when the line it gave does not
+/// parse. A process that is killed and reaped while its line is read can
+/// leave a line that is not whole, and the second read then finds it gone;
+/// a line that does not parse twice is an error, as before.
+fn read_stat_again(
+    path: &str,
+    mut read: impl FnMut() -> std::io::Result<String>,
+) -> Result<Option<Process>, String> {
+    let first = read();
+    let torn = first.as_ref().is_ok_and(|text| parse_stat(text).is_none());
+
+    if torn {
+        return read_stat(path, read());
+    }
+
+    read_stat(path, first)
 }
 
 /// What `read` gave for `path`: the process its stat line describes, none
@@ -642,6 +661,79 @@ mod tests {
             read_stat(path, Ok("garbage".into())),
             Err("unreadable /proc/4242/stat".into())
         );
+    }
+
+    /// Hands out the given reads in order, and counts them.
+    fn reads(
+        given: Vec<std::io::Result<String>>,
+    ) -> (
+        impl FnMut() -> std::io::Result<String>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let count = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+        let counted = std::rc::Rc::clone(&count);
+        let mut given = given.into_iter();
+
+        let read = move || {
+            counted.set(counted.get().saturating_add(1));
+            given.next().expect("no more reads were given")
+        };
+
+        (read, count)
+    }
+
+    #[test]
+    fn a_whole_stat_line_is_read_once() {
+        let (read, count) = reads(vec![Ok(stat("S", "4242", "987654"))]);
+
+        assert_eq!(
+            read_stat_again("/proc/4242/stat", read),
+            Ok(Some(Process {
+                group: 4242,
+                start: "987654".into(),
+                zombie: false,
+            }))
+        );
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn a_torn_stat_line_of_a_process_that_then_went_is_no_process() {
+        let (read, count) = reads(vec![
+            Ok("4242 (sh) S 1".into()),
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        ]);
+
+        assert_eq!(read_stat_again("/proc/4242/stat", read), Ok(None));
+        assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn a_torn_stat_line_read_whole_the_second_time_gives_the_process() {
+        let (read, _) = reads(vec![
+            Ok("4242 (sh) S 1".into()),
+            Ok(stat("Z", "4242", "987654")),
+        ]);
+
+        assert_eq!(
+            read_stat_again("/proc/4242/stat", read),
+            Ok(Some(Process {
+                group: 4242,
+                start: "987654".into(),
+                zombie: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_stat_line_that_does_not_parse_twice_is_an_error() {
+        let (read, count) = reads(vec![Ok("garbage".into()), Ok("garbage".into())]);
+
+        assert_eq!(
+            read_stat_again("/proc/4242/stat", read),
+            Err("unreadable /proc/4242/stat".into())
+        );
+        assert_eq!(count.get(), 2);
     }
 
     #[test]

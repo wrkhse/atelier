@@ -70,6 +70,9 @@ impl Step for Atelier {
     }
 
     /// Starts the command in the run's worktree, in the background.
+    ///
+    /// It waits, on the poll thread, for the leader to publish its own identity,
+    /// which is bounded and which only a hung prologue reaches.
     fn start(&self, run: &RunContext<'_>, step: &StepSpec) -> Result<Started, PluginError> {
         let worktree = run.worktree.ok_or_else(|| {
             PluginError::permanent("a command runs in the run's worktree; git.worktree makes it")
