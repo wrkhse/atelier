@@ -22,7 +22,7 @@ RUN rustup component add rustfmt clippy
 RUN useradd --uid 10001 --create-home ci && install -d -o ci -g ci /work /reports
 COPY cargo.py /opt/ci/bin/cargo
 COPY entrypoint.sh /opt/ci/entrypoint.sh
-COPY reports.py test_reports.py contained.jq floor.sh inspection.json /opt/ci/
+COPY reports.py shards.py test_reports.py contained.jq floor.sh inspection.json /opt/ci/
 RUN chmod 0555 /opt/ci/bin/cargo /opt/ci/entrypoint.sh
 
 ENV HOME=/home/ci \

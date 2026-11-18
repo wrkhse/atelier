@@ -1,13 +1,18 @@
 """Fail-closed checks for Kani 0.68 and cargo-mutants 27.1 CI reports.
 
 Usage: python3 .github/ci/reports.py <gate> <reports> [--atelier]
+       python3 .github/ci/reports.py --partition <shards> <reports>
 <reports> holds kani.json, mutants-selection.json, base.txt and
 mutants.out/outcomes.json, as the gate container wrote them to /reports.
+--partition collects one gate's shards, each in its own directory under
+<reports> with a container/ sub-directory, and proves their reports are one
+complete partition.
 --atelier adds atelier's own floor: both core proofs, and the canary. run.sh
 passes it when the workflow runs from the repository it checks.
 Other gates rely on their process exit status and need no report.
 Contracts: Kani's kani-driver/src/frontend/schema_utils.rs and cargo-mutants'
-src/outcome.rs and src/output.rs at the pinned upstream release tags.
+src/outcome.rs, src/output.rs and src/shard.rs at the pinned upstream release
+tags.
 """
 
 import argparse
@@ -16,6 +21,10 @@ import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(HERE), str(HERE.parent)]
+from shards import parse_shard, slice_size  # noqa: E402
 
 MAX_REPORT_BYTES = 128 * 1024 * 1024
 
@@ -210,14 +219,18 @@ def validate_phases(outcome: dict, summary: str) -> None:
         require(failure_status(final), f"missing failure evidence for {summary}")
 
 
-def validate_mutants(report: dict) -> dict:
-    """The tested mutants' names and files, and how many were caught."""
+def validate_mutants(report: dict, empty_ok: bool = False) -> dict:
+    """The tested mutants' names and files, and how many were caught.
+
+    A shard whose slice of the gate's selection is empty tests no mutant, so
+    `empty_ok` admits exactly that report; every other run must test one.
+    """
     require(report.get("cargo_mutants_version") == "27.1.0", "unexpected mutants version")
     start = timestamp(report.get("start_time"), "start_time")
     end = timestamp(report.get("end_time"), "end_time")
     require(end >= start, "mutants end_time precedes start_time")
     total = count(report.get("total_mutants"), "total_mutants")
-    require(total > 0, "zero mutants tested")
+    require(total > 0 or empty_ok, "zero mutants tested")
     outcomes = array_value(report.get("outcomes"), "outcomes")
     require(len(outcomes) == total + 1, "outcome count must include mutants and baseline")
     counts = Counter()
@@ -251,15 +264,66 @@ def validate_mutants(report: dict) -> dict:
         "timeout": 0,
         "success": 0,
     }
+    counters = {}
     for field, wanted in expected.items():
-        require(count(report.get(field), field) == wanted, f"mutant count mismatch: {field}")
-    return {"names": sorted(names), "files": files, "caught": counts["CaughtMutant"]}
+        counters[field] = count(report.get(field), field)
+        require(counters[field] == wanted, f"mutant count mismatch: {field}")
+    return {
+        "names": sorted(names),
+        "files": files,
+        "caught": counts["CaughtMutant"],
+        "missed": counters["missed"],
+        "timeout": counters["timeout"],
+    }
 
 
-def selected_names(selection: dict, tested: dict, label: str) -> int:
+def selection_shard(selection: dict) -> tuple[int, int, int] | None:
+    """A selection's shard index and count, and the whole gate's mutant total."""
+    label = selection.get("shard")
+    if label is None:
+        return None
+    require(isinstance(label, str), "a shard is a k/n string")
+    parsed = parse_shard(label)
+    require(parsed is not None, "a shard cannot be empty")
+    k, n = parsed
+    total = count(selection.get("total"), "total")
+    require(total >= 1, "a shard needs a non-empty gate selection")
+    return k, n, total
+
+
+def shard_slice(shard: tuple[int, int, int] | None) -> int | None:
+    """The number of mutants a shard must test, or None when unsharded."""
+    if shard is None:
+        return None
+    k, n, total = shard
+    return slice_size(total, k, n)
+
+
+def shard_prefix(shard: tuple[int, int, int] | None) -> str:
+    """The summary's opening when one shard of a larger run was tested."""
+    if shard is None:
+        return ""
+    k, n, total = shard
+    return f"shard {k}/{n} of {total} mutants: "
+
+
+def selected_names(
+    selection: dict, tested: dict, label: str, expected: int | None = None
+) -> int:
+    """The selection's names, which must be the tested ones and its shard's slice."""
     names = array_value(selection.get("selected"), "selected")
-    require(bool(names), f"the {label} selected no mutant")
+    if expected is None:
+        require(bool(names), f"the {label} selected no mutant")
+    require(
+        all(isinstance(name, str) and name for name in names),
+        f"bad {label} mutant",
+    )
     require(sorted(names) == tested["names"], f"tested mutants differ from the {label}'s")
+    if expected is not None:
+        require(
+            len(names) == expected,
+            f"the shard tests {len(names)} mutants, not {expected}",
+        )
     return len(names)
 
 
@@ -276,14 +340,20 @@ def evaluated_diff(selection: dict, fallback: bool) -> tuple[int, int] | None:
     return len(files), count(selected, "diff_selected")
 
 
-def validate_canary(selection: dict, tested: dict, diff: tuple[int, int] | None) -> str:
+def validate_canary(
+    selection: dict,
+    tested: dict,
+    diff: tuple[int, int] | None,
+    shard: tuple[int, int, int] | None,
+) -> str:
+    """The canary's own report; a sharded one proves its catch by partition."""
     require(diff is None or diff[1] == 0, "canary with a diff that selected mutants")
     canary = selection.get("canary")
     require(canary == CANARY, f"unexpected canary: {canary}")
-    listed = selected_names(selection, tested, "canary")
+    listed = selected_names(selection, tested, "canary", shard_slice(shard))
     require(all(file == CANARY for file in tested["files"]), "a canary mutated another file")
-    # All-unviable canary mutants would prove nothing about the tests.
-    require(tested["caught"] > 0, "no canary mutant was caught")
+    # A sharded canary's caught mutant is required of the whole partition.
+    require(tested["caught"] > 0 or shard is not None, "no canary mutant was caught")
     why = selection.get("reason")
     require(isinstance(why, str) and bool(why.strip()), "canary run without a reason")
     require(len(why) <= MAX_REASON and "\n" not in why, "canary reason is not one short line")
@@ -291,21 +361,115 @@ def validate_canary(selection: dict, tested: dict, diff: tuple[int, int] | None)
     return f"{head}, selected 0 mutants; canary {listed} mutants in {CANARY}: {why}"
 
 
-def validate_selection(selection: dict, tested: dict, atelier: bool, fallback: bool) -> str:
+def validate_selection(selection: dict, tested: dict, fallback: bool) -> str:
     """Which mutants were tested and why; a canary never reads as diff coverage."""
+    shard = selection_shard(selection)
     mode = selection.get("mode")
     if mode == "configured":
-        return f"{len(tested['names'])} mutants as the gate configures them (no --in-diff)"
+        summary = f"{len(tested['names'])} mutants as the gate configures them (no --in-diff)"
+        if shard is None:
+            return summary
+        selected_names(selection, tested, "configured run", shard_slice(shard))
+        return shard_prefix(shard) + summary
     require(mode in ("diff", "canary"), f"unknown mutants selection: {mode}")
     diff = evaluated_diff(selection, fallback)
     if mode == "canary":
-        require(atelier, "the canary is atelier's own")
-        return validate_canary(selection, tested, diff)
+        return shard_prefix(shard) + validate_canary(selection, tested, diff, shard)
     require(diff is not None, "a diff run needs an evaluated diff")
     files, selected = diff
     require(files > 0, "a diff that selected mutants changed no file")
-    require(selected == selected_names(selection, tested, "diff"), "diff count mismatch")
-    return f"diff changed {files} repository files, selected {selected} mutants; canary 0 mutants (not run)"
+    names = selected_names(selection, tested, "diff", shard_slice(shard))
+    if shard is None:
+        require(selected == names, "diff count mismatch")
+        return f"diff changed {files} repository files, selected {selected} mutants; canary 0 mutants (not run)"
+    require(selected == shard[2], "diff count mismatch")
+    return shard_prefix(shard) + (
+        f"diff changed {files} repository files, selected {selected} mutants; "
+        f"this shard tests {names}"
+    )
+
+
+def validate_shard(selection: dict, reports: Path) -> tuple[dict, str]:
+    """One mutants report against its selection: the tested mutants and summary."""
+    shard = selection_shard(selection)
+    empty = shard_slice(shard) == 0
+    outcomes = read_report(reports / "mutants.out" / "outcomes.json")
+    tested = validate_mutants(outcomes, empty)
+    fallback = (reports / "base.txt").is_file()
+    return tested, validate_selection(selection, tested, fallback)
+
+
+def validate_partition(shards: int, reports: Path) -> str:
+    """Prove the shards' own reports are one complete partition of their gate.
+
+    Each shard directory holds a container/ with its selection and report.
+    The shard indexes must be exactly 0..shards-1 once each, the whole-gate
+    totals must agree, and the shards' tested mutants must be distinct and
+    add up to that total. A sharded canary needs one caught mutant across
+    the group, not in every report; each report must still mutate only
+    CANARY.
+    """
+    require(shards >= 1, "a partition needs at least one shard")
+    directories = sorted(path for path in reports.iterdir() if path.is_dir())
+    require(bool(directories), f"no shard reports under {reports}")
+    groups = {}
+    for directory in directories:
+        container = directory / "container"
+        selection_path = container / "mutants-selection.json"
+        selection = read_report(selection_path)
+        shard = selection_shard(selection)
+        require(shard is not None, f"an unsharded selection: {selection_path}")
+        require(
+            shard[1] == shards,
+            f"{container} is shard {shard[0]}/{shard[1]}, not of {shards}",
+        )
+        gate, root, mode = (
+            selection.get("gate"),
+            selection.get("root"),
+            selection.get("mode"),
+        )
+        require(isinstance(gate, str) and gate, f"{container} records no gate")
+        require(isinstance(root, str) and root, f"{container} records no root")
+        require(isinstance(mode, str) and mode, f"{container} records no mode")
+        entry = (container, selection, shard)
+        groups.setdefault((gate, root, mode), []).append(entry)
+    parts = []
+    for (gate, root, mode), entries in groups.items():
+        label = f"{gate} at {root} ({mode})"
+        indexes = sorted(shard[0] for _, _, shard in entries)
+        expected = list(range(shards))
+        require(indexes == expected, f"{label} has shards {indexes}, not {expected}")
+        totals = {shard[2] for _, _, shard in entries}
+        require(len(totals) == 1, f"{label} divides totals {sorted(totals)}")
+        total = totals.pop()
+        tested = []
+        caught = 0
+        missed = 0
+        timeouts = 0
+        files = []
+        for container, selection, _ in entries:
+            report, _ = validate_shard(selection, container)
+            tested.extend(report["names"])
+            caught += report["caught"]
+            missed += report["missed"]
+            timeouts += report["timeout"]
+            files.extend(report["files"])
+        require(len(tested) == len(set(tested)), f"{label} tests a mutant twice")
+        require(
+            len(tested) == total,
+            f"{label} tests {len(tested)} mutants, not {total}",
+        )
+        if mode == "canary":
+            require(caught > 0, f"{label} caught no canary mutant")
+            require(
+                all(file == CANARY for file in files),
+                f"{label} mutated another file",
+            )
+        parts.append(
+            f"{len(entries)} shards, {len(tested)} mutants, "
+            f"{missed} missed, {timeouts} timeouts"
+        )
+    return "; ".join(parts)
 
 
 def validate(gate: str, reports: Path, atelier: bool) -> str | None:
@@ -314,26 +478,42 @@ def validate(gate: str, reports: Path, atelier: bool) -> str | None:
     if name == "kani":
         return validate_kani(read_report(reports / "kani.json"), atelier)
     elif name == "mutants":
-        tested = validate_mutants(read_report(reports / "mutants.out" / "outcomes.json"))
         selection = read_report(reports / "mutants-selection.json")
-        fallback = (reports / "base.txt").is_file()
-        return validate_selection(selection, tested, atelier, fallback)
+        # The canary is atelier's own, under the same floor as the proofs.
+        require(
+            selection.get("mode") != "canary" or atelier,
+            "the canary is atelier's own",
+        )
+        return validate_shard(selection, reports)[1]
     return None
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("gate")
-    parser.add_argument("reports", type=Path)
+    parser.add_argument("arguments", nargs="*", metavar="<gate> <reports>")
     parser.add_argument("--atelier", action="store_true", help="atelier's own floor")
+    parser.add_argument("--partition", type=int, metavar="SHARDS")
     args = parser.parse_args(argv)
+    # --partition N <reports> takes only the reports directory as a positional.
+    if args.partition is None:
+        if len(args.arguments) != 2:
+            parser.error("a gate and a reports directory are required")
+        gate, reports = args.arguments[0], Path(args.arguments[1])
+    else:
+        if len(args.arguments) != 1:
+            parser.error("--partition takes one reports directory")
+        gate, reports = None, Path(args.arguments[0])
+    label = "partition" if gate is None else gate
     try:
-        summary = validate(args.gate, args.reports, args.atelier)
+        if gate is None:
+            summary = validate_partition(args.partition, reports)
+        else:
+            summary = validate(gate, reports, args.atelier)
     except (OSError, UnicodeError, ValueError, RecursionError) as error:
-        print(f"{args.gate}: invalid CI report: {error}", file=sys.stderr)
+        print(f"{label}: invalid CI report: {error}", file=sys.stderr)
         return 1
     if summary:
-        print(f"**{args.gate}:** {summary}")
+        print(f"**{label}:** {summary}")
     return 0
 
 

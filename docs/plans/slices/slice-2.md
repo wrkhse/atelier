@@ -39,7 +39,7 @@ atelier check
 flowchart LR
     Config[".atelier/config.toml<br/>from origin/base"] --> Plugins["checks plugins<br/>roots, gates, fixes"]
     Tree["the pull request's tree"] --> Plugins
-    Plugins -- "atelier gates --json --diff" --> Matrix["gates.yml<br/>one job per gate and root"]
+    Plugins -- "atelier gates --json --diff" --> Matrix["gates.yml<br/>one job per gate and root,<br/>or per shard of a gate"]
     Matrix -- "atelier check --gate --root" --> Check["a check on the pull request<br/>commands/clippy (.)"]
     Plugins -- "fixes" --> Hook["each builder commit<br/>atelier fix --staged"]
 ```
@@ -490,9 +490,10 @@ jobs:
 `atelier gates --json` into a matrix: on a pull request with
 `--diff <base commit>`, on a push every root. It runs
 `atelier check --setup --gate <gate> --root <root>` as one job each, named
-`commands/clippy (.)`, so each shows as its own check, and a failure reaches
-the builder through sourcefed. With `atelier: source`, it builds atelier
-from the calling repository instead, as atelier's own CI does.
+`commands/clippy (.)`, or as one job per shard of a mutants gate, named
+`commands/mutants (.) [1/4]`, so each shows as its own check, and a failure
+reaches the builder through sourcefed. With `atelier: source`, it builds
+atelier from the calling repository instead, as atelier's own CI does.
 
 Files: `plugins/github/src/ci.rs`, `.github/workflows/gates.yml`.
 
@@ -516,12 +517,16 @@ pub trait Forge {
 }
 ```
 
-`gates.yml` has two jobs. `plan` installs atelier once, from the release
-with its `SHA256SUMS` checked or built from source, passes it on as an
-artifact, and writes the matrix. `gate` runs once per entry, without
-stopping the others on a failure; it is skipped when the matrix is empty.
-Both check out the full history, with credentials, since atelier fetches
-the base branch to read the config.
+`gates.yml` has three jobs, `plan`, `gate` and `partition`. `plan` installs
+atelier once, from the release with its `SHA256SUMS` checked or built from
+source, passes it on as an artifact, and writes the matrix, with each
+mutants gate split into one entry per shard. `gate` runs once per entry,
+without stopping the others on a failure; it is skipped when the matrix is
+empty. `partition` runs after the gates, also when one failed, and in a
+fresh offline container proves that every shard's report is there and that
+no mutant is tested twice and none is left out. `plan` and `gate` check out
+the full history, with credentials, since atelier fetches the base branch
+to read the config.
 
 #### Verification
 
@@ -564,8 +569,8 @@ Files: [`.atelier/config.toml`](../../../.atelier/config.toml),
 Verified with the real binary in a copy of atelier whose `main` holds the
 config: `gates` lists the 14 gates, and `fmt`, `readmes`, `prettier`,
 `ruff` and `actionlint` pass; a change under `docs` alone plans only
-`commands/prettier (docs)`. Then on a pull request to atelier, one check per
-gate and root.
+`commands/prettier (docs)`. Then on a pull request to atelier, one check
+per gate and root, or per shard of the mutants gate.
 
 ## End to end
 

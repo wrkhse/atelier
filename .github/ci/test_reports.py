@@ -26,6 +26,11 @@ LOADER = importlib.machinery.SourceFileLoader("ci_cargo", str(WRAPPER))
 cargo = importlib.util.module_from_spec(importlib.util.spec_from_loader("ci_cargo", LOADER))
 LOADER.exec_module(cargo)
 
+SHARDS = SCRIPT.with_name("shards.py")
+SHARD_SPEC = importlib.util.spec_from_file_location("ci_shards", SHARDS)
+shards = importlib.util.module_from_spec(SHARD_SPEC)
+SHARD_SPEC.loader.exec_module(shards)
+
 
 def kani_report(names: list[str] | None = None, crate: str = "atelier_core") -> dict:
     """Representative export from Kani 0.68's schema_utils.rs contract."""
@@ -87,35 +92,37 @@ def phases(final: object = "Success", unviable: bool = False) -> list:
     ]
 
 
-def mutants_report() -> dict:
-    """Matches the real 27.1 report, with a finished run and two mutants."""
+def mutants_report(names: list[str] | None = None, file: str = "src/lib.rs") -> dict:
+    """Matches the real 27.1 report; mutants alternate caught and unviable."""
+    names = (
+        ["src/lib.rs:1: replace true", "src/lib.rs:2: replace return"]
+        if names is None
+        else names
+    )
+    outcomes = [
+        {"scenario": "Baseline", "summary": "Success", "phase_results": phases()}
+    ]
+    for index, name in enumerate(names, 1):
+        unviable = index % 2 == 0
+        outcomes.append(
+            {
+                "scenario": {"Mutant": {"name": name, "file": file}},
+                "summary": "Unviable" if unviable else "CaughtMutant",
+                "phase_results": phases({"Failure": 99 + index}, unviable=unviable),
+            }
+        )
+    caught = (len(names) + 1) // 2
     return {
         "cargo_mutants_version": "27.1.0",
         "start_time": "2026-11-13T15:49:29.548516Z",
         "end_time": "2026-11-13T15:50:29.548516Z",
-        "total_mutants": 2,
-        "caught": 1,
-        "unviable": 1,
+        "total_mutants": len(names),
+        "caught": caught,
+        "unviable": len(names) - caught,
         "missed": 0,
         "timeout": 0,
         "success": 0,
-        "outcomes": [
-            {
-                "scenario": "Baseline",
-                "summary": "Success",
-                "phase_results": phases(),
-            },
-            {
-                "scenario": {"Mutant": {"name": "src/lib.rs:1: replace true", "file": "src/lib.rs"}},
-                "summary": "CaughtMutant",
-                "phase_results": phases({"Failure": 100}),
-            },
-            {
-                "scenario": {"Mutant": {"name": "src/lib.rs:2: replace return", "file": "src/lib.rs"}},
-                "summary": "Unviable",
-                "phase_results": phases({"Failure": 101}, unviable=True),
-            },
-        ],
+        "outcomes": outcomes,
     }
 
 
@@ -127,10 +134,35 @@ def diff_selection(value: object) -> dict:
         names = []
     return {
         "mode": "diff",
+        "total": len(names),
         "diff_selected": len(names),
         "changed_files": ["src/lib.rs"],
         "selected": names,
     }
+
+
+def shard_names(total: int, k: int, n: int) -> list[str]:
+    """Distinct mutant names for one shard of a `total`-mutant gate."""
+    start = sum(shards.slice_size(total, index, n) for index in range(k))
+    size = shards.slice_size(total, k, n)
+    return [f"src/lib.rs:{start + index}: replace return" for index in range(size)]
+
+
+def sharded_selection(
+    names: list[str], k: int, n: int, total: int, **changes: object
+) -> dict:
+    """What cargo.py records for shard k of n when it tests these names."""
+    selection = {
+        "mode": "diff",
+        "gate": "commands/mutants",
+        "root": ".",
+        "shard": f"{k}/{n}",
+        "total": total,
+        "diff_selected": total,
+        "changed_files": ["src/lib.rs"],
+        "selected": names,
+    }
+    return {**selection, **changes}
 
 
 class ReportCase(unittest.TestCase):
@@ -234,6 +266,93 @@ class ReportTests(ReportCase):
         with contextlib.redirect_stderr(stderr):
             self.assertEqual(reports.main(["kani", str(self.root), "--atelier"]), 1)
         self.assertIn("invalid CI report", stderr.getvalue())
+
+
+class SliceTests(unittest.TestCase):
+    def test_slices_follow_cargo_mutants_algorithm(self) -> None:
+        for total in range(10):
+            sizes = [shards.slice_size(total, k, 4) for k in range(4)]
+            self.assertEqual(sum(sizes), total)
+        self.assertEqual(shards.slice_size(0, 0, 4), 0)
+        self.assertEqual(shards.slice_size(2, 0, 4), 1)
+        self.assertEqual([shards.slice_size(8, k, 4) for k in range(4)], [2, 2, 2, 2])
+        self.assertEqual([shards.slice_size(3, k, 4) for k in range(4)], [1, 1, 1, 0])
+        self.assertEqual(shards.slice_size(4, 4, 4), 0)
+        self.assertEqual(shards.slice_size(4, 8, 4), 0)
+
+    def test_slices_refuse_impossible_numbers(self) -> None:
+        for total, k, n in ((-1, 0, 4), (4, -1, 4), (4, 0, 0)):
+            with self.subTest(total=total, k=k, n=n), self.assertRaises(ValueError):
+                shards.slice_size(total, k, n)
+
+
+class ExpandTests(unittest.TestCase):
+    def test_expand_splits_only_mutants_gates_in_order(self) -> None:
+        matrix = [
+            {"gate": "commands/fmt", "root": "."},
+            {"gate": "commands/mutants", "root": "."},
+            {"gate": "commands/kani", "root": "docs"},
+        ]
+        text = shards.expand_shards(json.dumps(matrix), 2)
+        self.assertNotIn("\n", text)
+        self.assertEqual(
+            json.loads(text),
+            [
+                {"gate": "commands/fmt", "root": "."},
+                {"gate": "commands/mutants", "root": ".", "shard": "0/2"},
+                {"gate": "commands/mutants", "root": ".", "shard": "1/2"},
+                {"gate": "commands/kani", "root": "docs"},
+            ],
+        )
+
+    def test_expand_refuses_a_matrix_it_cannot_split(self) -> None:
+        cases = {
+            "not json": "[",
+            "not an array": "{}",
+            "not objects": '["commands/mutants"]',
+            "no gate": '[{"root": "."}]',
+            "empty gate": '[{"gate": "", "root": "."}]',
+            "no root": '[{"gate": "commands/mutants"}]',
+            "empty root": '[{"gate": "commands/mutants", "root": ""}]',
+            "already sharded": (
+                '[{"gate": "commands/mutants", "root": ".", "shard": "0/2"}]'
+            ),
+        }
+        for case, text in cases.items():
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                shards.expand_shards(text, 2)
+        for count in (0, 9):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                shards.expand_shards("[]", count)
+
+    def test_expand_cli_takes_the_matrix_on_stdin(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(SHARDS), "expand", "2"],
+            input=json.dumps([{"gate": "commands/mutants", "root": "."}]),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(len(completed.stdout.splitlines()), 1)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            [
+                {"gate": "commands/mutants", "root": ".", "shard": "0/2"},
+                {"gate": "commands/mutants", "root": ".", "shard": "1/2"},
+            ],
+        )
+        refused = subprocess.run(
+            [sys.executable, str(SHARDS), "expand", "2"],
+            input="{}",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(len(refused.stderr.splitlines()), 1)
 
 
 class KaniTests(ReportCase):
@@ -462,11 +581,8 @@ class MutantsTests(ReportCase):
         reports.validate("mutants", self.root, True)
 
 
-def canary_report() -> dict:
-    report = mutants_report()
-    for outcome in report["outcomes"][1:]:
-        outcome["scenario"]["Mutant"]["file"] = reports.CANARY
-    return report
+def canary_report(names: list[str] | None = None) -> dict:
+    return mutants_report(names, file=reports.CANARY)
 
 
 def canary_selection(**changes: object) -> dict:
@@ -575,6 +691,191 @@ class SelectionTests(ReportCase):
         self.assertIn("**commands/mutants:** diff changed 1 repository files", stdout.getvalue())
 
 
+class ShardReportTests(ReportCase):
+    def test_a_shard_report_is_named_as_a_slice(self) -> None:
+        names = shard_names(8, 1, 4)
+        selection = sharded_selection(names, 1, 4, 8)
+        self.write("mutants", mutants_report(names), selection)
+        summary = reports.validate("commands/mutants", self.root, True)
+        self.assertEqual(
+            summary,
+            "shard 1/4 of 8 mutants: diff changed 1 repository files, "
+            "selected 8 mutants; this shard tests 2",
+        )
+
+    def test_a_shard_must_test_exactly_its_slice(self) -> None:
+        names = shard_names(8, 0, 4)
+        cases = {
+            "short": sharded_selection(names[:1], 0, 4, 8),
+            "long": sharded_selection([*names, "src/lib.rs:9: other"], 0, 4, 8),
+            "diff count": sharded_selection(names, 0, 4, 8, diff_selected=7),
+            "no total": sharded_selection(names, 0, 4, 0, diff_selected=0),
+            "bad count": sharded_selection(names, 0, 9, 8),
+        }
+        for case, selection in cases.items():
+            with self.subTest(case=case):
+                report = mutants_report(selection["selected"])
+                self.write("mutants", report, selection)
+                with self.assertRaises(ValueError):
+                    reports.validate("mutants", self.root, True)
+
+    def test_an_empty_slice_is_admitted_only_when_sharded(self) -> None:
+        empty: list[str] = []
+        selection = sharded_selection(empty, 3, 4, 3)
+        self.write("mutants", mutants_report(empty), selection)
+        summary = reports.validate("commands/mutants", self.root, True)
+        self.assertIn("this shard tests 0", summary)
+        self.write("mutants", mutants_report(empty))
+        with self.assertRaises(ValueError):
+            reports.validate("commands/mutants", self.root, True)
+
+
+class PartitionTests(ReportCase):
+    def shard(
+        self,
+        index: int,
+        names: list[str],
+        total: int,
+        count: int,
+        label: str | None = None,
+        report: dict | None = None,
+        **changes: object,
+    ) -> Path:
+        """One shard's artifact folder, with its own selection and report."""
+        container = self.root / (label or f"reports-{index}") / "container"
+        (container / "mutants.out").mkdir(parents=True, exist_ok=True)
+        report = report or mutants_report(names)
+        (container / "mutants.out" / "outcomes.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
+        selection = {
+            "mode": "diff",
+            "gate": "commands/mutants",
+            "root": ".",
+            "shard": f"{index}/{count}",
+            "total": total,
+            "diff_selected": total,
+            "changed_files": ["src/lib.rs"],
+            "selected": names,
+            **changes,
+        }
+        (container / "mutants-selection.json").write_text(
+            json.dumps(selection), encoding="utf-8"
+        )
+        return container
+
+    def partition(self, total: int = 8, count: int = 4) -> None:
+        for index in range(count):
+            names = shard_names(total, index, count)
+            self.shard(index, names, total, count)
+
+    def test_one_complete_partition_passes_and_prints_its_line(self) -> None:
+        self.partition()
+        summary = reports.validate_partition(4, self.root)
+        self.assertEqual(summary, "4 shards, 8 mutants, 0 missed, 0 timeouts")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = reports.main(["--partition", "4", str(self.root)])
+        self.assertEqual(code, 0)
+        line = stdout.getvalue()
+        self.assertTrue(line.startswith("**partition:** "), line)
+
+    def test_a_missing_shard_is_named(self) -> None:
+        for index in (1, 2, 3):
+            self.shard(index, shard_names(8, index, 4), 8, 4)
+        with self.assertRaisesRegex(ValueError, r"shards \[1, 2, 3\]"):
+            reports.validate_partition(4, self.root)
+
+    def test_a_duplicate_shard_index_is_refused(self) -> None:
+        self.partition()
+        self.shard(0, shard_names(8, 0, 4), 8, 4, label="reports-0-copy")
+        with self.assertRaisesRegex(ValueError, r"shards \[0, 0, 1, 2, 3\]"):
+            reports.validate_partition(4, self.root)
+
+    def test_the_collected_shard_count_must_be_the_recorded_one(self) -> None:
+        self.partition()
+        with self.assertRaisesRegex(ValueError, r"shard \d/4, not of 3"):
+            reports.validate_partition(3, self.root)
+
+    def test_shards_must_agree_on_the_whole_total(self) -> None:
+        for index in range(4):
+            total = 8 if index < 3 else 9
+            self.shard(index, shard_names(total, index, 4), total, 4)
+        with self.assertRaisesRegex(ValueError, r"\[8, 9\]"):
+            reports.validate_partition(4, self.root)
+
+    def test_two_shards_cannot_test_the_same_mutant(self) -> None:
+        for index in range(4):
+            names = shard_names(8, index, 4)
+            if index == 1:
+                names = [shard_names(8, 0, 4)[0], names[1]]
+            self.shard(index, names, 8, 4)
+        with self.assertRaisesRegex(ValueError, "tests a mutant twice"):
+            reports.validate_partition(4, self.root)
+
+    def test_a_canary_partition_needs_one_caught_mutant(self) -> None:
+        for index in range(4):
+            names = shard_names(6, index, 4)
+            report = canary_report(names)
+            for outcome in report["outcomes"][1:]:
+                outcome["summary"] = "Unviable"
+                outcome["phase_results"] = phases({"Failure": 100}, unviable=True)
+            report.update(caught=0, unviable=len(names))
+            self.shard(
+                index,
+                names,
+                6,
+                4,
+                report=report,
+                mode="canary",
+                diff_selected=0,
+                changed_files=["docs/a.md"],
+                canary=reports.CANARY,
+                reason="the diff against abc changes 1 files and selects no mutant",
+            )
+        with self.assertRaisesRegex(ValueError, "caught no canary mutant"):
+            reports.validate_partition(4, self.root)
+
+    def test_a_caught_canary_partition_passes(self) -> None:
+        for index in range(4):
+            names = shard_names(6, index, 4)
+            self.shard(
+                index,
+                names,
+                6,
+                4,
+                report=canary_report(names),
+                mode="canary",
+                diff_selected=0,
+                changed_files=["docs/a.md"],
+                canary=reports.CANARY,
+                reason="the diff against abc changes 1 files and selects no mutant",
+            )
+        summary = reports.validate_partition(4, self.root)
+        self.assertEqual(summary, "4 shards, 6 mutants, 0 missed, 0 timeouts")
+
+    def test_a_shard_directory_without_its_selection_is_refused(self) -> None:
+        container = self.root / "reports-empty" / "container"
+        container.mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, "missing regular report"):
+            reports.validate_partition(4, self.root)
+
+    def test_the_partition_cli_is_isolated_and_names_the_summary(self) -> None:
+        self.partition()
+        completed = subprocess.run(
+            [sys.executable, "-I", str(SCRIPT), "--partition", "4", str(self.root)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(
+            completed.stdout.startswith("**partition:** 4 shards, 8 mutants"),
+            completed.stdout,
+        )
+
+
 class WrapperTests(unittest.TestCase):
     """cargo.py's choice of mutants, with cargo-mutants and git stubbed."""
 
@@ -583,14 +884,28 @@ class WrapperTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         (self.root / "reports").mkdir()
-        names = ("REPORTS", "listed", "changed_files", "CARGO", "GIT", "LIMIT_SECS")
+        names = (
+            "REPORTS",
+            "listed",
+            "changed_files",
+            "CARGO",
+            "GIT",
+            "LIMIT_SECS",
+            "SHARD",
+        )
         saved = {name: getattr(cargo, name) for name in names}
-        environment = {name: os.environ.get(name) for name in ("FLOOR", "ATELIER_BASE")}
+        environment = {
+            name: os.environ.get(name)
+            for name in ("FLOOR", "ATELIER_BASE", "GATE", "ROOT")
+        }
         self.addCleanup(self.restore, saved, environment, Path.cwd())
         cargo.REPORTS = self.root / "reports"
         cargo.changed_files = lambda: ["docs/a.md"]
+        cargo.SHARD = ""
         os.environ["FLOOR"] = "atelier"
         os.environ["ATELIER_BASE"] = "abc"
+        for name in ("GATE", "ROOT"):
+            os.environ.pop(name, None)
         os.chdir(self.root)
 
     @staticmethod
@@ -667,24 +982,62 @@ class WrapperTests(unittest.TestCase):
         cargo.listed = lambda args: [{"name": "b"}, {"name": "a"}]
         args = ["mutants", "--in-diff", "d", "--jobs", "3"]
         output = str(self.root / "reports")
-        self.assertEqual(cargo.arguments(args), [*args, "--output", output])
+        self.assertEqual(cargo.arguments(args), [[*args, "--output", output]])
         expected = {
             "mode": "diff",
+            "total": 2,
             "diff_selected": 2,
             "changed_files": ["docs/a.md"],
             "selected": ["a", "b"],
         }
         self.assertEqual(self.selection(), expected)
 
+    def test_a_shard_records_and_runs_its_slice(self) -> None:
+        cargo.SHARD = "1/4"
+        os.environ["GATE"] = "commands/mutants"
+        os.environ["ROOT"] = "."
+        whole = [{"name": name} for name in "abcd"]
+        one = [{"name": "b"}]
+
+        def listed(args: list[str]) -> list:
+            return one if "--shard" in args else whole
+
+        cargo.listed = listed
+        args = ["mutants", "--in-diff", "d", "--jobs", "3"]
+        output = str(self.root / "reports")
+        runs = cargo.arguments(args)
+        expected = [
+            "mutants",
+            "--in-diff",
+            "d",
+            "--jobs",
+            "3",
+            "--shard",
+            "1/4",
+            "--output",
+            output,
+        ]
+        self.assertEqual(runs, [expected])
+        self.assertEqual(runs[0].count("--shard"), 1)
+        selection = self.selection()
+        self.assertEqual(selection["gate"], "commands/mutants")
+        self.assertEqual(selection["root"], ".")
+        self.assertEqual(selection["shard"], "1/4")
+        self.assertEqual(selection["total"], 4)
+        self.assertEqual(selection["diff_selected"], 4)
+        self.assertEqual(selection["selected"], ["b"])
+
     def test_an_empty_diff_mutates_the_canary_and_says_why(self) -> None:
         self.canary()
         cargo.listed = lambda args: [{"name": "c"}] if "--file" in args else []
-        args = cargo.arguments(["mutants", "--in-diff", "d", "--jobs", "3", "--", "-q"])
+        args = ["mutants", "--in-diff", "d", "--jobs", "3", "--", "-q"]
+        runs = cargo.arguments(args)
         output = str(self.root / "reports")
         expected = ["mutants", "--jobs", "3", "--file", reports.CANARY, "--output", output]
-        self.assertEqual(args, [*expected, "--", "-q"])
+        self.assertEqual(runs, [[*expected, "--", "-q"]])
         selection = self.selection()
         self.assertEqual(selection["mode"], "canary")
+        self.assertEqual(selection["total"], 1)
         self.assertEqual(selection["diff_selected"], 0)
         self.assertEqual(selection["changed_files"], ["docs/a.md"])
         self.assertEqual(selection["selected"], ["c"])
