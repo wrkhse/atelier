@@ -670,7 +670,7 @@ mod tests {
         impl FnMut() -> std::io::Result<String>,
         std::rc::Rc<std::cell::Cell<usize>>,
     ) {
-        let count = std::rc::Rc::new(std::cell::Cell::new(0));
+        let count = std::rc::Rc::new(std::cell::Cell::new(0_usize));
         let counted = std::rc::Rc::clone(&count);
         let mut given = given.into_iter();
 
