@@ -675,7 +675,7 @@ mod tests {
         let mut given = given.into_iter();
 
         let read = move || {
-            counted.set(counted.get() + 1);
+            counted.set(counted.get().saturating_add(1));
             given.next().expect("no more reads were given")
         };
 
