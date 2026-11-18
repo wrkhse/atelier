@@ -179,15 +179,19 @@ Spawning(p) ==
 
 \* The leader's prologue cannot publish, so it exits before it runs the
 \* command: nothing is running, the folder says a start was made, and the
-\* daemon ends it with Abandoning.
+\* daemon ends it with Abandoning. The shell was a group leader, so its
+\* identity goes in `ours`, and Abandoning's signal is one atelier started.
 SpawningDenied(p) ==
     /\ folder = "absent"
     /\ spawned = 0
     /\ p \in Pids
+    /\ proc[p] = "free"
+    /\ start[p] < Stamp
     /\ folder' = "unpublished"
     /\ spawned' = p
-    /\ UNCHANGED <<boot, proc, start, recPid, recBoot, recStart, exited,
-                   ours, signalled>>
+    /\ start' = [start EXCEPT ![p] = start[p] + 1]
+    /\ ours' = ours \cup {<<p, boot, start[p] + 1>>}
+    /\ UNCHANGED <<boot, proc, recPid, recBoot, recStart, exited, signalled>>
 
 \* The daemon writes its own reading of the record and lets the reaper wait
 \* on the leader. The record is the one the leader published, so this changes

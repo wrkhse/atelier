@@ -1507,7 +1507,7 @@ mod tests {
 
         confirm(&folder, &daemons, &mut idle_child()).unwrap();
 
-        assert_eq!(record(&folder).unwrap(), daemons);
+        assert_eq!(record(&folder).ok(), Some(daemons));
     }
 
     /// A record that agrees is left alone: the file the leader published is
