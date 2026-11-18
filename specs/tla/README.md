@@ -14,7 +14,7 @@ still running.
 Two model checkers check the same spec, TLC as the reference and
 [everystate](https://github.com/mattzcarey/everystate) as the second, and CI
 compares what they say. Three broken variants show what each guard buys, and
-what the design's two windows cost.
+what the one window the design still has costs.
 
 | File | Holds |
 | --- | --- |
@@ -70,7 +70,8 @@ command, which is `ClearingUnrecorded` in `CommandStopClearLoose.tla`.
 | Action | The call in the code |
 | --- | --- |
 | `Spawning(p)` | `start`'s folder, `starting`, `started`, `worktree` and spawn, and the leader's own `publish` |
-| `Confirming` | The daemon's own reading of the record, and the reaper |
+| `SpawningDenied(p)` | The leader's prologue failing, which exits before it runs the command |
+| `Confirming` | The start waiting for the leader's record, comparing it, and the reaper |
 | `Publishing` | The daemon's publish in the old order the third variant keeps |
 | `Abandoning` | `abandon`, when the identity cannot be recorded |
 | `SpawnFailing` | A start that cannot spawn, and the folder it removes |
@@ -128,12 +129,12 @@ group. `CommandStopClearCrash.tla` keeps the order atelier ran before that,
 where only the daemon wrote the record, and there the same crash fails
 `NoOrphanedLeader` in three states.
 
-Two things are left out. The good specification takes the record as written: a
-filesystem that cannot write it makes a start kill the command it spawned and
-fail, which is the code's path and not the model's. And the moment between the
-check and the kill is one action here, as it is one call, so a leader that
-exits and has its number reused in that instant is not checked: a variant that
-split the two would fail `NoUnconfirmedSignal`, and that is the follow-up.
+A write that fails is modelled: `SpawningDenied` is the leader whose prologue
+cannot publish, which exits before it runs anything, and `Abandoning` ends
+that start. One thing is left out: the moment between the check and the kill is
+one action here, as it is one call, so a leader that exits and has its number
+reused in that instant is not checked. A variant that split the two would fail
+`NoUnconfirmedSignal`, and that is the follow-up.
 
 A folder whose record cannot name a leader is never emptied, and the start
 over it fails transiently for good. `Init` chooses an empty folder or one of
@@ -185,27 +186,28 @@ with `PROPERTY` is one of the things this experiment exists to find out.
 
 ## Result
 
-A run of `.github/workflows/tla.yml` (run 44268317636, the commit whose spec
+A run of `.github/workflows/tla.yml` (run 44274584536, the commit whose spec
 files these are) counted:
 
 | What | Checker | Verdict | Generated | Distinct | Wall clock |
 | --- | --- | --- | --- | --- | --- |
-| Invariants | TLC | passed, exit 0 | 395,054 | 122,856 | 3.0 s |
-| Invariants | everystate | passed, exit 0 | 395,054 | 122,856 | 1.0 s |
-| No fresh check | TLC | violated, exit 12 | 45 | 38 | 945 ms |
-| No fresh check | everystate | violated, exit 12 | 45 | 38 | 6 ms |
-| Record it cannot act on | TLC | violated, exit 12 | 25 | 21 | 934 ms |
-| Record it cannot act on | everystate | violated, exit 12 | 25 | 21 | 5 ms |
-| The old order | TLC | violated, exit 12 | 41 | 39 | 939 ms |
+| Invariants | TLC | passed, exit 0 | 491,118 | 159,000 | 4.0 s |
+| Invariants | everystate | passed, exit 0 | 491,118 | 159,000 | 1.4 s |
+| No fresh check | TLC | violated, exit 12 | 45 | 38 | 967 ms |
+| No fresh check | everystate | violated, exit 12 | 45 | 38 | 5 ms |
+| Record it cannot act on | TLC | violated, exit 12 | 29 | 25 | 948 ms |
+| Record it cannot act on | everystate | violated, exit 12 | 29 | 25 | 6 ms |
+| The old order | TLC | violated, exit 12 | 41 | 39 | 960 ms |
 | The old order | everystate | violated, exit 12 | 41 | 39 | 5 ms |
-| Liveness | TLC | passed, exit 0 | 395,054 | 122,856 | 12.8 s |
-| Liveness | everystate | passed, exit 0 | 395,054 | 122,856 | 1.3 s |
+| Liveness | TLC | passed, exit 0 | 491,118 | 159,000 | 15.4 s |
+| Liveness | everystate | passed, exit 0 | 491,118 | 159,000 | 1.8 s |
 
 The two agree everywhere: the same verdict, the same states generated and
-distinct, and the same search depth, 40 for the safe graph and 3, 2 and 3 for
+distinct, and the same search depth, 34 for the safe graph and 3, 2 and 3 for
 the three broken variants. `DaemonCrashing` is in the good graph and passes:
 a daemon that dies after a start has spawned its command costs nothing,
-because the leader wrote the record before it ran anything. everystate checks
+because the leader wrote the record before it ran anything, and a prologue
+that cannot write it runs nothing and is abandoned. everystate checks
 `PROPERTY`, fairness included, and its answer is TLC's.
 
 The counts repeat exactly from run to run; the times move by a few hundred
@@ -223,18 +225,18 @@ number 2 still a leader and `<<2, 0, 1>>` in `ours`; and
 group. That is the whole of the guard the design keeps around a record it
 cannot act on, and one action is enough to lose it.
 
-The third is three states: no folder; `Spawning(2)`; and `DaemonCrashing`,
-which drops the child the start holds and changes nothing else, so the
-folder is `unpublished`, names no number, and number 2 runs on with nothing
-able to signal it.
+The third is three states: no folder; `SpawningUnpublished(2)`, the old
+order's start, which spawns the command and does not publish; and
+`DaemonCrashing`, which drops the child that start holds, so the folder names
+no number and number 2 runs on with nothing able to signal it.
 
-Neither checker finds a violation in the protocol as written, across 188,376
+Neither checker finds a violation in the protocol as written, across 159,000
 states: the design holds, each guard is load-bearing, and the crash window is
-the one place the model shows the design's own residual.
+closed.
 
-Time is where they part: at this size TLC takes 2.5 times as long on the
-graph and 8 times as long with the property, and it pays about 700 ms of JVM
-start on every run while everystate starts in about a millisecond.
+Time is where they part: at this size TLC takes 2.8 times as long on the
+graph and about 9 times as long with the property, and it pays about 700 ms of
+JVM start on every run while everystate starts in about a millisecond.
 
 ## everystate, as it stands
 
@@ -272,7 +274,7 @@ What this folder measured is what that decision rests on:
   `java -cp tla2tools.jar tlc2.TLC`.
 - On this spec they agree on everything that can be compared: verdict, states
   generated and distinct, search depth and trace, across five
-  configurations and 188,376 reachable states.
+  configurations and 159,000 reachable states.
 - everystate checks `PROPERTY` with fairness, so a plugin can ask both tools
   for the same properties.
 
