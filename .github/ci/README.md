@@ -11,11 +11,14 @@ test, Kani proof or mutant.
 
 ```mermaid
 flowchart LR
-    Checkout["checkout<br/>no persisted credential"] --> Plan["container: plan<br/>build atelier, list gates"]
+    Checkout["checkout<br/>no persisted credential"] --> Image["job: image<br/>build the gate image once"]
+    Checkout --> Plan["container: plan<br/>build atelier, list gates"]
+    Image -->|"digest reference"| Gate["container: atelier check<br/>writes /reports"]
     Plan --> Matrix["one job per gate<br/>or per shard"]
-    Matrix --> Gate["container: atelier check<br/>writes /reports"]
+    Matrix --> Gate
     Gate --> Validate["fresh offline container:<br/>reports.py"]
     Gate -->|"reports-commands-mutants-*"| Partition["job: partition<br/>every shard's report"]
+    Image -->|"digest reference"| Partition
     Partition --> Proof["fresh offline container:<br/>reports.py --partition"]
 ```
 
@@ -31,6 +34,7 @@ flowchart LR
 | `shards.py`       | Splits every mutants gate into one job per shard, by cargo-mutants' slicing rule     |
 | `reports.py`      | Fail-closed validation of fresh Kani and cargo-mutants reports                       |
 | `test_reports.py` | Tests of the validator, `cargo.py`, `contained.jq`, `floor.sh` and the gate config   |
+| `gate-image.yml`  | The daily pruner of the gate image's `run-*` versions                                |
 
 ## The container
 
@@ -87,6 +91,46 @@ the pull request itself: review, not this workflow, keeps a pull request from
 loosening its own containment. The judged code can also write its own
 `/reports` files, including `base.txt`; the fresh validator checks their
 consistency, not their provenance.
+
+## The gate image
+
+Each run builds the gate image once, in the `image` job, tags it
+`run-<id>-<attempt>` and pushes it to this repository's `<repository>-gates`
+package on ghcr.io; the gate and partition jobs pull it by digest. The tag is
+per run because a pull request can push anything under any tag, so a shared
+or content-hash tag could poison another run's gate. A gate consumes only the
+digest this run published.
+
+The image installs the gates' pinned tools with the same `cargo install`
+commands the gate config uses (cargo-deny 0.20.2, cargo-shear 1.14.0,
+cargo-mutants 27.1.0 and kani-verifier 0.68.0), so cargo finds each package
+already installed and each gate's `cargo install` line changes nothing. Every
+install is asserted at build time, so a broken tool layer fails the image,
+not a gate. The nextest tarball that nextest and mutants fetch is cheap and
+stays out of the image.
+
+The gate and partition jobs pull the published digest only and refuse an
+image whose `RepoDigests` does not equal it. When there is no digest, or this
+runner cannot pull exactly it, the job builds the image without the tools (a
+plain `docker build --build-arg TOOLS=0`), so no gate depends on the registry
+being reachable. The job summary says which path ran:
+`image pulled: <digest>`, or
+`image not shared: <reason>; this job builds it without the pinned tools`.
+
+For kani, only its `cargo install` is saved: `cargo kani setup` always
+re-downloads, because its proxy treats an explicit setup as an explicit
+setup, so the kani gate still pays that download.
+
+The image job's build runs on the runner, outside a container, under a
+30-minute limit inside its 90-minute job; its token reaches only the registry
+login. The pulled image is the container's image, not a mount: the gate
+container's mounts, network and `contained.jq` contract are exactly the ones
+described above.
+
+`.github/workflows/gate-image.yml` prunes the package daily. It deletes the
+versions older than seven days whose every tag matches `run-*`, never one
+carrying any other tag, keeps an untagged version, logs one line per version
+and one per deletion, and fails the job when it cannot list them.
 
 ## Sharding the mutants gate
 
