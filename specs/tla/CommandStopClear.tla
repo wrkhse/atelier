@@ -26,10 +26,13 @@
 \* and signalled; the system's are the boot and the table of process
 \* numbers. The commands inside a group are not modelled, so a signalled
 \* group leaves nothing behind here, and neither does a descendant that
-\* outlives its leader. Each action is one call in the code, so reading the
-\* record and signalling the group it names are one step; the window that
-\* leaves, between the check and /bin/kill, is named as the follow-up in
-\* specs/tla/README.md.
+\* outlives its leader. The folder is the model's only memory, so a daemon
+\* crash needs no action: everything a later poll uses is in the folder.
+\* The child a start holds between the spawn and the publication is the one
+\* thing a crash would lose while it runs, and that window is not modelled.
+\* Neither is the window between the check and /bin/kill, because reading
+\* the record and signalling the group it names are one action, as they are
+\* one call. specs/tla/README.md names both as the follow-ups.
 
 EXTENDS Naturals
 
@@ -42,9 +45,9 @@ CONSTANTS Pids, Boots, Stamp
 \* no conjunction depends on the order in which it is read.
 Numbers == {0} \cup Pids
 
-\* What a number is now: free; a group leader atelier started; a leader
-\* that has exited and not been reaped; or a process atelier did not start,
-\* which leads a group of its own or belongs to another.
+\* What a number is now: free; a group leader atelier started; a leader that
+\* has exited and not been reaped; or a process atelier did not start, which
+\* leads a group of its own or belongs to another.
 Kinds == {"free", "leader", "zombie", "foreign"}
 
 \* What the step's folder holds: nothing; a record whose identity was never
@@ -66,9 +69,13 @@ VARIABLES
     start,
     \* What the step's folder holds.
     folder,
-    \* What the published record names. Read only while `folder` is
-    \* "published", and kept in every state so every function is total.
+    \* The number the folder's record names: the published identity's
+    \* leader, the `group` file's number, or the number a record that cannot
+    \* be read still holds. Meaningful for every folder but an empty one.
     recPid,
+    \* The boot and start identity the published record names. Read only
+    \* while `folder` is "published", and kept in every state so every
+    \* function is total.
     recBoot,
     recStart,
     \* Whether the command's top level has ended and written its status.
@@ -76,9 +83,9 @@ VARIABLES
     \* The child a start spawned and still holds unreaped, 0 when it holds
     \* none.
     spawned,
-    \* The processes atelier has started a group for, and the processes it
-    \* has signalled. Both hold identities, so a number that a later process
-    \* took is a different process here.
+    \* The processes atelier has started a group for, and the processes it has
+    \* signalled. Both hold identities, so a number that a later process took
+    \* is a different process here.
     ours,
     signalled
 
@@ -100,28 +107,42 @@ IsRunning ==
     /\ proc[recPid] = "leader"
     /\ start[recPid] = recStart
 
-\* Whether the folder still names the process on `p`: its published record,
-\* or a folder that holds `started` and `worktree` and no usable record,
-\* which atelier keeps rather than empties.
+\* Whether the folder still names the process on `p`.
+\*
+\* Its published record can confirm it. The start that spawned it can still
+\* hold it unreaped, which is the identity not yet published. A `group` file
+\* or a record that cannot be read names the number an earlier atelier left
+\* a command on, and atelier keeps that folder rather than empties it: the
+\* command may still be running, and no later poll could signal it.
 Named(p) ==
     \/ /\ folder = "published"
        /\ recPid = p
        /\ recBoot = boot
        /\ recStart = start[p]
-    \/ folder = "unpublished"
+    \/ /\ folder = "unpublished"
+       /\ spawned = p
+    \/ /\ folder \in {"legacy", "invalid"}
+       /\ recPid = p
 
+\* A folder that holds nothing, or one an earlier atelier left: a `group`
+\* file, or a record that cannot be read. The two records atelier inherits
+\* come with the command an earlier atelier started on `recPid`, which may
+\* still be running.
 Init ==
     \E f \in {"absent", "legacy", "invalid"} :
+    \E p \in Pids :
         /\ boot = 0
-        /\ proc = [q \in Numbers |-> "free"]
-        /\ start = [q \in Numbers |-> 0]
+        /\ proc = [q \in Numbers |->
+                     IF f = "absent" \/ q /= p THEN "free" ELSE "leader"]
+        /\ start = [q \in Numbers |->
+                      IF f = "absent" \/ q /= p THEN 0 ELSE 1]
         /\ folder = f
-        /\ recPid \in Pids
+        /\ recPid = p
         /\ recBoot = 0
         /\ recStart = 0
         /\ exited = FALSE
         /\ spawned = 0
-        /\ ours = {}
+        /\ ours = IF f = "absent" THEN {} ELSE {<<p, 0, 1>>}
         /\ signalled = {}
 
 \* A start finds no folder, writes `started` and `worktree`, and spawns the
@@ -171,16 +192,6 @@ Abandoning ==
     /\ proc' = [proc EXCEPT ![spawned] = "free"]
     /\ spawned' = 0
     /\ UNCHANGED <<boot, start, recPid, recBoot, recStart, exited, ours>>
-
-\* The daemon dies between the spawn and the publication. Its child handle
-\* is gone while the command runs on, and the folder holds `started` and
-\* `worktree` with no identity: no later poll can name the group, so
-\* atelier sends it no signal and keeps the folder.
-Crashing ==
-    /\ spawned /= 0
-    /\ spawned' = 0
-    /\ UNCHANGED <<boot, proc, start, folder, recPid, recBoot, recStart,
-                   exited, ours, signalled>>
 
 \* A start that cannot spawn removes the folder it just made, since nothing
 \* ran. When that removal fails too, the folder stays, holding `started`
@@ -303,7 +314,7 @@ Clearing ==
 
 \* The same start with the fresh check dropped: the folder is emptied the
 \* moment the stop returns, whether or not the command it names is still
-\* running. This is the broken variant's one change.
+\* running. This is the first broken variant's one change.
 ClearingUnchecked ==
     /\ folder = "published"
     /\ folder' = "absent"
@@ -311,9 +322,16 @@ ClearingUnchecked ==
     /\ UNCHANGED <<boot, proc, start, recPid, recBoot, recStart, spawned,
                    ours, signalled>>
 
-\* The reaper's every run, as one action, for the fairness below.
-ReapAll ==
-    \E p \in Pids : Reaping(p)
+\* A start that also empties a folder holding a record it cannot act on: a
+\* `group` file, or one it cannot read, over the command an earlier atelier
+\* left running on its number. This is the second broken variant's one
+\* change.
+ClearingUnrecorded ==
+    /\ folder \in {"legacy", "invalid"}
+    /\ folder' = "absent"
+    /\ exited' = FALSE
+    /\ UNCHANGED <<boot, proc, start, recPid, recBoot, recStart, spawned,
+                   ours, signalled>>
 
 Next ==
     \/ \E p \in Pids : Spawning(p)
@@ -324,7 +342,6 @@ Next ==
     \/ \E p \in Pids : Foreign(p)
     \/ Publishing
     \/ Abandoning
-    \/ Crashing
     \/ Rebooting
     \/ Stopping
     \/ TimingOut
@@ -334,10 +351,10 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 \* The reaper thread waits on every leader, so a leader that exited is
-\* eventually reaped: that is the one liveness claim the code itself makes,
-\* and the assumption below is only that the thread runs while it can.
+\* eventually reaped, and each of them is fair: that is the one liveness
+\* claim the code itself makes.
 FairSpec ==
-    Spec /\ WF_vars(ReapAll)
+    Spec /\ \A p \in Pids : WF_vars(Reaping(p))
 
 ReapedEventually ==
     \A p \in Pids :
@@ -359,9 +376,10 @@ TypeOK ==
     /\ signalled \subseteq Identities
 
 \* A process atelier started, and that is still leading its group, is still
-\* named by the folder: its published record, or the folder that atelier
-\* keeps because it cannot say which group to signal. A folder emptied
-\* while its command runs leaves a process nothing can name.
+\* named by the folder: its published record, the start that holds it, or the
+\* record an earlier atelier left that atelier keeps because it cannot say
+\* which group to signal. A folder emptied or repurposed while its command
+\* runs leaves a process nothing can name.
 NoOrphanedLeader ==
     \A p \in Pids :
         (proc[p] = "leader" /\ Now(p) \in ours) => Named(p)
