@@ -23,15 +23,25 @@ output="$reports/container"
 mkdir -p "$output" "$RUNNER_TEMP/atelier"
 
 # Each job stays inside its 90 minutes: plan is selftest + plan, a gate is
-# gate + validate.
+# gate + validate, a partition is validate alone.
 case "$MODE" in
   selftest | plan-release) limit=10m ;;
   plan) limit=60m ;;
   gate) limit=75m ;;
+  # A partition only runs the validator, so it takes validation's budget.
+  partition) limit=10m ;;
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
-docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
+# gate_image: the one place that supplies the containers' image.
+gate_image() {
+  docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
+}
+
+# Every mode that starts a container needs the image; a later change will pull
+# it by digest instead of building it here.
+gate_image
+
 names=()
 trap 'docker rm --force "${names[@]}" >/dev/null 2>&1 || true' EXIT
 
@@ -43,7 +53,8 @@ memory="$(( total > 4096 ? total - 2048 : total / 2 ))m"
 # create NAME NETWORK MOUNT...: no runner home, credentials, command files or
 # container-engine socket. Omitting --pid keeps Docker's private PID
 # namespace. The process limit counts threads: three mutant jobs run rustc
-# and nextest.
+# and nextest. Every mode's variables go to every container; a mode reads only
+# its own, and one the host does not set arrives empty.
 create() {
   local name=$1 network=$2
   shift 2
@@ -56,7 +67,9 @@ create() {
     --pids-limit 4096 --memory "$memory" --memory-swap "$memory" --cpus "$cpus" \
     --network "$network" --ipc private --stop-timeout 10 \
     "${mounts[@]}" \
-    --env MODE --env GATE --env ROOT --env BASE --env FLOOR atelier-gates >/dev/null
+    --env MODE --env GATE --env ROOT --env BASE --env FLOOR \
+    --env ATELIER_SHARD --env ATELIER_MUTANTS_SHARDS --env SHARDS \
+    atelier-gates >/dev/null
   names+=("$name")
   local sources=()
   for mount in "$@"; do
@@ -82,7 +95,7 @@ contained() {
 # output never reaches it unfiltered.
 summary() {
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
-  grep -E '^(\*\*commands/[A-Za-z0-9_.-]+:\*\* |base [0-9a-f]+ is unavailable)' <<< "$1" \
+  grep -E '^(\*\*commands/[A-Za-z0-9_.-]+:\*\* |\*\*partition:\*\* |base [0-9a-f]+ is unavailable)' <<< "$1" \
     | cut -b1-500 | head -n 5 | sed 's/$/\n/' >> "$GITHUB_STEP_SUMMARY" || true
 }
 
@@ -92,6 +105,23 @@ start() {
 }
 
 id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM"
+
+# A partition judges reports the host downloaded from every shard, in a fresh
+# offline container: the shards cannot change the validator, and nothing is
+# copied back. Its verdict, and its exit status, are the job's whole result.
+if [[ "$MODE" == partition ]]; then
+  # A shard job that died before uploading leaves no artifact, and Docker
+  # refuses a missing bind source; create it so the validator names the gap.
+  mkdir -p "${COLLECTED:?downloaded shard reports}"
+  create "atelier-partition-$id" none \
+    "type=bind,source=${COLLECTED:?downloaded shard reports},target=/reports,readonly"
+  status=0
+  verdict=$(start "atelier-partition-$id") || status=$?
+  echo "$verdict"
+  summary "$verdict"
+  exit "$status"
+fi
+
 create "atelier-$MODE-$id" bridge \
   "type=bind,source=${SOURCE:?checkout},target=/source,readonly" \
   "type=bind,source=$RUNNER_TEMP/atelier,target=/binary,readonly"

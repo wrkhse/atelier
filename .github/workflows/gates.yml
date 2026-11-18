@@ -12,6 +12,11 @@ on:
         required: true
         type: string
 
+env:
+  # Four shards: a shard must still hold enough mutants to be worth its own
+  # build, and the partition job judges every shard's report.
+  ATELIER_MUTANTS_SHARDS: 4
+
 permissions:
   contents: read
 
@@ -21,6 +26,7 @@ jobs:
     timeout-minutes: 90
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      sharded: ${{ steps.plan.outputs.sharded }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -64,6 +70,7 @@ jobs:
         name: List the gates the changes touch, in the container
         env:
           ATELIER: ${{ inputs.atelier }}
+          ATELIER_MUTANTS_SHARDS: ${{ env.ATELIER_MUTANTS_SHARDS }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
@@ -86,8 +93,12 @@ jobs:
           fi
           # The plan must be one JSON array, or no gate output is trusted.
           matrix=$(jq -ce 'if type == "array" then . else error("not a gate list") end' <<< "$matrix")
+          # A sharded gate names the shard it runs; the partition job waits for
+          # every gate job and judges the shards' reports together.
+          sharded=$(jq -c 'any(.[]; has("shard"))' <<< "$matrix")
           echo "$matrix"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "sharded=$sharded" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: atelier
@@ -106,7 +117,7 @@ jobs:
   gate:
     needs: plan
     if: needs.plan.outputs.matrix != '[]'
-    name: ${{ matrix.gate }} (${{ matrix.root }})
+    name: ${{ matrix.gate }} (${{ matrix.root }})${{ matrix.shard && format(' [{0}]', matrix.shard) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -140,6 +151,7 @@ jobs:
         env:
           GATE: ${{ matrix.gate }}
           ROOT: ${{ matrix.root }}
+          ATELIER_SHARD: ${{ matrix.shard }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
@@ -166,3 +178,40 @@ jobs:
           name: ${{ steps.artifact.outputs.name }}
           path: ${{ runner.temp }}/atelier-reports
           if-no-files-found: error
+
+  partition:
+    # The mutants gate's completeness check: every shard's report must be
+    # there, and the four selections must be disjoint and add up.
+    needs: [plan, gate]
+    # Even a failed shard job reaches the validator, so its missing report is
+    # named rather than showing only as a red gate job.
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.sharded == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Require the reusable workflow's own commit
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: test -n "$WORKFLOW_REPOSITORY" && test -n "$WORKFLOW_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: ci
+          persist-credentials: false
+          sparse-checkout: .github/ci
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: reports-commands-mutants-*
+          path: ${{ runner.temp }}/shards
+          merge-multiple: false
+      - id: partition
+        name: Prove the shard reports are one complete partition
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
+          COLLECTED: ${{ runner.temp }}/shards
+          SHARDS: ${{ env.ATELIER_MUTANTS_SHARDS }}
+        run: bash "$CI_SUPPORT/run.sh" partition
