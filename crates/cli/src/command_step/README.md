@@ -25,8 +25,8 @@ run::observe(&folder, &step.settings)?;
 ```
 
 - **In the background.** A start returns at once; a later poll reads how it
-  ended from the step's folder: `started`, `worktree`, `identity`, `output`
-  and `exit`.
+  ended from the step's folder: `starting`, `started`, `worktree`, `identity`,
+  `output` and `exit`.
 - **Starting again.** A start on a folder that already exists first stops
   whatever command the folder still names, through the same identity check,
   so a start repeated after a daemon crash cannot orphan a running command.
@@ -59,19 +59,26 @@ run::observe(&folder, &step.settings)?;
 
 A background command runs under a shell that leads its own process group
 and stays alive until the command's top level ends, then writes `exit`. The
-daemon records `started` and `worktree` before it spawns that shell, and
-publishes the leader's identity before the start returns, by writing
-`identity.tmp`, syncing it, renaming it to `identity`, and syncing the
-folder. The record holds the leader's pid, which is the group's, the boot
-it runs on and the leader's own start identity. A reaper thread waits on the
-leader, so it is reaped once it ends; if that thread cannot start, the
-leader stays a zombie until the daemon exits, and the identity check reads a
-zombie as gone.
+daemon writes `starting`, the boot the start is on, then `started` and
+`worktree`, and spawns that shell. The shell's first act publishes its own
+identity, before it runs anything: it writes `identity.tmp`, renames it to
+`identity`, and only then runs the command. The record holds the leader's
+pid, which is the group's, the boot it runs on and the leader's own start
+identity. The daemon then writes its own reading of that record, under the
+temporary name `identity.atelier` so neither writer can tear the other's,
+and a reaper thread waits on the leader, so it is reaped once it ends; if
+that thread cannot start, the leader stays a zombie until the daemon exits,
+and the identity check reads a zombie as gone.
 
-A crash between the spawn and the rename leaves `started` and `worktree`,
-and perhaps `identity.tmp`, without `identity`: the command may still be
-running, and atelier sends it no signal. `observe` settles the step failed with
-a reason that says it started but its identity was never recorded. The reason ends
+The leader publishes before the command can run, so a daemon that dies at any
+point of a start leaves a folder a later poll can act on. A crash after the
+spawn leaves the leader's record, and the next poll checks it and signals the
+group as it would any other; a crash before the spawn leaves `starting`,
+`started` and `worktree` with no process at all. What remains is a folder an
+older atelier left, whose identity was never published: it holds `started`
+and `worktree`, and perhaps `identity.tmp`, without `identity`. `observe`
+settles such a step failed with a reason that says it started but its
+identity was never recorded. The reason ends
 `; atelier sent no signal, and the command may still be running in <worktree>`,
 or `in its worktree` when no worktree is recorded; `stop` sends nothing, and
 its log line ends the same way, logged once for that folder and reason
@@ -110,7 +117,14 @@ the leader's start ticks, group and state from `/proc/<pid>/stat`. macOS
 reads `kern.bootsessionuuid` through `/usr/sbin/sysctl`, and the leader's
 start time, group and state from `/bin/ps -o lstart= -o pgid= -o stat=`
 with `LC_ALL=C` and `TZ=UTC0`, so its start time does not depend on the
-locale or the time zone. No new dependency.
+locale or the time zone. The leader reads its own start identity from the same
+two sources, in the shell it is: field 20 after the last `)` of
+`/proc/<pid>/stat` on Linux, and the first five fields of that `ps` line on
+macOS. The boot reaches it as `ATELIER_BOOT`, which the daemon read before the
+spawn, so only the start identity is read twice. A record that disagrees with
+the daemon's own reading is replaced by the daemon's while it still holds the
+child, so a platform that reported a start identity differently would cost the
+crash case its record, not signal the wrong group. No new dependency.
 
 The record narrows which process a signal reaches; it is not containment.
 On macOS a start time resolves to the second, and checking before running

@@ -167,8 +167,9 @@ pub fn judge(identity: &Identity, boot: &str, process: Option<&Process>) -> Lead
 }
 
 /// The boot that is running now: the kernel's boot id on Linux, and
-/// `kern.bootsessionuuid` on macOS.
-fn boot() -> Result<String, String> {
+/// `kern.bootsessionuuid` on macOS. A start hands it to the leader, which
+/// records it in the identity it publishes itself.
+pub fn boot() -> Result<String, String> {
     if cfg!(target_os = "linux") {
         proc_boot()
     } else if cfg!(target_os = "macos") {
