@@ -70,9 +70,12 @@ then waits for that record and compares it with its own reading of the same
 process: it writes its own reading over a record that differs, under the
 temporary name `identity.atelier` so neither writer can tear the other's, and
 it ends the start, failing transiently, when the leader published nothing or
-stopped before it did. A reaper thread waits on the leader, so it is reaped
-once it ends; if that thread cannot start, the leader stays a zombie until the
-daemon exits, and the identity check reads a zombie as gone.
+stopped before it did. That wait runs on the poll thread, so a leader whose
+prologue hangs holds the poll for every other run for those five seconds: the
+bound is the price of adding no thread, and only a hung prologue reaches it.
+A reaper thread waits on the leader, so it is reaped once it ends; if that
+thread cannot start, the leader stays a zombie until the daemon exits, and the
+identity check reads a zombie as gone.
 
 The leader publishes before the command can run, so a daemon that dies at any
 point of a start leaves a folder a later poll can act on. A crash after the

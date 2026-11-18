@@ -108,6 +108,8 @@ static UNSIGNED: Mutex<Unsigned> = Mutex::new(Unsigned(Vec::new()));
 /// `ATELIER_BASE` names `origin/<base>`, as for the gates.
 /// The leader publishes its own identity as its first act, so a daemon that
 /// dies before it writes a record of its own leaves one a later poll can use.
+/// That costs the poll thread a bounded wait for the leader's record, 50 looks
+/// 100 ms apart, which only a leader whose prologue hangs reaches.
 ///
 /// # Errors
 ///
@@ -139,6 +141,8 @@ pub fn start(
             folder.display()
         ))
     })?;
+    #[cfg(test)]
+    let boot = TEST_BOOT.with(|test| test.borrow().clone()).unwrap_or(boot);
 
     fs::create_dir_all(folder).map_err(|error| failed("making", error))?;
     fs::write(folder.join("starting"), &boot)
@@ -495,6 +499,14 @@ fn record(folder: &Path) -> Result<Identity, Unrecorded> {
     Identity::parse(&text).map_err(Unrecorded::Invalid)
 }
 
+/// The boot a test makes a start hand its leader, so that a test can make the
+/// leader's own publish fail and drive the abandon through `start`. Test
+/// builds only.
+#[cfg(test)]
+thread_local! {
+    static TEST_BOOT: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+}
+
 /// How many times a start looks for the leader's own record before it gives
 /// up, and how long it waits between looks. The leader's first act, so only a
 /// leader that died or hung takes the whole of it.
@@ -523,8 +535,16 @@ fn confirm(folder: &Path, identity: &Identity, child: &mut Child) -> Result<(), 
             };
         }
 
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return Err("the leader stopped before it published its identity".into());
+        match child.try_wait() {
+            // The script's own refusal: it exits 97 rather than run a command
+            // it could not name.
+            Ok(Some(status)) if status.code() == Some(97) => {
+                return Err("the prologue could not publish its identity (exit 97)".into());
+            }
+            Ok(Some(_)) => {
+                return Err("the leader stopped before it published its identity".into());
+            }
+            _ => {}
         }
 
         thread::sleep(PUBLISH_TICK);
@@ -559,18 +579,26 @@ fn publish(folder: &Path, text: &str) -> Result<(), String> {
         .map_err(|error| format!("flushing the folder: {error}"))
 }
 
-/// Ends a command whose identity could not be recorded: no later poll could
-/// find its group, so it must not outlive this call. The folder is removed
-/// once the group kill was delivered, and kept only when the signal was
-/// refused, since it is then the only trace of the command.
+/// Ends a start whose identity could not be recorded, so nothing is left
+/// running that no later poll could name: the group is signalled, the child
+/// killed and reaped, and the folder removed. A leader that exited 97
+/// refused to publish before it ran the command, so its folder goes even when
+/// the group kill found nothing; a refused signal to any other exit keeps it,
+/// since the folder is then the only trace of a command that may still run.
 fn abandon(folder: &Path, child: &mut Child) {
     let killed = kill(folder, child.id());
 
     // The child is unreaped, so its number cannot be reused yet.
     let _ = child.kill();
-    let _ = child.wait();
+    let status = child.wait().ok();
 
-    if killed {
+    // A leader that exited 97 refused to publish before it ran the command,
+    // so its group is empty even when there was nothing left to signal. Any
+    // other exit may have left the command's own processes in that group,
+    // and the folder is then the only trace of them.
+    let refused = status.is_some_and(|status| status.code() == Some(97));
+
+    if killed || refused {
         let _ = fs::remove_dir_all(folder);
     }
 }
@@ -1555,7 +1583,7 @@ mod tests {
         let folder = scratch.folder();
         fs::create_dir_all(&folder).unwrap();
         let mut child = Command::new("/bin/sh")
-            .args(["-c", "exit 97"])
+            .args(["-c", "exit 3"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1569,6 +1597,57 @@ mod tests {
         assert_eq!(
             failed,
             "the leader stopped before it published its identity"
+        );
+    }
+
+    /// The script's own refusal says why: exit 97 reads as the prologue that
+    /// could not publish, not as a leader that merely stopped.
+    #[test]
+    fn a_leader_that_refused_to_publish_says_so() {
+        let scratch = Scratch::new("confirm-refused");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 97"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+
+        let identity = Identity::of(child.id()).unwrap();
+        let failed = confirm(&folder, &identity, &mut child).unwrap_err();
+
+        assert_eq!(
+            failed,
+            "the prologue could not publish its identity (exit 97)"
+        );
+    }
+
+    /// A start whose leader cannot publish is abandoned all the way through
+    /// `start`: the folder goes, which only happens once the group's kill was
+    /// delivered, because a folder kept there would refuse every later start.
+    #[test]
+    fn a_start_whose_leader_cannot_publish_ends_the_group_and_the_folder() {
+        let scratch = Scratch::new("abandon-end-to-end");
+
+        // The leader refuses an empty boot, so it exits before it publishes.
+        TEST_BOOT.with(|test| *test.borrow_mut() = Some(String::new()));
+        let failed = scratch.try_start("sleep 30", None).unwrap_err();
+        TEST_BOOT.with(|test| *test.borrow_mut() = None);
+
+        let why = "the prologue could not publish its identity (exit 97)";
+        assert_eq!(
+            failed.message,
+            format!(
+                "the command in {} could not record its identity: {why}",
+                scratch.folder().display()
+            )
+        );
+        assert!(
+            !scratch.folder().exists(),
+            "the folder outlived the abandon"
         );
     }
 

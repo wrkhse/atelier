@@ -73,6 +73,7 @@ command, which is `ClearingUnrecorded` in `CommandStopClearLoose.tla`.
 | `SpawningDenied(p)` | The leader's prologue failing, which exits before it runs the command |
 | `Confirming` | The start waiting for the leader's record, comparing it, and the reaper |
 | `Publishing` | The daemon's publish in the old order the third variant keeps |
+| `SpawningUnpublished(p)` | The start in that order, which spawns and does not publish: the crash variant's |
 | `Abandoning` | `abandon`, when the identity cannot be recorded |
 | `SpawnFailing` | A start that cannot spawn, and the folder it removes |
 | `DaemonCrashing` | A crash after the spawn, which the leader's own record survives |
@@ -213,11 +214,10 @@ that cannot write it runs nothing and is abandoned. everystate checks
 The counts repeat exactly from run to run; the times move by a few hundred
 milliseconds with the runner.
 
-The first counterexample is four states: the initial state, with no folder;
-`Spawning(2)`, where number 2 leads a group and the folder holds `started`
-and `worktree`; `Publishing`, where the record names number 2, boot 0, start
-1; and `ClearingUnchecked`, where the folder is gone while number 2 is still
-a leader.
+The first counterexample is three states: the initial state, with no folder;
+`Spawning(2)`, where number 2 leads a group and the folder names it; and
+`ClearingUnchecked`, where the folder is gone while number 2 is still a
+leader.
 
 The second is two states: a folder an earlier atelier left, `legacy`, with
 number 2 still a leader and `<<2, 0, 1>>` in `ours`; and
