@@ -31,7 +31,8 @@ RUN mkdir -p /opt/tla \
 
 # everystate, pinned by version and checksum: the .crate that crates.io
 # published is verified against the checksum, unpacked, and built from that
-# copy, so what runs is what the checksum names.
+# copy, so what runs is what the checksum names. The crate ships its
+# Cargo.lock, so --locked pins its dependencies too.
 ARG EVERYSTATE_VERSION=0.3.1
 ARG EVERYSTATE_SHA256=6ff0b5c2bf92d65d6d2ac5606360bae137c87ec58a009a1808c6fee68ce5aaa5
 
