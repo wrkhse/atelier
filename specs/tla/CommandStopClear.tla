@@ -26,13 +26,20 @@
 \* and signalled; the system's are the boot and the table of process
 \* numbers. The commands inside a group are not modelled, so a signalled
 \* group leaves nothing behind here, and neither does a descendant that
-\* outlives its leader. The folder is the model's only memory, so a daemon
-\* crash needs no action: everything a later poll uses is in the folder.
-\* The child a start holds between the spawn and the publication is the one
-\* thing a crash would lose while it runs, and that window is not modelled.
-\* Neither is the window between the check and /bin/kill, because reading
-\* the record and signalling the group it names are one action, as they are
-\* one call. specs/tla/README.md names both as the follow-ups.
+\* outlives its leader.
+\*
+\* Two windows are left out, and specs/tla/README.md names both as
+\* follow-ups. The first is the one between the check and /bin/kill: reading
+\* the record and signalling the group it names are one action here, as they
+\* are one call.
+\*
+\* The second is a daemon crash between the spawn and the publication of the
+\* identity, which orphans the group. The command runs on, the folder holds
+\* started and worktree and no number, and no later poll can signal it, so
+\* atelier keeps the folder, sends nothing, and reports the worktree. That is
+\* a residual of the design and not an artefact of this model, which is why
+\* the good specification leaves DaemonCrashing out of Next: adding it fails
+\* NoOrphanedLeader, and CommandStopClearCrash.tla does exactly that.
 
 EXTENDS Naturals
 
@@ -203,6 +210,18 @@ SpawnFailing ==
        \/ UNCHANGED folder
     /\ UNCHANGED <<boot, proc, start, recPid, recBoot, recStart, exited,
                    spawned, ours, signalled>>
+
+\* The daemon dies between the spawn and the publication, so its child handle
+\* is gone while the command runs on. The folder holds `started` and
+\* `worktree` with no number, no later poll can name the group, and atelier
+\* sends it no signal and keeps the folder. This orphans the group, so the
+\* good specification leaves the action out of Next; the third broken variant
+\* adds it.
+DaemonCrashing ==
+    /\ spawned /= 0
+    /\ spawned' = 0
+    /\ UNCHANGED <<boot, proc, start, folder, recPid, recBoot, recStart,
+                   exited, ours, signalled>>
 
 \* The command's top level ends, and the leader's shell writes `exit`.
 Ending(p) ==
