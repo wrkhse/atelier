@@ -35,8 +35,12 @@ use crate::log::log;
 /// the command, when it cannot publish: a start that loses its record has
 /// nothing left to run. The write is not flushed to the disk the way the
 /// daemon's is, so a power loss in that moment can leave a record the check
-/// reads as invalid, which fails closed. The status file is renamed into
-/// place, so a poll never reads it half written.
+/// reads as invalid, which fails closed. The command runs in a subshell, so
+/// the leader's own exit status is never the command's: 97 from the leader
+/// always means it refused before it ran anything, which is what lets an
+/// abandon remove the folder on it. For that, the leader's last command must
+/// stay the `mv` of the status file. The status file is renamed into place,
+/// so a poll never reads it half written.
 const SCRIPT: &str = r#"here=$PWD
 leader=$$
 case $(uname -s) in
@@ -52,8 +56,11 @@ fi
 if ! mv identity.tmp identity; then
     exit 97
 fi
+# The command runs in a subshell, so the leader's own status is never the
+# command's: 97 from the leader means it refused before it ran anything.
 ( cd "$2" && exec sh -c "$1" ) < /dev/null > output 2>&1
 echo $? > "$here/exit.tmp"
+# This must stay the leader's last command, so its status is this mv's.
 mv "$here/exit.tmp" "$here/exit"
 "#;
 
@@ -1627,8 +1634,9 @@ mod tests {
     }
 
     /// A start whose leader cannot publish is abandoned all the way through
-    /// `start`: the folder goes, which only happens once the group's kill was
-    /// delivered, because a folder kept there would refuse every later start.
+    /// `start`: the folder goes because the leader exited 97 before it ran the
+    /// command, whether or not the group kill landed, and a folder kept there
+    /// would refuse every later start.
     #[test]
     fn a_start_whose_leader_cannot_publish_ends_the_group_and_the_folder() {
         let scratch = Scratch::new("abandon-end-to-end");
@@ -1649,6 +1657,47 @@ mod tests {
         assert!(
             !scratch.folder().exists(),
             "the folder outlived the abandon"
+        );
+    }
+
+    /// A command that exits 97 is a command that ran. It runs in a subshell and
+    /// the leader ends with its own `mv`, so the leader's status is not 97: an
+    /// abandon reads it as a command that ran and keeps the folder, and a poll
+    /// reads the command's own 97 from `exit`.
+    #[test]
+    fn a_command_that_exits_97_is_not_a_refusal() {
+        let scratch = Scratch::new("command-97");
+        let folder = scratch.folder();
+        let boot = boot().unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("starting"), &boot).unwrap();
+        fs::write(folder.join("started"), now().to_string()).unwrap();
+        fs::write(
+            folder.join("worktree"),
+            scratch.worktree().display().to_string(),
+        )
+        .unwrap();
+
+        // The leader alone, waited on here: no signal is sent.
+        let mut child = spawn(&folder, &scratch.worktree(), "v2", "exit 97", &boot).unwrap();
+        let status = child.wait().unwrap();
+
+        assert_eq!(status.code(), Some(0));
+        assert_eq!(
+            fs::read_to_string(folder.join("exit")).unwrap().trim(),
+            "97"
+        );
+
+        // Through `start` and a poll: the step fails with the command's own
+        // status, and the folder stays.
+        let started = Scratch::new("command-97-start");
+        let settings = started.start("exit 97", None);
+        let outcome = started.outcome(&settings);
+
+        assert_eq!(outcome, failed("it exited 97".into()));
+        assert!(
+            started.folder().exists(),
+            "the folder of a command that ran is gone"
         );
     }
 
