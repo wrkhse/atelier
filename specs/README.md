@@ -7,5 +7,4 @@ developer's machine.
 
 | Folder | Holds                                                               |
 | ------ | ------------------------------------------------------------------- |
-| `tla/` | The background command's stop-and-clear race, checked by both       |
-|        | checkers named in its own README                                    |
+| `tla/` | The command stop-and-clear race, and the two checkers that check it |
