@@ -23,24 +23,79 @@ output="$reports/container"
 mkdir -p "$output" "$RUNNER_TEMP/atelier"
 
 # Each job stays inside its 90 minutes: plan is selftest + plan, a gate is
-# gate + validate, a partition is validate alone.
+# gate + validate, a partition is validate alone, and the image job builds,
+# pushes and inspects one image.
 case "$MODE" in
   selftest | plan-release) limit=10m ;;
   plan) limit=60m ;;
   gate) limit=75m ;;
   # A partition only runs the validator, so it takes validation's budget.
   partition) limit=10m ;;
+  # The image job runs no container; its build is the slowest thing a job does
+  # outside one.
+  image) limit=30m ;;
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
-# gate_image: the one place that supplies the containers' image.
-gate_image() {
-  docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
-}
+# The image job builds and publishes the image every gate pulls. It runs on
+# the runner, outside a container, and is the only mode that makes the image
+# instead of consuming it. A registry that refuses the login or the push is
+# never the run's failure: it prints no digest, and the gates build instead.
+if [[ "$MODE" == image ]]; then
+  : "${GATE_IMAGE_REPOSITORY:?registry repository for the gate image}"
+  : "${GATE_IMAGE_TAG:?tag of this run's gate image}"
+  # Never hand docker anything but a plain ghcr.io repository name.
+  if [[ ! "$GATE_IMAGE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ \
+    || "$GATE_IMAGE_REPOSITORY" == *..* ]]; then
+    echo "GATE_IMAGE_REPOSITORY is not a plain ghcr.io name: $GATE_IMAGE_REPOSITORY" >&2
+    exit 2
+  fi
+  image="$GATE_IMAGE_REPOSITORY:$GATE_IMAGE_TAG"
+  docker build --build-arg TOOLS=1 --tag "$image" \
+    --file "$support/Dockerfile" "$support" >&2
+  reason=
+  if [[ -z "${GH_TOKEN:-}" || -z "${GITHUB_ACTOR:-}" ]]; then
+    reason="no token"
+  elif ! printf '%s' "$GH_TOKEN" |
+    docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >&2; then
+    reason="login refused"
+  elif ! docker push "$image" >&2; then
+    reason="push refused"
+  fi
+  if [[ -n "$reason" ]]; then
+    printf 'image not shared: %s\n' "$reason" >&2
+    exit 0
+  fi
+  docker image inspect --format '{{index .RepoDigests 0}}' "$image"
+  exit 0
+fi
 
-# Every mode that starts a container needs the image; a later change will pull
-# it by digest instead of building it here.
-gate_image
+# gate_image: the one place that supplies the containers' image. The run
+# publishes one image and every gate pulls that digest; when there is none, or
+# this runner cannot pull exactly it, the job builds the image as it always
+# has, so no gate depends on the registry being reachable.
+gate_image() {
+  local reason="no image published" pulled
+  if [[ -n "${GATE_IMAGE:-}" ]]; then
+    if [[ -n "${GH_TOKEN:-}" && -n "${GITHUB_ACTOR:-}" ]] \
+      && ! printf '%s' "$GH_TOKEN" |
+        docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >&2; then
+      reason="login refused"
+    elif ! docker pull "$GATE_IMAGE" >&2; then
+      reason="pull refused"
+    else
+      pulled=$(docker image inspect --format '{{index .RepoDigests 0}}' "$GATE_IMAGE" 2>/dev/null || true)
+      if [[ "$pulled" == "$GATE_IMAGE" ]]; then
+        docker tag "$GATE_IMAGE" atelier-gates
+        summary "image pulled: $GATE_IMAGE"
+        return 0
+      fi
+      reason="digest mismatch"
+    fi
+  fi
+  summary "image not shared: $reason; this job builds it without the pinned tools"
+  docker build --build-arg TOOLS=0 --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
+}
 
 names=()
 trap 'docker rm --force "${names[@]}" >/dev/null 2>&1 || true' EXIT
@@ -95,7 +150,7 @@ contained() {
 # output never reaches it unfiltered.
 summary() {
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
-  grep -E '^(\*\*commands/[A-Za-z0-9_.-]+:\*\* |\*\*partition:\*\* |base [0-9a-f]+ is unavailable)' <<< "$1" \
+  grep -E '^(\*\*commands/[A-Za-z0-9_.-]+:\*\* |\*\*partition:\*\* |image (pulled|not shared): |base [0-9a-f]+ is unavailable)' <<< "$1" \
     | cut -b1-500 | head -n 5 | sed 's/$/\n/' >> "$GITHUB_STEP_SUMMARY" || true
 }
 
@@ -103,6 +158,11 @@ summary() {
 start() {
   timeout --signal=TERM --kill-after=30s "$limit" docker start --attach "$1"
 }
+
+# Every mode that starts a container needs the image; the run's published
+# digest is pulled when it is available, and each job builds otherwise. It
+# runs after these definitions because it reports through summary.
+gate_image
 
 id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM"
 

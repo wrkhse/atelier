@@ -14,7 +14,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
+  # gates.yml's image job publishes the shared gate image to this repository's
+  # package; every other job there asks for no more than contents: read.
   contents: read
+  packages: write
 
 jobs:
   gates:

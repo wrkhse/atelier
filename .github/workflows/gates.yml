@@ -21,6 +21,47 @@ permissions:
   contents: read
 
 jobs:
+  image:
+    # One image per run, consumed by digest. The tag is per run because a pull
+    # request can push anything under any tag, so a shared or content-hash tag
+    # could poison another run's gate; a gate reads this run's digest only.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Require the reusable workflow's own commit
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: test -n "$WORKFLOW_REPOSITORY" && test -n "$WORKFLOW_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: ci
+          persist-credentials: false
+          sparse-checkout: .github/ci
+      - id: image
+        name: Build, push and record the gate image
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          # The package is per repository, so a pull request can never consume
+          # another repository's image.
+          GATE_IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}-gates
+          GATE_IMAGE_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          image=$(bash "$CI_SUPPORT/run.sh" image)
+          if [ -n "$image" ]; then
+            echo "image=$image" >> "$GITHUB_OUTPUT"
+          fi
+
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -115,11 +156,20 @@ jobs:
           if-no-files-found: error
 
   gate:
-    needs: plan
+    needs: [plan, image]
     if: needs.plan.outputs.matrix != '[]'
     name: ${{ matrix.gate }} (${{ matrix.root }})${{ matrix.shard && format(' [{0}]', matrix.shard) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+    env:
+      # The digest this run published; run.sh pulls it, or builds the image
+      # when there is none or it cannot be pulled.
+      GATE_IMAGE: ${{ needs.image.outputs.image }}
+      # Read-only package access for that pull.
+      GH_TOKEN: ${{ github.token }}
     strategy:
       fail-fast: false
       matrix:
@@ -182,7 +232,7 @@ jobs:
   partition:
     # The mutants gate's completeness check: every shard's report must be
     # there, and the four selections must be disjoint and add up.
-    needs: [plan, gate]
+    needs: [plan, gate, image]
     # Even a failed shard job reaches the validator, so its missing report is
     # named rather than showing only as a red gate job.
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.sharded == 'true' }}
@@ -190,6 +240,13 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+      packages: read
+    env:
+      # The digest this run published; run.sh pulls it, or builds the image
+      # when there is none or it cannot be pulled.
+      GATE_IMAGE: ${{ needs.image.outputs.image }}
+      # Read-only package access for that pull.
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Require the reusable workflow's own commit
         env:
