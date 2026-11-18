@@ -499,12 +499,13 @@ fn record(folder: &Path) -> Result<Identity, Unrecorded> {
     Identity::parse(&text).map_err(Unrecorded::Invalid)
 }
 
-/// The boot a test makes a start hand its leader, so that a test can make the
-/// leader's own publish fail and drive the abandon through `start`. Test
-/// builds only.
+// The boot a test makes a start hand its leader, so that a test can make the
+// leader's own publish fail and drive the abandon through `start`. Test
+// builds only.
 #[cfg(test)]
 thread_local! {
-    static TEST_BOOT: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    static TEST_BOOT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// How many times a start looks for the leader's own record before it gives
