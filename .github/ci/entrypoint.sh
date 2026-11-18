@@ -65,7 +65,7 @@ if [[ "$MODE" == plan || "$MODE" == plan-release ]]; then
     # pipefail makes a refusal from shards.py the pipeline's status, and set -e
     # stops the step: a malformed expansion never reaches the host as a plan.
     expanded=$(printf '%s' "$matrix" \
-      | /usr/bin/python3 /opt/ci/shards.py expand "$ATELIER_MUTANTS_SHARDS")
+      | /usr/bin/python3 /opt/ci/shards.py expand "$ATELIER_MUTANTS_SHARDS" /work/.atelier/config.toml)
     printf '%s\n' "$expanded"
   else
     printf '%s\n' "$matrix"

@@ -11,11 +11,18 @@ test, Kani proof or mutant.
 
 ```mermaid
 flowchart LR
-    Checkout["checkout<br/>no persisted credential"] --> Plan["container: plan<br/>build atelier, list gates"]
-    Plan --> Matrix["one job per gate<br/>or per shard"]
-    Matrix --> Gate["container: atelier check<br/>writes /reports"]
+    Checkout["checkout<br/>no persisted credential"] --> Image["job: image<br/>build the gate image once"]
+    Checkout --> Plan["container: plan<br/>build atelier, list gates"]
+    Plan -->|"a gate setup installs a tool"| Image
+    Image -->|"digest reference"| Tools["container: atelier check<br/>in the run's image"]
+    Plan --> Matrix["one job per gate,<br/>root or shard"]
+    Matrix -->|"setup installs nothing"| Gate["container: atelier check<br/>writes /reports"]
+    Matrix -->|"setup installs a tool"| Tools
     Gate --> Validate["fresh offline container:<br/>reports.py"]
+    Tools --> Validate
     Gate -->|"reports-commands-mutants-*"| Partition["job: partition<br/>every shard's report"]
+    Tools -->|"reports-commands-mutants-*"| Partition
+    Image -->|"digest reference"| Partition
     Partition --> Proof["fresh offline container:<br/>reports.py --partition"]
 ```
 
@@ -31,6 +38,20 @@ flowchart LR
 | `shards.py`       | Splits every mutants gate into one job per shard, by cargo-mutants' slicing rule     |
 | `reports.py`      | Fail-closed validation of fresh Kani and cargo-mutants reports                       |
 | `test_reports.py` | Tests of the validator, `cargo.py`, `contained.jq`, `floor.sh` and the gate config   |
+| `gate-image.yml`  | The daily pruner of the gate image's `run-*` versions                                |
+
+## The jobs
+
+`gates.yml` has five jobs. `image` builds and publishes the one image, on
+the runner rather than in a container. `plan` runs in a container, checks
+the report validator, builds atelier or installs the release, and writes
+the matrix. `gate` is one matrix job per gate, root and shard, in a
+container built without the pinned tools, and is skipped when the matrix is
+empty. `gate-tools` runs the entries whose setup has a `cargo install` line,
+in the image the run published. `partition` runs in a fresh offline
+container after the gates, also when one failed, and judges every shard's
+report together. A gate whose setup installs nothing is a job of its own,
+so its verdict arrives without waiting for the image.
 
 ## The container
 
@@ -68,6 +89,11 @@ credential, and the release download that needs `GH_TOKEN` runs before,
 without project code. A private repository's `origin` fetch therefore needs a
 public clone or a future read-only mirror; atelier itself is public.
 
+`run.sh` in the image job holds a package write token in a same-repo pull
+request's run. No container ever sees it, and digest pinning keeps every
+consumer safe: a gate refuses an image whose `RepoDigests` is not the digest
+its own run published.
+
 Only plain files and folders cross back to the runner, into
 `atelier-reports/container/`, apart from the runner's own inspections: links
 that `docker cp` would keep are deleted, and the planner binary must be a
@@ -87,6 +113,54 @@ the pull request itself: review, not this workflow, keeps a pull request from
 loosening its own containment. The judged code can also write its own
 `/reports` files, including `base.txt`; the fresh validator checks their
 consistency, not their provenance.
+
+## The gate image
+
+The image carries the tools of every gate whose setup is a `cargo install`
+line, so a gate whose setup installs nothing never pulls it and never waits
+for it. The `image` job builds it once, tags it `run-<id>-<attempt>` and
+pushes it to this repository's `<repository>-gates` package on ghcr.io; the
+job runs only when the plan selects such a gate. The tag is per run: a pull
+request can push anything under any tag, so a shared or content-hash tag
+could poison another run's gate. A gate consumes only the digest this run
+published.
+
+The image installs those gates' pinned tools with the same `cargo install`
+commands the gate config uses (cargo-deny 0.20.2, cargo-shear 1.14.0,
+cargo-mutants 27.1.0 and kani-verifier 0.68.0), so cargo finds each package
+already installed and each such setup line changes nothing. Every install is
+asserted at build time, so a broken tool layer fails the image, not a gate.
+The nextest tarball that nextest and mutants fetch is cheap and stays out of
+the image.
+
+`gate-tools` and `partition` pull the published digest only and refuse an
+image whose `RepoDigests` does not equal it. A fork's pull request never
+publishes one: its token cannot push to the package, so the image job is
+skipped there and those gates build with `TOOLS=0`, each setup installing
+its own tool. When there is no digest, or this runner cannot pull exactly
+it, the job builds the same way, with a plain
+`docker build --build-arg TOOLS=0`, so no gate depends on the registry
+being reachable. The job summary says which path ran:
+`image pulled: <digest>`, or
+`image not shared: <reason>; this job builds it without the pinned tools`.
+
+For kani, only its `cargo install` is saved: `cargo kani setup` always
+re-downloads, because its proxy treats an explicit setup as an explicit
+setup, so the kani gate still pays that download.
+
+The image job's build runs on the runner, outside a container, under a
+30-minute limit inside its 90-minute job; its token reaches only the registry
+login. Beyond the digest-pinned base images, the build's network inputs are
+Debian's package mirror, PyPI for the pinned pipx and ruff, rustup's
+components and crates.io through `--locked` installs. The pulled image is
+the container's image, not a mount: the gate container's mounts, network and
+`contained.jq` contract are exactly the ones described above.
+
+`.github/workflows/gate-image.yml` prunes the package daily. It deletes the
+versions older than seven days whose every tag matches `run-*`, never one
+carrying any other tag, keeps an untagged version, logs one line per version
+and one per deletion, and fails the job when it cannot list them or when the
+listing reaches its 20-page bound.
 
 ## Sharding the mutants gate
 
@@ -207,17 +281,23 @@ separately approved disposable macOS environment.
 
 ## Production files of deleted tests
 
-A deleted test cannot fail, so when a diff removes a `#[test]` or a
-`#[kani::proof]`, the gate also mutates the production files those tests
-covered: the diff's own selection no longer proves that code. `cargo.py`
-reads each changed `.rs` file under `crates/` or `plugins/` at the base
-and now, and treats each test name the base held and the tree does not as
-deleted.
+A deleted test cannot fail, so when a diff removes a test, the gate also
+mutates the production files those tests covered: the diff's own selection
+no longer proves that code. A test is one of `test`, a path-qualified
+`::test` such as `tokio::test`, `rstest`, `test_case`, `proptest`, a
+`proptest!` block, `kani::proof` or `kani::proof_for_contract`, on a `fn`
+with a `pub`, `pub(crate)`, `const`, `async`, `unsafe` or `extern`
+modifier. `cargo.py` reads each changed `.rs` file under `crates/` or
+`plugins/` at the base and now, and treats each test name the base held and
+the tree does not as deleted.
+
+`cargo.py` runs `git diff` with `--no-renames`, so a renamed file is seen
+as a delete and an add, and the tests it held count as deleted.
 
 A deleted test in a crate's `src/` file covers that file, or its `.rs`
-siblings when the file itself is gone. A deleted test in
-`crates/<crate>/tests/` or `plugins/<crate>/tests/` covers every `.rs`
-file under that crate's `src/`.
+siblings and the parent module when the file itself is gone (`src/foo.rs`
+for `src/foo/tests.rs`). A deleted test in `crates/<crate>/tests/` or
+`plugins/<crate>/tests/` covers every `.rs` file under that crate's `src/`.
 
 The safeguard is a second cargo-mutants run in the same gate, with one
 `--file` per production file and the gate job's shard when it has one,
@@ -234,3 +314,8 @@ never removes a check: the diff's own selection is still required and
 still judged. A diff whose base is unavailable, so that `base.txt`
 records it as not evaluated, writes no safeguard; the canary runs there
 instead.
+
+The scan is textual, not a Rust parser, so it can over-report, which only
+adds work. What it cannot see is still a gap: a test generated by a macro it
+cannot read, or one moved into another file without its attribute, is not a
+deleted test here.

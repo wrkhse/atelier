@@ -21,11 +21,61 @@ permissions:
   contents: read
 
 jobs:
+  image:
+    # One image per run, consumed by digest. The tag is per run because a pull
+    # request can push anything under any tag, so a shared or content-hash tag
+    # could poison another run's gate; a gate reads this run's digest only.
+    # Only a gate whose setup installs a baked tool needs it. A fork's token
+    # cannot push, so the image is skipped there and those gates build with
+    # TOOLS=0; and nothing consumes an image this run did not publish.
+    needs: [plan]
+    if: ${{ !cancelled() && needs.plan.outputs.tools == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Require the reusable workflow's own commit
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: test -n "$WORKFLOW_REPOSITORY" && test -n "$WORKFLOW_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: ci
+          persist-credentials: false
+          sparse-checkout: .github/ci
+      - id: image
+        name: Build, push and record the gate image
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          # The package is per repository, so a pull request can never consume
+          # another repository's image.
+          GATE_IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}-gates
+          GATE_IMAGE_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          image=$(bash "$CI_SUPPORT/run.sh" image)
+          if [ -n "$image" ]; then
+            echo "image=$image" >> "$GITHUB_OUTPUT"
+          fi
+
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      matrix_tools: ${{ steps.plan.outputs.matrix_tools }}
+      tools: ${{ steps.plan.outputs.tools }}
       sharded: ${{ steps.plan.outputs.sharded }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -93,12 +143,23 @@ jobs:
           fi
           # The plan must be one JSON array, or no gate output is trusted.
           matrix=$(jq -ce 'if type == "array" then . else error("not a gate list") end' <<< "$matrix")
-          # A sharded gate names the shard it runs; the partition job waits for
-          # every gate job and judges the shards' reports together.
-          sharded=$(jq -c 'any(.[]; has("shard"))' <<< "$matrix")
           echo "$matrix"
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "sharded=$sharded" >> "$GITHUB_OUTPUT"
+          # A sharded gate names the shard it runs; the partition job waits for
+          # every gate job and judges the shards' reports together. This reads
+          # the whole plan, before the split below.
+          sharded=$(jq -c 'any(.[]; has("shard"))' <<< "$matrix")
+          # A gate whose setup installs nothing must not wait for the image, so
+          # the plan splits on each entry's "tools" mark: the gate job runs the
+          # ones that install nothing, and gate-tools the ones that do.
+          matrix_tools=$(jq -c '[.[] | select(.tools == true)]' <<< "$matrix")
+          matrix=$(jq -c '[.[] | select(.tools != true)]' <<< "$matrix")
+          tools=$(jq -r 'length > 0' <<< "$matrix_tools")
+          {
+            echo "matrix=$matrix"
+            echo "matrix_tools=$matrix_tools"
+            echo "tools=$tools"
+            echo "sharded=$sharded"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: atelier
@@ -115,11 +176,15 @@ jobs:
           if-no-files-found: error
 
   gate:
-    needs: plan
+    # Every gate here installs nothing, so none may wait for an image it does
+    # not use: the job never pulls one, and run.sh builds it with TOOLS=0.
+    needs: [plan]
     if: needs.plan.outputs.matrix != '[]'
     name: ${{ matrix.gate }} (${{ matrix.root }})${{ matrix.shard && format(' [{0}]', matrix.shard) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -179,17 +244,105 @@ jobs:
           path: ${{ runner.temp }}/atelier-reports
           if-no-files-found: error
 
-  partition:
-    # The mutants gate's completeness check: every shard's report must be
-    # there, and the four selections must be disjoint and add up.
-    needs: [plan, gate]
-    # Even a failed shard job reaches the validator, so its missing report is
-    # named rather than showing only as a red gate job.
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.sharded == 'true' }}
+  gate-tools:
+    # A gate here installs a tool the image bakes, so it consumes this run's
+    # image by digest. A skipped or failed image job leaves the digest empty
+    # and run.sh builds instead. always() is what lets this job run when the
+    # job it needs was skipped (a fork's image job), and !cancelled() keeps a
+    # cancelled run from starting it.
+    needs: [plan, image]
+    if: ${{ always() && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.tools == 'true' }}
+    name: ${{ matrix.gate }} (${{ matrix.root }})${{ matrix.shard && format(' [{0}]', matrix.shard) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
+      packages: read
+    env:
+      # The digest this run published; run.sh pulls it, or builds the image
+      # when there is none or it cannot be pulled.
+      GATE_IMAGE: ${{ needs.image.outputs.image }}
+      # Read-only package access for that pull.
+      GH_TOKEN: ${{ github.token }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix_tools) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require the reusable workflow's own commit
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: test -n "$WORKFLOW_REPOSITORY" && test -n "$WORKFLOW_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: ci
+          persist-credentials: false
+          sparse-checkout: .github/ci
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: atelier
+          path: ${{ runner.temp }}/atelier
+      - id: gate
+        name: Run the gate in the container
+        env:
+          GATE: ${{ matrix.gate }}
+          ROOT: ${{ matrix.root }}
+          ATELIER_SHARD: ${{ matrix.shard }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_SUPPORT: ${{ github.workspace }}/ci/.github/ci
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          SOURCE: ${{ github.workspace }}/source
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/atelier/atelier"
+          bash "$CI_SUPPORT/run.sh" gate "$GATE" "$ROOT" "$BASE"
+      - id: artifact
+        name: Name the reports after the gate
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' }}
+        env:
+          GATE: ${{ matrix.gate }}
+          ROOT: ${{ matrix.root }}
+          INDEX: ${{ strategy.job-index }}
+        # Artifact names cannot hold "/"; the job index keeps them unique.
+        run: |
+          root=${ROOT//\//-}
+          [ "$root" = . ] && root=root
+          echo "name=reports-${GATE//\//-}-$root-$INDEX" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' }}
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ runner.temp }}/atelier-reports
+          if-no-files-found: error
+
+  partition:
+    # The mutants gate's completeness check: every shard's report must be
+    # there, and the four selections must be disjoint and add up.
+    needs: [plan, gate, gate-tools, image]
+    # A shard job that failed still reaches the validator, so its missing
+    # report is named rather than showing only as a red gate job. always() is
+    # what lets this job run when the job it needs was skipped (a fork's image
+    # job), and !cancelled() keeps a cancelled run from starting it.
+    if: ${{ always() && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.sharded == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+    env:
+      # The digest this run published; run.sh pulls it, or builds the image
+      # when there is none or it cannot be pulled.
+      GATE_IMAGE: ${{ needs.image.outputs.image }}
+      # Read-only package access for that pull.
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Require the reusable workflow's own commit
         env:

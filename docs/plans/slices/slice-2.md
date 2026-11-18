@@ -517,16 +517,19 @@ pub trait Forge {
 }
 ```
 
-`gates.yml` has three jobs, `plan`, `gate` and `partition`. `plan` installs
-atelier once, from the release with its `SHA256SUMS` checked or built from
-source, passes it on as an artifact, and writes the matrix, with each
-mutants gate split into one entry per shard. `gate` runs once per entry,
-without stopping the others on a failure; it is skipped when the matrix is
-empty. `partition` runs after the gates, also when one failed, and in a
-fresh offline container proves that every shard's report is there and that
-no mutant is tested twice and none is left out. `plan` and `gate` check out
-the full history, with credentials, since atelier fetches the base branch
-to read the config.
+`gates.yml` has five jobs, `image`, `plan`, `gate`, `gate-tools` and
+`partition`, with `image` building and publishing the one container image
+that `gate-tools` and `partition` pull by digest. `plan` installs atelier
+once, from the release with its `SHA256SUMS` checked or built from source,
+passes it on as an artifact, and writes the matrix, with each mutants gate
+split into one entry per shard. `gate` runs once per entry, without stopping
+the others on a failure; it is skipped when the matrix is empty.
+`gate-tools` is the same job for the gates whose setup installs a tool, and
+it runs them in the image the run published. `partition` runs after the
+gates, also when one failed, and in a fresh offline container proves that
+every shard's report is there and that no mutant is tested twice and none is
+left out. `plan` and `gate` check out the full history, with credentials,
+since atelier fetches the base branch to read the config.
 
 #### Verification
 

@@ -287,6 +287,11 @@ class SliceTests(unittest.TestCase):
 
 
 class ExpandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
     def test_expand_splits_only_mutants_gates_in_order(self) -> None:
         matrix = [
             {"gate": "commands/fmt", "root": "."},
@@ -295,14 +300,128 @@ class ExpandTests(unittest.TestCase):
         ]
         text = shards.expand_shards(json.dumps(matrix), 2)
         self.assertNotIn("\n", text)
+        entries = json.loads(text)
         self.assertEqual(
-            json.loads(text),
+            entries,
             [
-                {"gate": "commands/fmt", "root": "."},
-                {"gate": "commands/mutants", "root": ".", "shard": "0/2"},
-                {"gate": "commands/mutants", "root": ".", "shard": "1/2"},
-                {"gate": "commands/kani", "root": "docs"},
+                {"gate": "commands/fmt", "root": ".", "tools": False},
+                {
+                    "gate": "commands/mutants",
+                    "root": ".",
+                    "shard": "0/2",
+                    "tools": False,
+                },
+                {
+                    "gate": "commands/mutants",
+                    "root": ".",
+                    "shard": "1/2",
+                    "tools": False,
+                },
+                {"gate": "commands/kani", "root": "docs", "tools": False},
             ],
+        )
+        self.assertEqual(
+            [list(entry) for entry in entries],
+            [
+                ["gate", "root", "tools"],
+                ["gate", "root", "shard", "tools"],
+                ["gate", "root", "shard", "tools"],
+                ["gate", "root", "tools"],
+            ],
+        )
+
+    def test_a_gate_needs_the_image_only_when_it_installs_cargo_tools(self) -> None:
+        config = {
+            "commands": {
+                "deny": {"setup": ["cargo install --locked cargo-deny@0.20.2"]},
+                "shear": {"setup": ["cargo install --locked cargo-shear@1.14.0"]},
+                "mutants": {
+                    "setup": [
+                        "curl -LsSf https://get.nexte.st/0.9.151/linux | tar zxf -",
+                        "cargo install --locked cargo-mutants@27.1.0",
+                    ]
+                },
+                "kani": {
+                    "setup": [
+                        "cargo install --locked kani-verifier --version 0.68.0",
+                        "cargo kani setup",
+                    ]
+                },
+                "nextest": {
+                    "setup": [
+                        "curl -LsSf https://get.nexte.st/0.9.151/linux | tar zxf -"
+                    ]
+                },
+                "ruff": {"setup": ["pipx run ruff==0.17.4 check ."]},
+                "readmes": {"setup": ["npx --yes prettier@3.9.10 --check README.md"]},
+                "actionlint": {
+                    "setup": ["go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12"]
+                },
+                "fmt": {},
+            }
+        }
+        matrix = [
+            {"gate": f"commands/{gate}", "root": "."}
+            for gate in (
+                "deny",
+                "shear",
+                "mutants",
+                "kani",
+                "nextest",
+                "ruff",
+                "readmes",
+                "actionlint",
+                "fmt",
+            )
+        ]
+        entries = json.loads(shards.expand_shards(json.dumps(matrix), 2, config))
+        self.assertEqual(
+            {entry["gate"]: entry["tools"] for entry in entries},
+            {
+                "commands/deny": True,
+                "commands/shear": True,
+                "commands/mutants": True,
+                "commands/kani": True,
+                "commands/nextest": False,
+                "commands/ruff": False,
+                "commands/readmes": False,
+                "commands/actionlint": False,
+                "commands/fmt": False,
+            },
+        )
+
+    def test_without_a_config_no_gate_needs_the_image(self) -> None:
+        matrix = [
+            {"gate": "commands/deny", "root": "."},
+            {"gate": "commands/mutants", "root": "."},
+            {"gate": "commands/nextest", "root": "."},
+        ]
+        for config in (None, {}):
+            with self.subTest(config=config):
+                entries = json.loads(
+                    shards.expand_shards(json.dumps(matrix), 2, config)
+                )
+                self.assertEqual([entry["tools"] for entry in entries], [False] * 4)
+
+    def test_a_gate_absent_from_the_config_needs_no_image(self) -> None:
+        config = {
+            "commands": {"deny": {"setup": ["cargo install --locked cargo-deny@0.20.2"]}}
+        }
+        entries = json.loads(
+            shards.expand_shards(
+                json.dumps(
+                    [
+                        {"gate": "commands/deny", "root": "."},
+                        {"gate": "commands/shear", "root": "."},
+                    ]
+                ),
+                1,
+                config,
+            )
+        )
+        self.assertEqual(
+            {entry["gate"]: entry["tools"] for entry in entries},
+            {"commands/deny": True, "commands/shear": False},
         )
 
     def test_expand_refuses_a_matrix_it_cannot_split(self) -> None:
@@ -339,8 +458,18 @@ class ExpandTests(unittest.TestCase):
         self.assertEqual(
             json.loads(completed.stdout),
             [
-                {"gate": "commands/mutants", "root": ".", "shard": "0/2"},
-                {"gate": "commands/mutants", "root": ".", "shard": "1/2"},
+                {
+                    "gate": "commands/mutants",
+                    "root": ".",
+                    "shard": "0/2",
+                    "tools": False,
+                },
+                {
+                    "gate": "commands/mutants",
+                    "root": ".",
+                    "shard": "1/2",
+                    "tools": False,
+                },
             ],
         )
         refused = subprocess.run(
@@ -353,6 +482,47 @@ class ExpandTests(unittest.TestCase):
         )
         self.assertEqual(refused.returncode, 1)
         self.assertEqual(len(refused.stderr.splitlines()), 1)
+
+    def test_expand_cli_reads_the_config_when_given(self) -> None:
+        config = self.root / "config.toml"
+        config.write_text(
+            '[commands.mutants]\nsetup = ["cargo install --locked cargo-mutants@27.1.0"]\n',
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            [sys.executable, str(SHARDS), "expand", "1", str(config)],
+            input=json.dumps([{"gate": "commands/mutants", "root": "."}]),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(len(completed.stdout.splitlines()), 1)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            [{"gate": "commands/mutants", "root": ".", "shard": "0/1", "tools": True}],
+        )
+
+    def test_expand_cli_ignores_a_missing_or_unreadable_config(self) -> None:
+        malformed = self.root / "malformed.toml"
+        malformed.write_text("[commands", encoding="utf-8")
+        for path in (self.root / "absent.toml", malformed):
+            with self.subTest(path=path):
+                completed = subprocess.run(
+                    [sys.executable, str(SHARDS), "expand", "1", str(path)],
+                    input=json.dumps([{"gate": "commands/fmt", "root": "."}]),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stderr, "")
+                self.assertEqual(
+                    json.loads(completed.stdout),
+                    [{"gate": "commands/fmt", "root": ".", "tools": False}],
+                )
 
 
 class KaniTests(ReportCase):
@@ -1001,6 +1171,71 @@ class PartitionTests(ReportCase):
         )
 
 
+class ScanTests(unittest.TestCase):
+    """cargo.py's textual scan for the tests a changed file lost."""
+
+    def lost(self, old: str, new: str = "") -> list[str]:
+        """The names the scan finds in `old` and not in `new`."""
+        return sorted(cargo.test_names(old) - cargo.test_names(new))
+
+    def test_a_deleted_tokio_test_is_detected(self) -> None:
+        old = "#[tokio::test]\nasync fn gone() {}\n"
+        self.assertEqual(self.lost(old), ["tokio::test:gone"])
+
+    def test_a_proptest_block_losing_its_fn_is_detected(self) -> None:
+        old = (
+            "proptest! {\n"
+            "    fn gone(value: u8 in any::<u8>()) {\n"
+            "        prop_assert!(value < 255);\n"
+            "    }\n"
+            "}\n"
+        )
+        new = "proptest! {\n}\n"
+        self.assertEqual(self.lost(old, new), ["proptest!:gone"])
+
+    def test_function_modifiers_in_any_order_are_recognised(self) -> None:
+        old = (
+            "#[test]\npub fn visible() {}\n"
+            "#[test]\npub(crate) unsafe fn guarded() {}\n"
+            "#[test]\npub(super) const async fn ordered() {}\n"
+            '#[test]\npub(in crate::x) extern "C" fn abi() {}\n'
+        )
+        self.assertEqual(
+            self.lost(old),
+            ["test:abi", "test:guarded", "test:ordered", "test:visible"],
+        )
+
+    def test_deleted_rstest_and_test_case_tests_are_detected(self) -> None:
+        old = (
+            "#[rstest]\nfn case(#[case] value: u8) {}\n"
+            "#[rstest::rstest]\nfn qualified(#[case] value: u8) {}\n"
+            "#[test_case(1, 2)]\nfn table(value: u8) {}\n"
+        )
+        self.assertEqual(
+            self.lost(old),
+            ["rstest::rstest:qualified", "rstest:case", "test_case:table"],
+        )
+
+    def test_proptest_and_contract_proof_attributes_are_detected(self) -> None:
+        old = (
+            "#[proptest]\nfn attribute(value: u8) {}\n"
+            "#[kani::proof_for_contract]\nfn contract() {}\n"
+        )
+        self.assertEqual(
+            self.lost(old),
+            ["kani::proof_for_contract:contract", "proptest:attribute"],
+        )
+
+    def test_proptest_outside_a_macro_is_not_a_test(self) -> None:
+        text = (
+            "use proptest::prelude::*;\n"
+            "// A proptest! block would hold tests here.\n"
+            "#[cfg(test)]\n"
+            "fn helper() {}\n"
+        )
+        self.assertEqual(self.lost(text), [])
+
+
 class WrapperTests(unittest.TestCase):
     """cargo.py's choice of mutants, with cargo-mutants and git stubbed."""
 
@@ -1100,6 +1335,57 @@ class WrapperTests(unittest.TestCase):
             "git", 'import sys; assert sys.argv[-1] == "--", sys.argv; print("b.rs"); print("a.md")'
         )
         self.assertEqual(cargo.changed_files(), ["a.md", "b.rs"])
+
+    def test_the_diff_disables_rename_detection(self) -> None:
+        cargo.changed_files = WrapperTests.real_changed_files
+        called = self.root / "git-args.txt"
+        cargo.GIT = self.script(
+            "git",
+            "\n".join(
+                (
+                    "import sys",
+                    f"open({str(called)!r}, 'w').write(chr(10).join(sys.argv[1:]))",
+                    "print('crates/x/src/lib.rs')",
+                )
+            ),
+        )
+        self.assertEqual(cargo.changed_files(), ["crates/x/src/lib.rs"])
+        self.assertEqual(
+            called.read_text(encoding="utf-8").splitlines(),
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--name-only",
+                "abc",
+                "--",
+            ],
+        )
+
+    def test_a_rename_still_reports_the_deleted_tests(self) -> None:
+        cargo.changed_files = WrapperTests.real_changed_files
+        old, new = "crates/x/tests/old.rs", "crates/x/tests/new.rs"
+        cargo.GIT = self.script(
+            "git",
+            "\n".join(
+                (
+                    "import sys",
+                    "if sys.argv[1] == 'diff':",
+                    f"    print({old!r})",
+                    f"    print({new!r})",
+                    f"elif sys.argv[1] == 'show' and sys.argv[2] == 'abc:{old}':",
+                    "    print('#[test]')",
+                    "    print('fn gone() {}')",
+                    "else:",
+                    "    sys.exit(1)",
+                )
+            ),
+        )
+        self.assertEqual(cargo.changed_files(), [new, old])
+        self.assertEqual(
+            cargo.deleted_by_file("abc", [new, old]), {old: ["test:gone"]}
+        )
 
     def test_a_failed_diff_never_reaches_the_canary(self) -> None:
         self.canary()
@@ -1233,6 +1519,40 @@ class WrapperTests(unittest.TestCase):
             ],
         )
         self.assertEqual(self.safeguard_selection()["files"], sources)
+
+    def test_a_deleted_module_file_covers_its_parent_module_file(self) -> None:
+        for path in ("crates/x/src/foo.rs", "crates/x/src/foo/kept.rs"):
+            file = self.root / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("", encoding="utf-8")
+        self.assertEqual(
+            cargo.covered_files("crates/x/src/foo/tests.rs"),
+            ["crates/x/src/foo.rs", "crates/x/src/foo/kept.rs"],
+        )
+
+    def test_a_deleted_nested_module_file_covers_its_own_parent_module(self) -> None:
+        for path in (
+            "crates/x/src/foo.rs",
+            "crates/x/src/foo/bar.rs",
+            "crates/x/src/foo/bar/kept.rs",
+        ):
+            file = self.root / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("", encoding="utf-8")
+        self.assertEqual(
+            cargo.covered_files("crates/x/src/foo/bar/tests.rs"),
+            ["crates/x/src/foo/bar.rs", "crates/x/src/foo/bar/kept.rs"],
+        )
+
+    def test_a_deleted_lib_rs_covers_only_its_src_siblings(self) -> None:
+        for name in ("kept.rs", "main.rs"):
+            path = self.root / "crates/x/src" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        self.assertEqual(
+            cargo.covered_files("crates/x/src/lib.rs"),
+            ["crates/x/src/kept.rs", "crates/x/src/main.rs"],
+        )
 
     def test_kept_tests_need_no_safeguard(self) -> None:
         file = "crates/x/src/lib.rs"

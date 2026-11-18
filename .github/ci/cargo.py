@@ -24,9 +24,16 @@ SHARD = os.environ.get("ATELIER_SHARD", "")
 # One diff's deleted tests may cover this many production files before the
 # change is too wide for one safeguard run: split the change instead.
 MAX_SAFEGUARD_FILES = 64
-# A test attribute and the first function line after it, for the textual scan.
-ATTRIBUTE = re.compile(r"^\s*#\[(test|kani::proof)\b")
-FUNCTION = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
+# A test attribute, a `proptest!` block, and the first function line after
+# either, for the textual scan.
+ATTRIBUTE = re.compile(
+    r"^\s*#\[((?:[A-Za-z0-9_]+::)*(?:test|rstest|test_case|proptest|proof|proof_for_contract))\b"
+)
+PROPTEST = re.compile(r"^\s*proptest!\s*\{")
+# Every modifier Rust allows before `fn`, in any combination and order.
+FUNCTION = re.compile(
+    r'^\s*(?:(?:pub(?:\s*\([^)]*\))?|const|async|unsafe|extern\s+"[^"]*")\s+)*fn\s+([A-Za-z0-9_]+)'
+)
 
 
 def options(args: list[str], *extra: str) -> list[str]:
@@ -76,7 +83,16 @@ def changed_files() -> list[str]:
 
     try:
         output = subprocess.run(
-            [GIT, "diff", "--no-ext-diff", "--no-textconv", "--name-only", base, "--"],
+            [
+                GIT,
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--name-only",
+                base,
+                "--",
+            ],
             check=True,
             capture_output=True,
             text=True,
@@ -230,11 +246,12 @@ def blob(base: str, file: str) -> str | None:
 
 
 def test_names(text: str) -> set[str]:
-    """The `#[test]` and `#[kani::proof]` names `text` declares.
+    """The test names `text` declares, by its attributes and `proptest!` blocks.
 
-    This is a conservative textual scan, not a Rust parser: an attribute
-    claims the first later `fn` line, so a deleted test is recognised
-    without compiling the change, and over-reporting one only adds work.
+    This is a conservative textual scan, not a Rust parser: an attribute, or
+    a `proptest!` block, claims the first later `fn` line, so a deleted test
+    is recognised without compiling the change, and over-reporting one only
+    adds work.
     """
     names = set()
     attribute = None
@@ -246,6 +263,8 @@ def test_names(text: str) -> set[str]:
         marker = ATTRIBUTE.match(line)
         if marker is not None:
             attribute = marker.group(1)
+        elif PROPTEST.match(line):
+            attribute = "proptest!"
     return names
 
 
@@ -272,7 +291,12 @@ def deleted_by_file(base: str, files: list[str]) -> dict[str, list[str]]:
 
 
 def covered_files(file: str) -> list[str]:
-    """The production files a changed source or test file's tests covered."""
+    """The production files a changed source or test file's tests covered.
+
+    A deleted `src` file also covered its parent module: the tests in
+    `src/foo/tests.rs` exercised `src/foo.rs` through `mod foo`, so that
+    module is mutated too when it exists.
+    """
     parts = Path(file).parts
     if len(parts) < 4 or parts[0] not in ("crates", "plugins"):
         return []
@@ -280,7 +304,12 @@ def covered_files(file: str) -> list[str]:
     if kind == "src":
         if path.is_file():
             return [file]
-        return sorted(str(sibling) for sibling in path.parent.glob("*.rs"))
+        siblings = [str(sibling) for sibling in path.parent.glob("*.rs")]
+        if path.parent.name != "src":
+            module = path.parent.parent / f"{path.parent.name}.rs"
+            if module.is_file():
+                siblings.append(str(module))
+        return sorted(siblings)
     if kind == "tests":
         return sorted(str(name) for name in (crate / "src").rglob("*.rs"))
     return []

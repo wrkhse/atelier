@@ -2,7 +2,8 @@
 """Split a gate's work across matrix jobs, proved from the shards' reports.
 
 The planner prints one JSON array of gates. `expand` replaces every mutants
-gate with one entry per shard, each carrying its own `--shard k/n`, and the
+gate with one entry per shard, each carrying its own `--shard k/n`, and marks
+every entry with whether its gate needs the tools baked into the image. The
 runner starts each entry as its own job. The shards are not trusted
 separately: reports.py collects their own reports and proves they partition
 the gate, with no mutant tested twice and none left out.
@@ -18,6 +19,7 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 
 MAX_SHARDS = 8
 SHARD = re.compile(r"([0-9]+)/([0-9]+)")
@@ -50,8 +52,39 @@ def slice_size(total: int, k: int, n: int) -> int:
     return max(0, end - start)
 
 
-def expand_shards(matrix: str, shards: int) -> str:
-    """The planner's gate matrix with each mutants gate split into `shards`."""
+def needs_image(config: dict, gate: str) -> bool:
+    """Whether `gate` needs the tools baked into the image.
+
+    The image pre-installs exactly the tools a gate would otherwise build
+    with `cargo install`, and nothing else. A setup without it, or one that
+    only curls a tarball or runs pipx, npx or go, fetches its own tools.
+    """
+    # A matrix gate names its check and command, as in commands/mutants.
+    command = config.get("commands", {}).get(gate.rpartition("/")[2], {})
+    return any("cargo install" in line for line in command.get("setup", []))
+
+
+def load_config(path: str | None) -> dict:
+    """The project's gate config, or an empty one when it is absent.
+
+    The entrypoint passes /work/.atelier/config.toml, which need not exist;
+    then no gate is marked as needing the image's tools.
+    """
+    if path is None:
+        return {}
+    try:
+        with open(path, "rb") as stream:
+            return tomllib.load(stream)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return {}
+
+
+def expand_shards(matrix: str, shards: int, config: dict | None = None) -> str:
+    """The planner's gate matrix with each mutants gate split into `shards`.
+
+    Every entry also says whether its gate needs the image's baked tools,
+    read from `config`'s `[commands.<name>.setup]`.
+    """
     if not 1 <= shards <= MAX_SHARDS:
         raise ValueError(f"a shard count is 1 to {MAX_SHARDS}, not {shards}")
     try:
@@ -69,24 +102,37 @@ def expand_shards(matrix: str, shards: int) -> str:
             raise ValueError(f"a gate has no name: {item!r}")
         if not isinstance(root, str) or not root:
             raise ValueError(f"gate {gate} has no root")
+        tools = needs_image(config or {}, gate)
         if gate.rpartition("/")[2] != "mutants":
-            expanded.append(item)
+            expanded.append({**item, "tools": tools})
             continue
         if "shard" in item:
             raise ValueError(f"gate {gate} already carries shard {item['shard']}")
         for k in range(shards):
-            expanded.append({"gate": gate, "root": root, "shard": f"{k}/{shards}"})
+            expanded.append(
+                {
+                    "gate": gate,
+                    "root": root,
+                    "shard": f"{k}/{shards}",
+                    "tools": tools,
+                }
+            )
     return json.dumps(expanded)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`expand N`: read the planner's matrix on stdin, print N jobs per gate."""
+    """`expand N [CONFIG]`: read the planner's matrix, print N jobs per gate."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["expand"])
     parser.add_argument("shards", type=int)
+    parser.add_argument(
+        "config",
+        nargs="?",
+        help="the project's .atelier/config.toml inside the container",
+    )
     args = parser.parse_args(argv)
     try:
-        print(expand_shards(sys.stdin.read(), args.shards))
+        print(expand_shards(sys.stdin.read(), args.shards, load_config(args.config)))
     except ValueError as error:
         print(f"atelier CI: {error}", file=sys.stderr)
         return 1
