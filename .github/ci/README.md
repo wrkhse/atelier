@@ -162,6 +162,24 @@ carrying any other tag, keeps an untagged version, logs one line per version
 and one per deletion, and fails the job when it cannot list them or when the
 listing reaches its 20-page bound.
 
+### The image cache
+
+The image job builds with buildx and takes the image's layers from the Actions
+cache. A `type=gha` entry is bound to the ref that wrote it, so the shared scope
+`atelier-gates` is written by pushes to `main` only, with `mode=max`; every other
+run reads that scope and writes only its own, `atelier-gates-pr-<number>`. A pull
+request therefore has no path to a layer that `main` or another pull request will
+restore, and it reads the shared scope only once the default branch has written
+one. An entry is a build input and never an image: the gates still consume this
+run's `run-<id>-<attempt>` digest and still refuse one whose `RepoDigests`
+differs.
+
+A run that finds its layers restores them instead of compiling them; a run that
+finds none compiles the image cold and pays one export to seed its own scope. The
+job log says which happened: `image cache: from <scope>; to <scope>` and
+`image built in <n>s`, or `image cache: none; this run compiles every layer` when
+the workflow names no cache at all.
+
 ## Sharding the mutants gate
 
 The plan splits each mutants gate into shards, so the gate runs as four

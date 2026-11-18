@@ -50,6 +50,7 @@ jobs:
           path: ci
           persist-credentials: false
           sparse-checkout: .github/ci
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - id: image
         name: Build, push and record the gate image
         env:
@@ -60,6 +61,14 @@ jobs:
           # another repository's image.
           GATE_IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}-gates
           GATE_IMAGE_TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
+          # Where the layers come from. Cache entries are bound to the ref that
+          # wrote them, so the shared scope is written by pushes to main alone;
+          # any other run writes only its own scope. A cached layer is a build
+          # input: each gate still pulls this run's digest and refuses one whose
+          # RepoDigests differs.
+          GATE_IMAGE_CACHE_FROM: "type=gha,scope=atelier-gates"
+          GATE_IMAGE_CACHE_OWN: "${{ github.event_name == 'pull_request' && format('type=gha,scope=atelier-gates-pr-{0}', github.event.pull_request.number) || '' }}"
+          GATE_IMAGE_CACHE_TO: "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'type=gha,mode=max,scope=atelier-gates' || (github.event_name == 'pull_request' && format('type=gha,mode=max,scope=atelier-gates-pr-{0}', github.event.pull_request.number) || '') }}"
         run: |
           set -euo pipefail
           image=$(bash "$CI_SUPPORT/run.sh" image)

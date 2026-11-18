@@ -49,6 +49,13 @@ login() {
 # the runner, outside a container, and is the only mode that makes the image
 # instead of consuming it. A registry that refuses the login or the push is
 # never the run's failure: it prints no digest, and the gates build instead.
+#
+# Layers come from the Actions cache when the workflow names one. FROM is the
+# shared scope only the default branch writes; OWN is this ref's own scope,
+# read and written by the same ref, so a pull request's repeat runs are warm;
+# TO is where this run writes. A cache entry is a build input and never an
+# image, so which layers a run restored cannot change what a gate consumes:
+# the gates still take this run's digest alone.
 if [[ "$MODE" == image ]]; then
   : "${GATE_IMAGE_REPOSITORY:?registry repository for the gate image}"
   : "${GATE_IMAGE_TAG:?tag of the gate image for this run}"
@@ -62,8 +69,34 @@ if [[ "$MODE" == image ]]; then
     exit 2
   fi
   image="$GATE_IMAGE_REPOSITORY:$GATE_IMAGE_TAG"
-  docker build --build-arg TOOLS=1 --tag "$image" \
-    --file "$support/Dockerfile" "$support" >&2
+  cache=()
+  if [[ -n "${GATE_IMAGE_CACHE_FROM:-}" ]]; then
+    cache+=(--cache-from "$GATE_IMAGE_CACHE_FROM")
+  fi
+  if [[ -n "${GATE_IMAGE_CACHE_OWN:-}" ]]; then
+    cache+=(--cache-from "$GATE_IMAGE_CACHE_OWN")
+  fi
+  if [[ -n "${GATE_IMAGE_CACHE_TO:-}" ]]; then
+    cache+=(--cache-to "$GATE_IMAGE_CACHE_TO")
+  fi
+  # The build alone is timed, so the job log can say what the cache was worth.
+  started=$SECONDS
+  if [[ ${#cache[@]} -gt 0 ]]; then
+    if ! docker buildx version >/dev/null 2>&1; then
+      echo "the image cache needs docker buildx, which this runner lacks" >&2
+      exit 1
+    fi
+    printf 'image cache: from %s; to %s\n' \
+      "${GATE_IMAGE_CACHE_FROM:-none}${GATE_IMAGE_CACHE_OWN:+ and $GATE_IMAGE_CACHE_OWN}" \
+      "${GATE_IMAGE_CACHE_TO:-none}" >&2
+    docker buildx build --build-arg TOOLS=1 --tag "$image" \
+      --file "$support/Dockerfile" --load "${cache[@]}" "$support" >&2
+  else
+    printf 'image cache: none; this run compiles every layer\n' >&2
+    docker build --build-arg TOOLS=1 --tag "$image" \
+      --file "$support/Dockerfile" "$support" >&2
+  fi
+  printf 'image built in %ss\n' "$((SECONDS - started))" >&2
   reason=
   if ! login; then
     reason="no token or login refused"
