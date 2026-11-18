@@ -730,6 +730,80 @@ class ShardReportTests(ReportCase):
             reports.validate("commands/mutants", self.root, True)
 
 
+class SafeguardReportTests(ReportCase):
+    def safeguard(
+        self,
+        names: list[str],
+        total: int | None = None,
+        deleted: list[str] | None = None,
+        report: dict | None = None,
+        **changes: object,
+    ) -> dict:
+        """A safeguard selection and the report its second run wrote."""
+        total = len(names) if total is None else total
+        deleted = ["crates/x/src/lib.rs::test:gone"] if deleted is None else deleted
+        selection = {
+            "mode": "safeguard",
+            "total": total,
+            "selected": names,
+            "deleted": deleted,
+            "files": ["crates/x/src/lib.rs"],
+            **changes,
+        }
+        (self.root / "mutants-safeguard.json").write_text(
+            json.dumps(selection), encoding="utf-8"
+        )
+        outcomes = self.root / "mutants-safeguard" / "mutants.out" / "outcomes.json"
+        outcomes.parent.mkdir(parents=True, exist_ok=True)
+        if report is None:
+            report = mutants_report(names, file="crates/x/src/lib.rs")
+        outcomes.write_text(json.dumps(report), encoding="utf-8")
+        return selection
+
+    def test_a_good_safeguard_extends_the_summary(self) -> None:
+        self.write("mutants", mutants_report())
+        self.safeguard(["src/lib.rs:9: replace return", "src/lib.rs:10: other"])
+        summary = reports.validate("commands/mutants", self.root, True)
+        self.assertEqual(
+            summary,
+            "diff changed 1 repository files, selected 2 mutants; "
+            "canary 0 mutants (not run); safeguard 2 mutants",
+        )
+
+    def test_a_sharded_safeguard_names_its_shard_count(self) -> None:
+        names = shard_names(8, 1, 4)
+        selection = sharded_selection(names, 1, 4, 8)
+        self.write("mutants", mutants_report(names), selection)
+        self.safeguard(shard_names(6, 1, 4), total=6, shard="1/4")
+        summary = reports.validate("commands/mutants", self.root, True)
+        self.assertTrue(summary.endswith("; safeguard 4 shards, 6 mutants"), summary)
+
+    def test_a_safeguard_must_test_exactly_its_selection(self) -> None:
+        self.write("mutants", mutants_report())
+        self.safeguard(
+            ["src/lib.rs:9: replace return", "src/lib.rs:10: other"],
+            report=mutants_report(
+                ["src/lib.rs:9: other"], file="crates/x/src/lib.rs"
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "differ from the safeguard's"):
+            reports.validate("commands/mutants", self.root, True)
+
+    def test_a_safeguard_without_its_report_is_refused(self) -> None:
+        self.write("mutants", mutants_report())
+        self.safeguard(["src/lib.rs:9: replace return"])
+        outcomes = self.root / "mutants-safeguard" / "mutants.out" / "outcomes.json"
+        outcomes.unlink()
+        with self.assertRaisesRegex(ValueError, "missing regular report"):
+            reports.validate("commands/mutants", self.root, True)
+
+    def test_a_safeguard_without_deleted_tests_is_refused(self) -> None:
+        self.write("mutants", mutants_report())
+        self.safeguard(["src/lib.rs:9: replace return"], deleted=[])
+        with self.assertRaisesRegex(ValueError, "recorded no deleted test"):
+            reports.validate("commands/mutants", self.root, True)
+
+
 class PartitionTests(ReportCase):
     def shard(
         self,
@@ -854,6 +928,57 @@ class PartitionTests(ReportCase):
         summary = reports.validate_partition(4, self.root)
         self.assertEqual(summary, "4 shards, 6 mutants, 0 missed, 0 timeouts")
 
+    def safeguard(
+        self,
+        container: Path,
+        index: int,
+        total: int,
+        count: int,
+        deleted: list[str] | None = None,
+    ) -> None:
+        """Attach a safeguard selection and its own report to a shard."""
+        names = shard_names(total, index, count)
+        outcomes = container / "mutants-safeguard" / "mutants.out"
+        outcomes.mkdir(parents=True, exist_ok=True)
+        report = mutants_report(names, file="crates/x/src/lib.rs")
+        (outcomes / "outcomes.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
+        selection = {
+            "mode": "safeguard",
+            "gate": "commands/mutants",
+            "root": ".",
+            "shard": f"{index}/{count}",
+            "total": total,
+            "selected": names,
+            "deleted": (
+                ["crates/x/src/lib.rs::test:gone"] if deleted is None else deleted
+            ),
+            "files": ["crates/x/src/lib.rs"],
+        }
+        (container / "mutants-safeguard.json").write_text(
+            json.dumps(selection), encoding="utf-8"
+        )
+
+    def test_a_safeguard_partition_is_proved(self) -> None:
+        for index in range(4):
+            container = self.shard(index, shard_names(8, index, 4), 8, 4)
+            self.safeguard(container, index, 8, 4)
+        summary = reports.validate_partition(4, self.root)
+        self.assertEqual(
+            summary,
+            "4 shards, 8 mutants, 0 missed, 0 timeouts; "
+            "safeguard 4 shards, 8 mutants",
+        )
+
+    def test_a_missing_safeguard_shard_is_refused(self) -> None:
+        for index in range(4):
+            container = self.shard(index, shard_names(8, index, 4), 8, 4)
+            if index != 2:
+                self.safeguard(container, index, 8, 4)
+        with self.assertRaisesRegex(ValueError, "has 3 safeguards, not 4"):
+            reports.validate_partition(4, self.root)
+
     def test_a_shard_directory_without_its_selection_is_refused(self) -> None:
         container = self.root / "reports-empty" / "container"
         container.mkdir(parents=True)
@@ -892,6 +1017,7 @@ class WrapperTests(unittest.TestCase):
             "GIT",
             "LIMIT_SECS",
             "SHARD",
+            "blob",
         )
         saved = {name: getattr(cargo, name) for name in names}
         environment = {
@@ -927,6 +1053,19 @@ class WrapperTests(unittest.TestCase):
     def selection(self) -> dict:
         path = self.root / "reports" / "mutants-selection.json"
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def safeguard_selection(self) -> dict:
+        path = self.root / "reports" / "mutants-safeguard.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def deleted(self, file: str, old: str, new: str | None = None) -> None:
+        """A changed file that lost the tests `old` held."""
+        cargo.changed_files = lambda: [file]
+        cargo.blob = lambda base, path: old if path == file else None
+        if new is not None:
+            path = self.root / file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(new, encoding="utf-8")
 
     def script(self, name: str, body: str) -> str:
         path = self.root / name
@@ -1026,6 +1165,135 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(selection["total"], 4)
         self.assertEqual(selection["diff_selected"], 4)
         self.assertEqual(selection["selected"], ["b"])
+
+    def test_a_deleted_inline_test_is_still_mutated(self) -> None:
+        file = "crates/x/src/lib.rs"
+        old = "#[test]\nfn gone() {\n    assert!(true);\n}\n"
+        calls = []
+
+        def show(base: str, path: str) -> str | None:
+            calls.append((base, path))
+            return old
+
+        cargo.changed_files = lambda: [file]
+        cargo.blob = show
+        path = self.root / file
+        path.parent.mkdir(parents=True)
+        path.write_text("pub fn kept() {}\n", encoding="utf-8")
+
+        def listed(args: list[str]) -> list:
+            return [{"name": "m"}] if "--file" in args else [{"name": "d"}]
+
+        cargo.listed = listed
+        runs = cargo.arguments(["mutants", "--in-diff", "d"])
+        output = str(self.root / "reports")
+        self.assertEqual(runs[0], ["mutants", "--in-diff", "d", "--output", output])
+        self.assertEqual(
+            runs[1],
+            [
+                "mutants",
+                "--file",
+                file,
+                "--output",
+                str(self.root / "reports" / "mutants-safeguard"),
+            ],
+        )
+        self.assertEqual(calls, [("abc", file)])
+        selection = self.safeguard_selection()
+        self.assertEqual(selection["mode"], "safeguard")
+        self.assertEqual(selection["deleted"], [f"{file}::test:gone"])
+        self.assertEqual(selection["files"], [file])
+        self.assertEqual(selection["total"], 1)
+        self.assertEqual(selection["selected"], ["m"])
+
+    def test_a_deleted_test_file_covers_its_crate_sources(self) -> None:
+        file = "crates/x/tests/it.rs"
+        sources = ["crates/x/src/lib.rs", "crates/x/src/nested/mod.rs"]
+        for name in ("lib.rs", "nested/mod.rs"):
+            path = self.root / "crates/x/src" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        self.deleted(file, "#[test]\nfn gone() {}\n")
+
+        def listed(args: list[str]) -> list:
+            return [{"name": "m"}] if "--file" in args else [{"name": "d"}]
+
+        cargo.listed = listed
+        runs = cargo.arguments(["mutants", "--in-diff", "d"])
+        self.assertEqual(
+            runs[1],
+            [
+                "mutants",
+                "--file",
+                "crates/x/src/lib.rs",
+                "--file",
+                "crates/x/src/nested/mod.rs",
+                "--output",
+                str(self.root / "reports" / "mutants-safeguard"),
+            ],
+        )
+        self.assertEqual(self.safeguard_selection()["files"], sources)
+
+    def test_kept_tests_need_no_safeguard(self) -> None:
+        file = "crates/x/src/lib.rs"
+        text = "#[test]\nfn kept() {}\n"
+        self.deleted(file, text, text)
+        cargo.listed = lambda args: [{"name": "d"}]
+        runs = cargo.arguments(["mutants", "--in-diff", "d"])
+        self.assertEqual(len(runs), 1)
+        self.assertFalse((self.root / "reports" / "mutants-safeguard.json").exists())
+
+    def test_a_deleted_test_and_shard_reach_both_runs(self) -> None:
+        cargo.SHARD = "1/4"
+        file = "crates/x/src/lib.rs"
+        self.deleted(file, "#[test]\nfn gone() {}\n", "")
+        whole = [{"name": name} for name in "abcd"]
+        sliced = [{"name": "b"}]
+        guard_whole = [{"name": f"g{index}"} for index in range(8)]
+        guard_sliced = guard_whole[2:4]
+
+        def listed(args: list[str]) -> list:
+            if "--file" in args:
+                return guard_sliced if "--shard" in args else guard_whole
+            return sliced if "--shard" in args else whole
+
+        cargo.listed = listed
+        runs = cargo.arguments(["mutants", "--in-diff", "d"])
+        self.assertEqual(runs[0].count("--shard"), 1)
+        self.assertEqual(runs[1].count("--shard"), 1)
+        self.assertIn("1/4", runs[0])
+        self.assertIn("1/4", runs[1])
+        selection = self.selection()
+        self.assertEqual(selection["shard"], "1/4")
+        self.assertEqual(selection["total"], 4)
+        self.assertEqual(selection["selected"], ["b"])
+        guard = self.safeguard_selection()
+        self.assertEqual(guard["shard"], "1/4")
+        self.assertEqual(guard["total"], 8)
+        self.assertEqual(guard["selected"], ["g2", "g3"])
+
+    def test_deleted_tests_without_a_production_file_are_refused(self) -> None:
+        self.deleted("crates/x/tests/it.rs", "#[test]\nfn gone() {}\n")
+        cargo.listed = lambda args: [{"name": "d"}]
+        with self.assertRaisesRegex(ValueError, "cover no production file"):
+            cargo.arguments(["mutants", "--in-diff", "d"])
+
+    def test_more_than_64_covered_files_is_refused(self) -> None:
+        self.deleted("crates/x/tests/it.rs", "#[test]\nfn gone() {}\n")
+        cargo.listed = lambda args: [{"name": "d"}]
+        for index in range(65):
+            path = self.root / "crates/x/src" / f"file{index}.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "more than 64"):
+            cargo.arguments(["mutants", "--in-diff", "d"])
+
+    def test_deleted_tests_covering_no_mutant_are_refused(self) -> None:
+        file = "crates/x/src/lib.rs"
+        self.deleted(file, "#[test]\nfn gone() {}\n", "")
+        cargo.listed = lambda args: [] if "--file" in args else [{"name": "d"}]
+        with self.assertRaisesRegex(ValueError, "cover no mutant there"):
+            cargo.arguments(["mutants", "--in-diff", "d"])
 
     def test_an_empty_diff_mutates_the_canary_and_says_why(self) -> None:
         self.canary()

@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,12 @@ REPORTS = Path("/reports")
 LIMIT_SECS = 3600
 # The runner sets this to "k/n" for one shard of a mutants gate.
 SHARD = os.environ.get("ATELIER_SHARD", "")
+# One diff's deleted tests may cover this many production files before the
+# change is too wide for one safeguard run: split the change instead.
+MAX_SAFEGUARD_FILES = 64
+# A test attribute and the first function line after it, for the textual scan.
+ATTRIBUTE = re.compile(r"^\s*#\[(test|kani::proof)\b")
+FUNCTION = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
 
 
 def options(args: list[str], *extra: str) -> list[str]:
@@ -102,6 +109,13 @@ def shard_options(args: list[str], shard: tuple[int, int] | None) -> list[str]:
 
     k, n = shard
     return options(args, "--shard", f"{k}/{n}")
+
+
+def file_options(args: list[str], files: list[str]) -> list[str]:
+    """`args` with one `--file` per path; cargo-mutants repeats the option."""
+    for file in files:
+        args = options(args, "--file", file)
+    return args
 
 
 def provenance(shard: tuple[int, int] | None) -> dict:
@@ -199,6 +213,136 @@ def configured(
     return run, selection
 
 
+def blob(base: str, file: str) -> str | None:
+    """`file`'s text at `base`, or None when that commit does not hold it."""
+    try:
+        output = subprocess.run(
+            [GIT, "show", f"{base}:{file}"],
+            check=True,
+            capture_output=True,
+            timeout=LIMIT_SECS,
+        ).stdout
+    except subprocess.CalledProcessError:
+        return None
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"git show {base}:{file} ran past {LIMIT_SECS}s") from None
+    return output.decode("utf-8")
+
+
+def test_names(text: str) -> set[str]:
+    """The `#[test]` and `#[kani::proof]` names `text` declares.
+
+    This is a conservative textual scan, not a Rust parser: an attribute
+    claims the first later `fn` line, so a deleted test is recognised
+    without compiling the change, and over-reporting one only adds work.
+    """
+    names = set()
+    attribute = None
+    for line in text.splitlines():
+        found = FUNCTION.match(line)
+        if attribute is not None and found is not None:
+            names.add(f"{attribute}:{found.group(1)}")
+            attribute = None
+        marker = ATTRIBUTE.match(line)
+        if marker is not None:
+            attribute = marker.group(1)
+    return names
+
+
+def deleted_tests(base: str, file: str) -> list[str]:
+    """The tests `file` held at `base` and no longer holds."""
+    old = blob(base, file)
+    if old is None:
+        return []
+    path = Path(file)
+    new = path.read_text(encoding="utf-8") if path.is_file() else ""
+    return sorted(test_names(old) - test_names(new))
+
+
+def deleted_by_file(base: str, files: list[str]) -> dict[str, list[str]]:
+    """The tests each changed Rust source file lost since `base`."""
+    deleted = {}
+    for file in files:
+        if not file.startswith(("crates/", "plugins/")) or not file.endswith(".rs"):
+            continue
+        names = deleted_tests(base, file)
+        if names:
+            deleted[file] = names
+    return deleted
+
+
+def covered_files(file: str) -> list[str]:
+    """The production files a changed source or test file's tests covered."""
+    parts = Path(file).parts
+    if len(parts) < 4 or parts[0] not in ("crates", "plugins"):
+        return []
+    crate, kind, path = Path(*parts[:2]), parts[2], Path(file)
+    if kind == "src":
+        if path.is_file():
+            return [file]
+        return sorted(str(sibling) for sibling in path.parent.glob("*.rs"))
+    if kind == "tests":
+        return sorted(str(name) for name in (crate / "src").rglob("*.rs"))
+    return []
+
+
+def safeguard_targets(deleted: dict[str, list[str]]) -> list[str]:
+    """The existing production files the deleted tests covered, at most 64."""
+    files = sorted({name for file in deleted for name in covered_files(file)})
+    if not files:
+        raise ValueError(
+            f"the deleted tests in {next(iter(deleted))} cover no production file"
+        )
+    if len(files) > MAX_SAFEGUARD_FILES:
+        raise ValueError(
+            f"the deleted tests cover {len(files)} production files, "
+            f"more than {MAX_SAFEGUARD_FILES}: split the change"
+        )
+    return files
+
+
+def safeguard(
+    args: list[str], files: list[str], shard: tuple[int, int] | None
+) -> list[str] | None:
+    """Mutate the production files whose deleted tests this diff removed.
+
+    A deleted test cannot fail, so the diff's own selection no longer proves
+    the code it used to; those production files are mutated instead.
+    """
+    deleted = deleted_by_file(os.environ["ATELIER_BASE"], files)
+    if not deleted:
+        return None
+    targets = safeguard_targets(deleted)
+    rest = without_diff(args)
+    assert rest is not None, "a safeguard comes from a diff run"
+    whole = listed(file_options(rest, targets))
+
+    if not whole:
+        joined = ", ".join(targets)
+        raise ValueError(
+            f"the deleted tests in {joined} cover no mutant there; "
+            "restore them or name the equivalents in .cargo/mutants.toml"
+        )
+
+    run = shard_options(rest, shard)
+    listing = file_options(run, targets)
+    mutants = whole if shard is None else listed(listing)
+    selection = {
+        "mode": "safeguard",
+        **provenance(shard),
+        "total": len(whole),
+        "selected": sorted(mutant.get("name") for mutant in mutants),
+        "deleted": sorted(
+            f"{file}::{name}" for file, names in deleted.items() for name in names
+        ),
+        "files": targets,
+    }
+    path = REPORTS / "mutants-safeguard.json"
+    path.write_text(json.dumps(selection), encoding="utf-8")
+    print(f"mutants safeguard: {json.dumps(selection)}", file=sys.stderr)
+    return options(listing, "--output", str(REPORTS / "mutants-safeguard"))
+
+
 def mutants(args: list[str]) -> list[list[str]]:
     """Record which mutants the run tests, then return the run to make."""
     shard = parse_shard(SHARD)
@@ -210,7 +354,16 @@ def mutants(args: list[str]) -> list[list[str]]:
 
     (REPORTS / "mutants-selection.json").write_text(json.dumps(selection), encoding="utf-8")
     print(f"mutants selection: {json.dumps(selection)}", file=sys.stderr)
-    return [options(run, "--output", str(REPORTS))]
+    runs = [options(run, "--output", str(REPORTS))]
+    files = selection.get("changed_files")
+
+    if without_diff(args) is not None and files is not None:
+        guard = safeguard(args, files, shard)
+
+        if guard is not None:
+            runs.append(guard)
+
+    return runs
 
 
 def arguments(args: list[str]) -> list[list[str]]:
