@@ -151,7 +151,7 @@ with `PROPERTY` is one of the things this experiment exists to find out.
 
 ## Result
 
-The run of `.github/workflows/tla.yml` on this head (run 44227675955):
+A run of `.github/workflows/tla.yml` (run 44227675955) counted:
 
 | What | Checker | Verdict | Generated | Distinct | Wall clock |
 | --- | --- | --- | --- | --- | --- |
@@ -166,6 +166,9 @@ The two agree everywhere: the same verdict, the same states generated and
 distinct, and the same search depth, 35 for the safe graph and 4 for the
 broken one. everystate checks `PROPERTY`, fairness included, and its answer
 is TLC's.
+
+The counts repeat exactly from run to run; the times move by a few hundred
+milliseconds with the runner.
 
 The counterexample is four states and names no flag: the initial state, with
 no folder; `Spawning(2)`, where number 2 leads a group and the folder holds
