@@ -16,7 +16,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use atelier_command::{Signal, signal_group};
 use atelier_core::{Outcome, PluginError, Settings};
@@ -30,16 +31,27 @@ use crate::log::log;
 /// group lasts as long as the command does. Its first act publishes its own
 /// identity, before it runs anything: a daemon that dies between the spawn
 /// and its own record then leaves a folder a later poll can check and
-/// signal, rather than a group nothing can name. The status file is renamed
-/// into place, so a poll never reads it half written.
+/// signal, rather than a group nothing can name. It exits 97, without running
+/// the command, when it cannot publish: a start that loses its record has
+/// nothing left to run. The write is not flushed to the disk the way the
+/// daemon's is, so a power loss in that moment can leave a record the check
+/// reads as invalid, which fails closed. The status file is renamed into
+/// place, so a poll never reads it half written.
 const SCRIPT: &str = r#"here=$PWD
 leader=$$
 case $(uname -s) in
     Linux) start=$(sed 's/.*[)] //' "/proc/$leader/stat" | awk '{ print $20 }') ;;
     *) start=$(LC_ALL=C TZ=UTC0 /bin/ps -o lstart= -o pgid= -o stat= -p "$leader" | awk '{ print $1, $2, $3, $4, $5 }') ;;
 esac
-printf 'atelier-command-identity 1\nleader %s\nboot %s\nstart %s\n' "$leader" "$ATELIER_BOOT" "$start" > identity.tmp
-mv identity.tmp identity
+if [ -z "$start" ] || [ -z "$ATELIER_BOOT" ]; then
+    exit 97
+fi
+if ! printf 'atelier-command-identity 1\nleader %s\nboot %s\nstart %s\n' "$leader" "$ATELIER_BOOT" "$start" > identity.tmp; then
+    exit 97
+fi
+if ! mv identity.tmp identity; then
+    exit 97
+fi
 ( cd "$2" && exec sh -c "$1" ) < /dev/null > output 2>&1
 echo $? > "$here/exit.tmp"
 mv "$here/exit.tmp" "$here/exit"
@@ -144,7 +156,7 @@ pub fn start(
         failed("starting a command in", error)
     })?;
     let leader = child.id();
-    let recorded = Identity::of(leader).and_then(|identity| publish(folder, &identity.render()));
+    let recorded = Identity::of(leader).and_then(|identity| confirm(folder, &identity, &mut child));
 
     if let Err(why) = recorded {
         abandon(folder, &mut child);
@@ -483,6 +495,44 @@ fn record(folder: &Path) -> Result<Identity, Unrecorded> {
     Identity::parse(&text).map_err(Unrecorded::Invalid)
 }
 
+/// How many times a start looks for the leader's own record before it gives
+/// up, and how long it waits between looks. The leader's first act, so only a
+/// leader that died or hung takes the whole of it.
+const PUBLISH_TRIES: u32 = 50;
+
+/// How long a start waits between those looks.
+const PUBLISH_TICK: Duration = Duration::from_millis(100);
+
+/// Waits for the leader's own record, and compares it with the daemon's
+/// reading of the same process. A record that differs is replaced by the
+/// daemon's, written while it still holds the child: a platform that reports
+/// a start identity differently then costs the crash case its record, not a
+/// signal to the wrong group.
+///
+/// # Errors
+///
+/// The leader stopped before it published, it published nothing before the
+/// last look, or the folder cannot be written.
+fn confirm(folder: &Path, identity: &Identity, child: &mut Child) -> Result<(), String> {
+    for _ in 0..PUBLISH_TRIES {
+        if let Ok(published) = record(folder) {
+            return if published == *identity {
+                Ok(())
+            } else {
+                publish(folder, &identity.render())
+            };
+        }
+
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return Err("the leader stopped before it published its identity".into());
+        }
+
+        thread::sleep(PUBLISH_TICK);
+    }
+
+    Err("the leader published no identity in time".into())
+}
+
 /// The daemon's own temporary record. The leader writes `identity.tmp`
 /// before it runs anything, so the daemon writes a different name and the
 /// two cannot tear each other's record.
@@ -625,6 +675,8 @@ fn now() -> u64 {
 }
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -996,7 +1048,10 @@ mod tests {
         let group = u64::from(leader);
         stop(&folder).unwrap();
 
+        // The leader is a zombie until this test reaps it, and a zombie still
+        // answers a probe of its group, so every look reaps it first.
         while alive(group) {
+            let _ = child.try_wait();
             assert!(
                 begun.elapsed() < Duration::from_secs(10),
                 "the group outlived the stop"
@@ -1004,7 +1059,7 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
 
-        let _ = child.wait();
+        let _ = child.try_wait();
     }
 
     /// The folder says which boot a start is on before it spawns, so a start
@@ -1428,5 +1483,158 @@ mod tests {
         }
 
         assert!(!scratch.folder().exists());
+    }
+
+    /// A record that disagrees with the daemon's reading is replaced by it:
+    /// the daemon holds the child, so its reading is the one to keep.
+    #[test]
+    fn the_daemons_record_replaces_a_leaders_that_differs() {
+        let scratch = Scratch::new("confirm-differs");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+
+        let leaders = Identity {
+            leader: 4242,
+            boot: "boot".into(),
+            start: "1".into(),
+        };
+        let daemons = Identity {
+            leader: 4242,
+            boot: "boot".into(),
+            start: "2".into(),
+        };
+        fs::write(folder.join("identity"), leaders.render()).unwrap();
+
+        confirm(&folder, &daemons, &mut idle_child()).unwrap();
+
+        assert_eq!(record(&folder).unwrap(), daemons);
+    }
+
+    /// A record that agrees is left alone: the file the leader published is
+    /// the one the folder keeps.
+    #[test]
+    fn the_daemons_record_leaves_a_leaders_that_agrees() {
+        let scratch = Scratch::new("confirm-agrees");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+
+        let identity = Identity {
+            leader: 4242,
+            boot: "boot".into(),
+            start: "1".into(),
+        };
+        fs::write(folder.join("identity"), identity.render()).unwrap();
+        let before = fs::metadata(folder.join("identity")).unwrap().ino();
+
+        confirm(&folder, &identity, &mut idle_child()).unwrap();
+
+        assert_eq!(fs::metadata(folder.join("identity")).unwrap().ino(), before);
+    }
+
+    /// A leader that stays alive and publishes nothing fails the start at the
+    /// last look, rather than waiting for ever.
+    #[test]
+    fn a_leader_that_publishes_nothing_fails_the_start() {
+        let scratch = Scratch::new("confirm-silent");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        let mut child = sleeping_child();
+
+        let identity = Identity::of(child.id()).unwrap();
+        let failed = confirm(&folder, &identity, &mut child).unwrap_err();
+
+        assert_eq!(failed, "the leader published no identity in time");
+        kill_group(u64::from(child.id()));
+        let _ = child.try_wait();
+    }
+
+    /// A leader that exits before it publishes fails the start at once.
+    #[test]
+    fn a_leader_that_stops_before_publishing_fails_the_start() {
+        let scratch = Scratch::new("confirm-stopped");
+        let folder = scratch.folder();
+        fs::create_dir_all(&folder).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 97"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+
+        let identity = Identity::of(child.id()).unwrap();
+        let failed = confirm(&folder, &identity, &mut child).unwrap_err();
+
+        assert_eq!(
+            failed,
+            "the leader stopped before it published its identity"
+        );
+    }
+
+    /// A leader whose prologue cannot publish exits without running the
+    /// command, so a start that loses its record runs nothing.
+    #[test]
+    fn a_leader_whose_prologue_fails_runs_no_command() {
+        let scratch = Scratch::new("prologue-fails");
+        let folder = scratch.folder();
+        let ran = scratch.worktree().join("ran");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("started"), now().to_string()).unwrap();
+        fs::write(
+            folder.join("worktree"),
+            scratch.worktree().display().to_string(),
+        )
+        .unwrap();
+
+        // Nothing can be written beside the folder, so no record can be.
+        let mut permissions = fs::metadata(&folder).unwrap().permissions();
+        permissions.set_mode(0o500);
+        fs::set_permissions(&folder, permissions).unwrap();
+
+        let mut child = spawn(
+            &folder,
+            &scratch.worktree(),
+            "v2",
+            &format!("echo ran > {}", ran.display()),
+            &boot().unwrap(),
+        )
+        .unwrap();
+        let status = child.wait().unwrap();
+
+        assert!(!status.success());
+        assert!(!ran.exists());
+
+        let mut permissions = fs::metadata(&folder).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&folder, permissions).unwrap();
+    }
+
+    /// A child in a group of its own that is already gone, for the checks
+    /// that never talk to it.
+    fn idle_child() -> Child {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let _ = child.wait();
+
+        child
+    }
+
+    /// A child in a group of its own that stays alive and publishes nothing.
+    fn sleeping_child() -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap()
     }
 }

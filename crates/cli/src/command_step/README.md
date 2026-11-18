@@ -62,23 +62,30 @@ and stays alive until the command's top level ends, then writes `exit`. The
 daemon writes `starting`, the boot the start is on, then `started` and
 `worktree`, and spawns that shell. The shell's first act publishes its own
 identity, before it runs anything: it writes `identity.tmp`, renames it to
-`identity`, and only then runs the command. The record holds the leader's
-pid, which is the group's, the boot it runs on and the leader's own start
-identity. The daemon then writes its own reading of that record, under the
-temporary name `identity.atelier` so neither writer can tear the other's,
-and a reaper thread waits on the leader, so it is reaped once it ends; if
-that thread cannot start, the leader stays a zombie until the daemon exits,
-and the identity check reads a zombie as gone.
+`identity`, and only then runs the command. A prologue that cannot read the
+start identity or write the record exits 97 there, so a start that loses its
+record runs nothing at all. The record holds the leader's pid, which is the
+group's, the boot it runs on and the leader's own start identity. The start
+then waits for that record and compares it with its own reading of the same
+process: it writes its own reading over a record that differs, under the
+temporary name `identity.atelier` so neither writer can tear the other's, and
+it ends the start, failing transiently, when the leader published nothing or
+stopped before it did. A reaper thread waits on the leader, so it is reaped
+once it ends; if that thread cannot start, the leader stays a zombie until the
+daemon exits, and the identity check reads a zombie as gone.
 
 The leader publishes before the command can run, so a daemon that dies at any
 point of a start leaves a folder a later poll can act on. A crash after the
 spawn leaves the leader's record, and the next poll checks it and signals the
 group as it would any other; a crash before the spawn leaves `starting`,
-`started` and `worktree` with no process at all. What remains is a folder an
-older atelier left, whose identity was never published: it holds `started`
-and `worktree`, and perhaps `identity.tmp`, without `identity`. `observe`
-settles such a step failed with a reason that says it started but its
-identity was never recorded. The reason ends
+`started` and `worktree` with no process at all. The leader's own write is
+not flushed to the disk the way the daemon's is, so a power loss in that
+moment can leave a record the check reads as invalid, and an invalid record
+sends no signal. What remains is a folder an older atelier left, whose
+identity was never published: it holds `started` and `worktree`, and perhaps
+`identity.tmp`, without `identity`. `observe` settles such a step failed with
+a reason that says it started but its identity was never recorded. The reason
+ends
 `; atelier sent no signal, and the command may still be running in <worktree>`,
 or `in its worktree` when no worktree is recorded; `stop` sends nothing, and
 its log line ends the same way, logged once for that folder and reason

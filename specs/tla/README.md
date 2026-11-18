@@ -25,7 +25,7 @@ what the design's two windows cost.
 | `CommandStopClearBroken.cfg` | The same bounds, for the first broken variant |
 | `CommandStopClearLoose.tla` | The protocol with `ClearingUnrecorded` added |
 | `CommandStopClearLoose.cfg` | The same bounds, for the second broken variant |
-| `CommandStopClearCrash.tla` | The protocol with `DaemonCrashing` added |
+| `CommandStopClearCrash.tla` | The order atelier ran before the leader published, where only the daemon wrote the record |
 | `CommandStopClearCrash.cfg` | The same bounds, for the third broken variant |
 | `Dockerfile` | TLC and everystate, pinned by version and checksum, installed only in CI |
 | `check.sh` | Runs both checkers over the five configurations, and compares them |
@@ -69,11 +69,12 @@ command, which is `ClearingUnrecorded` in `CommandStopClearLoose.tla`.
 
 | Action | The call in the code |
 | --- | --- |
-| `Spawning(p)` | `start`'s folder, `started`, `worktree` and spawn |
-| `Publishing` | `Identity::of` and `publish` |
+| `Spawning(p)` | `start`'s folder, `starting`, `started`, `worktree` and spawn, and the leader's own `publish` |
+| `Confirming` | The daemon's own reading of the record, and the reaper |
+| `Publishing` | The daemon's publish in the old order the third variant keeps |
 | `Abandoning` | `abandon`, when the identity cannot be recorded |
 | `SpawnFailing` | A start that cannot spawn, and the folder it removes |
-| `DaemonCrashing` | A crash between the spawn and the publication |
+| `DaemonCrashing` | A crash after the spawn, which the leader's own record survives |
 | `Ending(p)` | The shell writing `exit` once the top level ends |
 | `LeaderExiting(p)` | The leader exiting; `check` reads a zombie as gone |
 | `LeaderVanishing(p)` | A leader ended by something else, which writes no `exit` |
@@ -117,23 +118,22 @@ or a number another process took.
 
 The commands inside a group are not modelled, so a signalled group leaves
 nothing behind here, and neither does a descendant that creates its own
-group. Two windows are left out, and both are residuals of the design rather
-than of the model:
+group.
 
-- **Between the check and the kill.** Reading the record and signalling the
-  group it names are one action here, as they are one call, so the moment in
-  which the leader can exit and its number be reused is not checked. A
-  fourth variant that splits the two would fail `NoUnconfirmedSignal`.
-- **Between the spawn and the publication.** A daemon that dies here leaves
-  the command running, the folder holding `started` and `worktree` with no
-  number, and no later poll able to signal that group: atelier keeps the
-  folder, sends nothing, and reports the worktree, so the run waits at that
-  step until a person ends it. That orphans the group, so the good
-  specification leaves `DaemonCrashing` out of `Next`, and
-  `CommandStopClearCrash.tla` is the variant that adds it. Both checkers
-  report the violation in three states. Until the spawn and the publication
-  are ordered so a crash cannot land between them, this is the design's
-  residual, and #72 carries a draft issue for it.
+The crash window is modelled and closed. The leader publishes its own identity
+as its first act, before it runs anything, so `Spawning` leaves the folder
+naming the group and `DaemonCrashing` is part of the good `Next`: a daemon
+that dies after the spawn loses its handle, and the folder still names the
+group. `CommandStopClearCrash.tla` keeps the order atelier ran before that,
+where only the daemon wrote the record, and there the same crash fails
+`NoOrphanedLeader` in three states.
+
+Two things are left out. The good specification takes the record as written: a
+filesystem that cannot write it makes a start kill the command it spawned and
+fail, which is the code's path and not the model's. And the moment between the
+check and the kill is one action here, as it is one call, so a leader that
+exits and has its number reused in that instant is not checked: a variant that
+split the two would fail `NoUnconfirmedSignal`, and that is the follow-up.
 
 A folder whose record cannot name a leader is never emptied, and the start
 over it fails transiently for good. `Init` chooses an empty folder or one of
@@ -185,26 +185,28 @@ with `PROPERTY` is one of the things this experiment exists to find out.
 
 ## Result
 
-A run of `.github/workflows/tla.yml` (run 44239959847, the commit whose spec
+A run of `.github/workflows/tla.yml` (run 44268317636, the commit whose spec
 files these are) counted:
 
 | What | Checker | Verdict | Generated | Distinct | Wall clock |
 | --- | --- | --- | --- | --- | --- |
-| Invariants | TLC | passed, exit 0 | 517,722 | 188,376 | 3.6 s |
-| Invariants | everystate | passed, exit 0 | 517,722 | 188,376 | 1.5 s |
-| No fresh check | TLC | violated, exit 12 | 173 | 111 | 857 ms |
-| No fresh check | everystate | violated, exit 12 | 173 | 111 | 5 ms |
-| Record it cannot act on | TLC | violated, exit 12 | 25 | 23 | 830 ms |
-| Record it cannot act on | everystate | violated, exit 12 | 25 | 23 | 4 ms |
-| A crash before publishing | TLC | violated, exit 12 | 44 | 42 | 859 ms |
-| A crash before publishing | everystate | violated, exit 12 | 44 | 42 | 5 ms |
-| Liveness | TLC | passed, exit 0 | 517,722 | 188,376 | 13.1 s |
-| Liveness | everystate | passed, exit 0 | 517,722 | 188,376 | 1.6 s |
+| Invariants | TLC | passed, exit 0 | 395,054 | 122,856 | 3.0 s |
+| Invariants | everystate | passed, exit 0 | 395,054 | 122,856 | 1.0 s |
+| No fresh check | TLC | violated, exit 12 | 45 | 38 | 945 ms |
+| No fresh check | everystate | violated, exit 12 | 45 | 38 | 6 ms |
+| Record it cannot act on | TLC | violated, exit 12 | 25 | 21 | 934 ms |
+| Record it cannot act on | everystate | violated, exit 12 | 25 | 21 | 5 ms |
+| The old order | TLC | violated, exit 12 | 41 | 39 | 939 ms |
+| The old order | everystate | violated, exit 12 | 41 | 39 | 5 ms |
+| Liveness | TLC | passed, exit 0 | 395,054 | 122,856 | 12.8 s |
+| Liveness | everystate | passed, exit 0 | 395,054 | 122,856 | 1.3 s |
 
 The two agree everywhere: the same verdict, the same states generated and
-distinct, and the same search depth, 35 for the safe graph, 4, 2 and 3 for
-the three broken variants. everystate checks `PROPERTY`, fairness included,
-and its answer is TLC's.
+distinct, and the same search depth, 40 for the safe graph and 3, 2 and 3 for
+the three broken variants. `DaemonCrashing` is in the good graph and passes:
+a daemon that dies after a start has spawned its command costs nothing,
+because the leader wrote the record before it ran anything. everystate checks
+`PROPERTY`, fairness included, and its answer is TLC's.
 
 The counts repeat exactly from run to run; the times move by a few hundred
 milliseconds with the runner.

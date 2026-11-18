@@ -28,9 +28,9 @@
 \* group leaves nothing behind here, and neither does a descendant that
 \* outlives its leader.
 \*
-\* The good specification also takes the record as written: a filesystem that
-\* cannot write it makes a start kill the command it spawned and fail, which is
-\* not modelled here.
+\* A leader whose prologue cannot publish exits before it runs anything, and
+\* the daemon ends that start: SpawningDenied and Abandoning model it, so a
+\* write that fails leaves no command running.
 \*
 \* One window is left out, and specs/tla/README.md names it as a follow-up:
 \* the one between the check and /bin/kill, because reading the record and
@@ -38,8 +38,9 @@
 \*
 \* The crash window is not left out. The leader publishes its own identity as
 \* its first act, before it runs anything, so the folder names the group from
-\* the moment the process can do anything, and DaemonCrashing is part of the
-\* good specification's Next. CommandStopClearCrash.tla keeps the order
+\* the moment the process can do anything: that is why Spawning may publish in
+\* the same step as it spawns, since nothing can run before the publish.
+\* DaemonCrashing is part of the good specification's Next. CommandStopClearCrash.tla keeps the order
 \* atelier ran before that, where only the daemon wrote the record, and there
 \* the same crash still fails NoOrphanedLeader.
 
@@ -176,6 +177,18 @@ Spawning(p) ==
     /\ exited' = FALSE
     /\ UNCHANGED <<boot, signalled>>
 
+\* The leader's prologue cannot publish, so it exits before it runs the
+\* command: nothing is running, the folder says a start was made, and the
+\* daemon ends it with Abandoning.
+SpawningDenied(p) ==
+    /\ folder = "absent"
+    /\ spawned = 0
+    /\ p \in Pids
+    /\ folder' = "unpublished"
+    /\ spawned' = p
+    /\ UNCHANGED <<boot, proc, start, recPid, recBoot, recStart, exited,
+                   ours, signalled>>
+
 \* The daemon writes its own reading of the record and lets the reaper wait
 \* on the leader. The record is the one the leader published, so this changes
 \* what the daemon holds, not what the folder says.
@@ -222,9 +235,9 @@ Publishing ==
 \* and reaps that child, and removes the folder once the signal was
 \* delivered. When the guard refuses the group or /bin/kill fails, the
 \* child is still killed and reaped, but the folder stays: the group it
-\* names may still run, and the folder is then the only trace of it. The good
-\* specification takes the record as written, so only the third variant reaches
-\* this; a start whose writes fail kills the command it spawned and fails.
+\* names may still run, and the folder is then the only trace of it. A leader
+\* whose prologue could not publish leaves this with nothing in the group, and
+\* the start fails transiently rather than keeping a folder nothing can use.
 Abandoning ==
     /\ folder = "unpublished"
     /\ spawned /= 0
@@ -389,6 +402,7 @@ ClearingUnrecorded ==
 
 Next ==
     \/ \E p \in Pids : Spawning(p)
+    \/ \E p \in Pids : SpawningDenied(p)
     \/ \E p \in Pids : Ending(p)
     \/ \E p \in Pids : LeaderExiting(p)
     \/ \E p \in Pids : LeaderVanishing(p)
@@ -396,6 +410,7 @@ Next ==
     \/ \E p \in Pids : Foreign(p)
     \/ Confirming
     \/ DaemonCrashing
+    \/ Abandoning
     \/ Rebooting
     \/ Stopping
     \/ TimingOut
