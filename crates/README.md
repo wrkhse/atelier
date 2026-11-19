@@ -41,7 +41,8 @@ cargo run --locked -p atelier-cli -- --version
   gate reads and checks it. Development and CI pin stable `1.100.0`.
   The cleanups 1.100 allows are planned in
   [#82](https://github.com/wrkhse/atelier/issues/82).
-- Core has no dependencies and performs no I/O. Concrete tools stay outside it.
+- Core depends only on [rungs](https://github.com/wrkhse/rungs) and performs
+  no I/O. Concrete tools stay outside it.
 - Functions contain at most 70 nonblank, noncomment lines.
 - Failures are values; production paths contain no unwraps, expects or panics.
 - Each thread, queue, resource and external call has a limit and an owner.

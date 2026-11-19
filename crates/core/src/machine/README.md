@@ -35,6 +35,7 @@ let (next, actions) = step(run, Event::Settled { step: 0, outcome: Outcome(0) },
   final, and blocks the run unless a step waits for it.
 - A push restarts a settled step and every step after it that depends on
   it; failed rounds are kept.
+- Requesting a blocked issue again claims it and removes its blocked mark.
 - Done, Blocked and Stopped each interrupt the resident steps, remove the
   working mark and remove the worktree.
 

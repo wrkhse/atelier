@@ -86,7 +86,9 @@ Files: [`crates/core/src/checks/`](../../../crates/core/src/checks/mod.rs).
 Verified by tests with fixed plugins: a file touches the deepest roots that
 hold it, and `docsite/` is not inside `docs`; with no diff every root runs;
 an empty diff runs nothing; `checks` and `skip` narrow a subtree; an
-unknown plugin name is refused. Mutation testing covers the role.
+override applies per changed file, so `checks = []` empties a subtree even
+for a root above it; an unknown plugin name is refused. Mutation testing over
+the diff: 68 mutants, 53 caught, 15 unviable.
 
 ### The `commands` plugin (`plugins/commands`)
 
@@ -107,6 +109,9 @@ cargo mutants --in-diff "$diff"
 Files: [`plugins/commands/`](../../../plugins/commands/README.md), the
 reference for its keys, names and refusals.
 
+Verified by mutation testing over the diff: 35 mutants, 27 caught, 8
+unviable.
+
 ### Running gates (`crates/cli`)
 
 `atelier gates`, `check` and `fix` run in a checkout. The gates come from
@@ -115,6 +120,8 @@ request cannot drop the gate it fails; the roots come from the checkout's own
 tree, so a new root is checked in the pull request that adds it. `check`
 runs the gates the changes since `origin/<base>` touch, committed or not,
 and any failure prints the last 40 lines of its output and exits 1.
+`atelier fix` runs the fixes on the files given, or the staged ones with
+`--staged`, stages them again, and exits 1 when a fix fails.
 
 Files: `crates/cli/src/gates.rs`, `crates/git/src/tree.rs`, and the
 [CLI reference](../../../crates/cli/README.md).
@@ -122,7 +129,8 @@ Files: `crates/cli/src/gates.rs`, `crates/git/src/tree.rs`, and the
 Verified through the real binary, in a checkout whose gates are real shell
 commands: a change under `docs` plans only the `docs` gate, a failing gate
 exits 1 with its output, and a gate added on the branch does not run until it
-is on the base.
+is on the base. Mutation testing over the diff: 63 mutants, 50 caught, 13
+unviable.
 
 ### Fixes before each commit (`crates/git`, `crates/cli`)
 
@@ -162,13 +170,19 @@ jobs:
 ```
 
 `gates.yml` reads `atelier gates --json` into a matrix, with `--diff` on a
-pull request and every root on a push, and runs each gate in its root as its
-own job, named such as `commands/clippy (.)`. A failure reaches the builder
-through sourcefed. How each job is contained, and the reports a gate must
-leave, is in [the CI runner](https://github.com/wrkhse/atelier/tree/main/.github/ci).
+pull request, and against the push's `before` commit on a push to the base; a
+first or forced push runs every root. It runs each gate in its root as its
+own job, named such as `commands/clippy (.)`. The gate job runs with
+`fail-fast: false` and full history (`fetch-depth: 0`), and is skipped when
+the matrix is empty. A failure reaches the builder through sourcefed. How
+each job is contained, and the reports a gate must leave, is in
+[the CI runner](https://github.com/wrkhse/atelier/tree/main/.github/ci).
 
 Files: [`plugins/github/src/ci.rs`](../../../plugins/github/src/ci.rs),
 [`.github/workflows/gates.yml`](../../../.github/workflows/gates.yml).
+
+Verified by `actionlint`, which passes on `gates.yml`, `release.yml` and a
+written `atelier.yml`.
 
 ### atelier checks itself (`.atelier/config.toml`)
 
@@ -176,7 +190,13 @@ atelier lists its 14 gates as commands in
 [`.atelier/config.toml`](../../../.atelier/config.toml), and its CI calls
 `gates.yml` from its own tree with `atelier: source`, so a pull request that
 changes `gates.yml` runs it as changed. The gates themselves come from
-`main`'s config, as for any project.
+`main`'s config, as for any project. In `.`, only `fmt` has a fix, so a
+builder's commit is formatted without waiting on a build.
+
+Verified with the real binary in a copy of atelier whose `main` holds the
+config: `gates` lists the 14 gates, and `fmt`, `readmes`, `prettier`, `ruff`
+and `actionlint` pass; a change under `docs` alone plans only
+`commands/prettier (docs)`.
 
 ## End to end
 
