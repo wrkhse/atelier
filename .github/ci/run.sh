@@ -1,8 +1,7 @@
 #!/bin/bash
 # GitHub-hosted Linux only. Never use this runner on a developer machine.
 set -euo pipefail
-if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux \
-  || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]]; then
+if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]]; then
   echo "run.sh runs only on a GitHub-hosted Linux runner; run checks in CI" >&2
   exit 2
 fi
@@ -23,15 +22,120 @@ output="$reports/container"
 mkdir -p "$output" "$RUNNER_TEMP/atelier"
 
 # Each job stays inside its 90 minutes: plan is selftest + plan, a gate is
-# gate + validate.
+# gate + validate, a partition is validate alone, and the image job builds,
+# pushes and inspects one image.
 case "$MODE" in
   selftest | plan-release) limit=10m ;;
   plan) limit=60m ;;
   gate) limit=75m ;;
+  # A partition only runs the validator, so it takes validation's budget.
+  partition) limit=10m ;;
+  # The image job runs no container; its build is the slowest thing a job does
+  # outside one.
+  image) limit=30m ;;
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
-docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
+# login: authenticate to the registry with this run's token; fails when it
+# cannot, and never fails the step by itself.
+login() {
+  if [[ -z "${GH_TOKEN:-}" || -z "${GITHUB_ACTOR:-}" ]]; then
+    return 1
+  fi
+  printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >&2
+}
+
+# The image job builds and publishes the image every gate pulls. It runs on
+# the runner, outside a container, and is the only mode that makes the image
+# instead of consuming it. A registry that refuses the login or the push is
+# never the run's failure: it prints no digest, and the gates build instead.
+#
+# Layers come from the Actions cache when the workflow names one. FROM is the
+# shared scope only the default branch writes; OWN is this ref's own scope,
+# read and written by the same ref, so a pull request's repeat runs are warm;
+# TO is where this run writes. A cache entry is a build input and never an
+# image, so which layers a run restored cannot change what a gate consumes:
+# the gates still take this run's digest alone.
+if [[ "$MODE" == image ]]; then
+  : "${GATE_IMAGE_REPOSITORY:?registry repository for the gate image}"
+  : "${GATE_IMAGE_TAG:?tag of the gate image for this run}"
+  # Never hand docker anything but a plain ghcr.io repository name.
+  if [[ ! "$GATE_IMAGE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]]; then
+    echo "GATE_IMAGE_REPOSITORY is not a plain ghcr.io name: $GATE_IMAGE_REPOSITORY" >&2
+    exit 2
+  fi
+  if [[ "$GATE_IMAGE_REPOSITORY" == *..* ]]; then
+    echo "GATE_IMAGE_REPOSITORY must not contain ..: $GATE_IMAGE_REPOSITORY" >&2
+    exit 2
+  fi
+  image="$GATE_IMAGE_REPOSITORY:$GATE_IMAGE_TAG"
+  cache=()
+  if [[ -n "${GATE_IMAGE_CACHE_FROM:-}" ]]; then
+    cache+=(--cache-from "$GATE_IMAGE_CACHE_FROM")
+  fi
+  if [[ -n "${GATE_IMAGE_CACHE_OWN:-}" ]]; then
+    cache+=(--cache-from "$GATE_IMAGE_CACHE_OWN")
+  fi
+  if [[ -n "${GATE_IMAGE_CACHE_TO:-}" ]]; then
+    cache+=(--cache-to "$GATE_IMAGE_CACHE_TO")
+  fi
+  # The build alone is timed, so the job log can say what the cache was worth.
+  started=$SECONDS
+  if [[ ${#cache[@]} -gt 0 ]]; then
+    if ! docker buildx version >/dev/null 2>&1; then
+      echo "the image cache needs docker buildx, which this runner lacks" >&2
+      exit 1
+    fi
+    printf 'image cache: from %s; to %s\n' \
+      "${GATE_IMAGE_CACHE_FROM:-none}${GATE_IMAGE_CACHE_OWN:+ and $GATE_IMAGE_CACHE_OWN}" \
+      "${GATE_IMAGE_CACHE_TO:-none}" >&2
+    docker buildx build --build-arg TOOLS=1 --tag "$image" \
+      --file "$support/Dockerfile" --load "${cache[@]}" "$support" >&2
+  else
+    printf 'image cache: none; this run compiles every layer\n' >&2
+    docker build --build-arg TOOLS=1 --tag "$image" \
+      --file "$support/Dockerfile" "$support" >&2
+  fi
+  printf 'image built in %ss\n' "$((SECONDS - started))" >&2
+  reason=
+  if ! login; then
+    reason="no token or login refused"
+  elif ! docker push "$image" >&2; then
+    reason="push refused"
+  fi
+  if [[ -n "$reason" ]]; then
+    printf 'image not shared: %s\n' "$reason" >&2
+    exit 0
+  fi
+  docker image inspect --format '{{index .RepoDigests 0}}' "$image"
+  exit 0
+fi
+
+# gate_image: the one place that supplies the containers' image. The run
+# publishes one image and every gate pulls that digest; when there is none, or
+# this runner cannot pull exactly it, the job builds the image as it always
+# has, so no gate depends on the registry being reachable.
+gate_image() {
+  local reason="no image published" pulled
+  if [[ -n "${GATE_IMAGE:-}" ]]; then
+    if ! login; then
+      reason="no token or login refused"
+    elif ! docker pull "$GATE_IMAGE" >&2; then
+      reason="pull refused"
+    else
+      pulled=$(docker image inspect --format '{{index .RepoDigests 0}}' "$GATE_IMAGE" 2>/dev/null || true)
+      if [[ "$pulled" == "$GATE_IMAGE" ]]; then
+        docker tag "$GATE_IMAGE" atelier-gates
+        summary "image pulled: $GATE_IMAGE"
+        return 0
+      fi
+      reason="digest mismatch"
+    fi
+  fi
+  summary "image not shared: $reason; this job builds it without the pinned tools"
+  docker build --build-arg TOOLS=0 --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
+}
+
 names=()
 trap 'docker rm --force "${names[@]}" >/dev/null 2>&1 || true' EXIT
 
@@ -43,7 +147,8 @@ memory="$(( total > 4096 ? total - 2048 : total / 2 ))m"
 # create NAME NETWORK MOUNT...: no runner home, credentials, command files or
 # container-engine socket. Omitting --pid keeps Docker's private PID
 # namespace. The process limit counts threads: three mutant jobs run rustc
-# and nextest.
+# and nextest. Every mode's variables go to every container; a mode reads only
+# its own, and one the host does not set arrives empty.
 create() {
   local name=$1 network=$2
   shift 2
@@ -56,7 +161,9 @@ create() {
     --pids-limit 4096 --memory "$memory" --memory-swap "$memory" --cpus "$cpus" \
     --network "$network" --ipc private --stop-timeout 10 \
     "${mounts[@]}" \
-    --env MODE --env GATE --env ROOT --env BASE --env FLOOR atelier-gates >/dev/null
+    --env MODE --env GATE --env ROOT --env BASE --env FLOOR \
+    --env ATELIER_SHARD --env ATELIER_MUTANTS_SHARDS --env SHARDS \
+    atelier-gates >/dev/null
   names+=("$name")
   local sources=()
   for mount in "$@"; do
@@ -82,7 +189,7 @@ contained() {
 # output never reaches it unfiltered.
 summary() {
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
-  grep -E '^(\*\*commands/[A-Za-z0-9_.-]+:\*\* |base [0-9a-f]+ is unavailable)' <<< "$1" \
+  grep -E '^(\*\*commands/[A-Za-z0-9_.-]+:\*\* |\*\*partition:\*\* |image (pulled|not shared): |base [0-9a-f]+ is unavailable)' <<< "$1" \
     | cut -b1-500 | head -n 5 | sed 's/$/\n/' >> "$GITHUB_STEP_SUMMARY" || true
 }
 
@@ -91,7 +198,29 @@ start() {
   timeout --signal=TERM --kill-after=30s "$limit" docker start --attach "$1"
 }
 
+# Every mode that starts a container needs the image; the run's published
+# digest is pulled when it is available, and each job builds otherwise. It
+# runs after these definitions because it reports through summary.
+gate_image
+
 id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM"
+
+# A partition judges reports the host downloaded from every shard, in a fresh
+# offline container: the shards cannot change the validator, and nothing is
+# copied back. Its verdict, and its exit status, are the job's whole result.
+if [[ "$MODE" == partition ]]; then
+  # A shard job that died before uploading leaves no artifact, and Docker
+  # refuses a missing bind source; create it so the validator names the gap.
+  mkdir -p "${COLLECTED:?downloaded shard reports}"
+  create "atelier-partition-$id" none \
+    "type=bind,source=${COLLECTED:?downloaded shard reports},target=/reports,readonly"
+  status=0
+  verdict=$(start "atelier-partition-$id") || status=$?
+  echo "$verdict"
+  summary "$verdict"
+  exit "$status"
+fi
+
 create "atelier-$MODE-$id" bridge \
   "type=bind,source=${SOURCE:?checkout},target=/source,readonly" \
   "type=bind,source=$RUNNER_TEMP/atelier,target=/binary,readonly"

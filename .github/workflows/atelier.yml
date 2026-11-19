@@ -7,8 +7,19 @@ on:
   push:
     branches: [main]
 
+# A newer push to the same pull request cancels the run it superseded; a push
+# to main is never cancelled, so every other event gets a group of its own run
+# that can never collide.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('atelier-pr-{0}', github.ref) || format('atelier-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
+  # gates.yml's image job publishes the shared gate image to this repository's
+  # package; every other job there asks for contents: read, and the jobs that
+  # pull the digest also ask for packages: read.
   contents: read
+  packages: write
 
 jobs:
   gates:

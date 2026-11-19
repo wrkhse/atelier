@@ -1,0 +1,85 @@
+# The gate image is one package version per run, so this daily workflow is
+# what bounds the package. It prunes only versions whose every tag matches
+# run-* and that are older than a week; it never deletes by name alone.
+name: gate image
+
+on:
+  schedule:
+    # Off-peak, once a day: an image is consumed within hours of its run.
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Delete run images older than a week
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY_OWNER:?}
+          # The package gates.yml publishes: <repository>-gates, owned by the
+          # repository's owner.
+          package="${GITHUB_REPOSITORY#*/}-gates"
+          endpoint="/orgs/$owner/packages/container/$package/versions"
+          cutoff=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          failed=0
+          url="$endpoint?per_page=100"
+          page=1
+          while [ "$page" -le 20 ]; do
+            reply="$RUNNER_TEMP/versions.reply"
+            headers="$RUNNER_TEMP/versions.headers"
+            body="$RUNNER_TEMP/versions.json"
+            if ! gh api --include "$url" > "$reply"; then
+              echo "::error::cannot list $package versions (page $page)" >&2
+              exit 1
+            fi
+            # A reply is a status line, headers, a blank line, then the JSON
+            # body; the Link header names the next page.
+            tr -d '\r' < "$reply" > "$reply.clean"
+            sed -n '1,/^$/p' "$reply.clean" > "$headers"
+            sed -n '/^$/,$p' "$reply.clean" | sed '1d' > "$body"
+            next=$(sed -nE 's/.*<([^>]+)>; *rel="next".*/\1/p' "$headers" | head -n 1)
+            rows=$(jq -r --arg cutoff "$cutoff" '
+              .[] |
+              [ (.id | tostring),
+                ((.metadata.container.tags // []) | join(",")),
+                .created_at,
+                (if .created_at < $cutoff
+                    and ((.metadata.container.tags // []) | length) > 0
+                    and ((.metadata.container.tags // []) | all(.[]; test("^run-")))
+                 then "yes" else "no" end)
+              ] | @tsv
+            ' "$body") || {
+              echo "::error::cannot read $package versions (page $page)" >&2
+              exit 1
+            }
+            while IFS=$'\t' read -r id tags created delete; do
+              [ -n "$id" ] || continue
+              echo "version $id tags [$tags] created $created"
+              if [ "$delete" = yes ]; then
+                if gh api --method DELETE "$endpoint/$id" >/dev/null; then
+                  echo "deleted version $id"
+                else
+                  echo "::error::cannot delete $package version $id" >&2
+                  failed=1
+                fi
+              fi
+            done <<< "$rows"
+            if [ -z "$next" ]; then
+              break
+            fi
+            if [ "$page" -eq 20 ]; then
+              echo "::error::stopped after 20 pages of $package versions: the pruner cannot prove it listed every version" >&2
+              exit 1
+            fi
+            url="$next"
+            page=$((page + 1))
+          done
+          exit "$failed"

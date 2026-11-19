@@ -42,7 +42,7 @@ atelier check
 flowchart LR
     Config[".atelier/config.toml<br/>from origin/base"] --> Plugins["checks plugins<br/>roots, gates, fixes"]
     Tree["the pull request's tree"] --> Plugins
-    Plugins -- "atelier gates --json --diff" --> Matrix["gates.yml<br/>one job per gate and root"]
+    Plugins -- "atelier gates --json --diff" --> Matrix["gates.yml<br/>one job per gate and root,<br/>or per shard of a gate"]
     Matrix -- "atelier check --gate --root" --> Check["a check on the pull request<br/>commands/clippy (.)"]
     Plugins -- "fixes" --> Hook["each builder commit<br/>atelier fix --staged"]
 ```
@@ -169,20 +169,64 @@ jobs:
       atelier: 0.1.0-rc.8
 ```
 
-`gates.yml` reads `atelier gates --json` into a matrix, with `--diff` on a
-pull request, and against the push's `before` commit on a push to the base; a
-first or forced push runs every root. It runs each gate in its root as its
-own job, named such as `commands/clippy (.)`. The gate job runs with
+`gates.yml` installs atelier from that release, checking its sum, and reads
+`atelier gates --json` into a matrix: on a pull request with
+`--diff <base commit>`, against the push's `before` commit on a push to the
+base, and every root on a first or forced push. It runs
+`atelier check --setup --gate <gate> --root <root>` as one job each, named
+`commands/clippy (.)`, or as one job per shard of a mutants gate, named
+`commands/mutants (.) [1/4]`, so each shows as its own check, and a failure
+reaches the builder through sourcefed. The gate job runs with
 `fail-fast: false` and full history (`fetch-depth: 0`), and is skipped when
-the matrix is empty. A failure reaches the builder through sourcefed. How
-each job is contained, and the reports a gate must leave, is in
+the matrix is empty. With `atelier: source`, it builds atelier from the
+calling repository instead, as atelier's own CI does. How each job is
+contained, and the reports a gate must leave, is in
 [the CI runner](https://github.com/wrkhse/atelier/tree/main/.github/ci).
 
 Files: [`plugins/github/src/ci.rs`](../../../plugins/github/src/ci.rs),
 [`.github/workflows/gates.yml`](../../../.github/workflows/gates.yml).
 
-Verified by `actionlint`, which passes on `gates.yml`, `release.yml` and a
-written `atelier.yml`.
+#### Structure
+
+A forge names the files its CI needs to run a project's gates with one
+release, on pull requests and on pushes to the base. A release build stamps
+its commit through `ATELIER_COMMIT`, which `release.yml` sets; `init`
+writes the forge's files only from a release build, and says why when it
+writes none.
+
+```rust
+pub struct CiFile {
+    pub path: String,
+    pub text: String,
+}
+
+pub trait Forge {
+    fn ci(&self, release: &str, commit: &str, base: &str) -> Vec<CiFile>;
+    …
+}
+```
+
+`gates.yml` has five jobs, `image`, `plan`, `gate`, `gate-tools` and
+`partition`, with `image` building and publishing the one container image
+that `gate-tools` and `partition` pull by digest. `plan` installs atelier
+once, from the release with its `SHA256SUMS` checked or built from source,
+passes it on as an artifact, and writes the matrix, with each mutants gate
+split into one entry per shard. `gate` runs once per entry, without stopping
+the others on a failure; it is skipped when the matrix is empty.
+`gate-tools` is the same job for the gates whose setup installs a tool, and
+it runs them in the image the run published. `partition` runs after the
+gates, also when one failed, and in a fresh offline container proves that
+every shard's report is there and that no mutant is tested twice and none is
+left out. `plan` and `gate` check out the full history without stored credentials,
+since atelier fetches the base branch to read the config.
+
+#### Verification
+
+The github plugin's workflow names the base, the pinned commit and the
+release; `init` from a build with no release commit writes no CI and says
+so; `write_ci` writes each file in its folder. `actionlint` passes on
+`gates.yml`, on `release.yml` and on a written `atelier.yml`. The
+workflow runs for real on atelier's own pull requests and in the end to end.
 
 ### atelier checks itself (`.atelier/config.toml`)
 
@@ -194,9 +238,10 @@ changes `gates.yml` runs it as changed. The gates themselves come from
 builder's commit is formatted without waiting on a build.
 
 Verified with the real binary in a copy of atelier whose `main` holds the
-config: `gates` lists the 14 gates, and `fmt`, `readmes`, `prettier`, `ruff`
-and `actionlint` pass; a change under `docs` alone plans only
-`commands/prettier (docs)`.
+config: `gates` lists the 14 gates, and `fmt`, `readmes`, `prettier`,
+`ruff` and `actionlint` pass; a change under `docs` alone plans only
+`commands/prettier (docs)`. Then on a pull request to atelier, one check
+per gate and root, or per shard of the mutants gate.
 
 ## End to end
 
