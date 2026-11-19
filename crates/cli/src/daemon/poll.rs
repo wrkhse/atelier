@@ -123,6 +123,16 @@ fn tell(repo: &str, report: &Report) {
         );
     }
 
+    for (key, names) in &report.ambiguous {
+        log(
+            repo,
+            &format!(
+                "{key}: carries the trigger marks of {}; atelier starts none until one is left",
+                names.join(", ")
+            ),
+        );
+    }
+
     for (key, error) in &report.failures {
         log(repo, &format!("{key}: {error}"));
     }

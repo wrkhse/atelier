@@ -31,8 +31,9 @@ pub enum On {
 }
 
 /// What a tracker plugin registers: its tracker for one project, built
-/// from that project's settings for it.
-type Make<'a> = dyn Fn(&Settings) -> Result<Box<dyn Tracker + 'a>, SettingsError> + 'a;
+/// from that project's settings for it and its pipelines' names, in the
+/// project's order.
+type Make<'a> = dyn Fn(&Settings, &[&str]) -> Result<Box<dyn Tracker + 'a>, SettingsError> + 'a;
 
 /// Builds a plugin's tracker for one project.
 pub struct MakeTracker<'a>(Box<Make<'a>>);
@@ -41,8 +42,12 @@ impl<'a> MakeTracker<'a> {
     /// # Errors
     ///
     /// A setting the plugin cannot use.
-    pub fn make(&self, settings: &Settings) -> Result<Box<dyn Tracker + 'a>, SettingsError> {
-        (self.0)(settings)
+    pub fn make(
+        &self,
+        settings: &Settings,
+        pipelines: &[&str],
+    ) -> Result<Box<dyn Tracker + 'a>, SettingsError> {
+        (self.0)(settings, pipelines)
     }
 }
 
@@ -111,7 +116,7 @@ impl<'a> Registry<'a> {
     /// Registers how to build this plugin's tracker for a project.
     pub fn tracker(
         &mut self,
-        make: impl Fn(&Settings) -> Result<Box<dyn Tracker + 'a>, SettingsError> + 'a,
+        make: impl Fn(&Settings, &[&str]) -> Result<Box<dyn Tracker + 'a>, SettingsError> + 'a,
     ) {
         self.trackers
             .push((self.naming, MakeTracker(Box::new(make))));

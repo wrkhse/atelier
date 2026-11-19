@@ -25,7 +25,7 @@ pub use pipeline::{
 };
 pub use plugin::{MakeChecks, MakeTracker, MissingPlugin, On, Plugin, Registry, Role};
 pub use poll::{
-    Command, Move, Observation, Plugins, Project, Record, Report, Request, Source, State,
+    Command, Listed, Move, Observation, Plugins, Project, Record, Report, Request, Source, State,
     StepRecord, Watched, act, observe,
 };
 pub use roles::{
@@ -33,7 +33,7 @@ pub use roles::{
     Outcomes, PluginError, Repo, RunContext, Session, Started, Step, Tracker, WorktreeRequest,
     Worktrees,
 };
-pub use seen::{Marks, PullRequest, Rollup, Seen};
+pub use seen::{Marks, PullRequest, Rollup, Seen, Tag};
 pub use settings::{Setting, Settings, SettingsError};
 
 /// The step machine pipelines run on.

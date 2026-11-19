@@ -13,9 +13,9 @@ sequenceDiagram
     participant F as Forge
     participant S as Steps
     participant A as Agent
-    W->>T: issues marked build, issues marked working
+    W->>T: each pipeline's trigger, then the working mark
     W->>F: pull request on each run's branch
-    W->>T: mark working, unmark build
+    W->>T: mark working, unmark the run's trigger
     W->>S: start worktree, observe it: passed
     W->>S: start builder: a session
     W->>T: comment the session and branch
@@ -23,26 +23,47 @@ sequenceDiagram
     W->>A: tell, or interrupt, the resident sessions
 ```
 
-| File         | Holds                                                                |
-| ------------ | -------------------------------------------------------------------- |
-| `project.rs` | `Project` with its pipelines, and `Plugins` with each kind of step   |
-| `request.rs` | Requests for a pass: finish a running resident step, or stop it      |
-| `state.rs`   | `State`, each item's run as a `Record`, and each step's `StepRecord` |
-| `observe.rs` | `observe`: listings with their tags, tracked issues, pull requests   |
-| `act.rs`     | `act`: each run's events, pending actions, the brief, the `Report`   |
+| File         | Holds                                                                   |
+| ------------ | ----------------------------------------------------------------------- |
+| `project.rs` | `Project` with its pipelines, and `Plugins` with each kind of step      |
+| `request.rs` | Requests for a pass: finish a running resident step, or stop it         |
+| `state.rs`   | `State`, each item's run as a `Record`, and each listing's `Listed` key |
+| `trigger.rs` | `triggered`: the pipelines whose trigger an item carries, in order      |
+| `observe.rs` | `observe`: listings with their keys, tracked issues, pull requests      |
+| `act.rs`     | `act`: each run's events, pending actions, the brief, the `Report`      |
 
 ```rust
 let observation = observe(&project, &plugins, &state)?;
 
 let report = act(&observation, &mut state, &project, &plugins, &mut |state| store(state))?;
-// report.moves → [Move { key: github#12, pipeline: "build", from: Running,
+// report.moves → [Move { key: github#12, pipeline: "audit", from: Running,
 //                        to: Running, what: "worktree settled passed" }, …]
+// report.ambiguous → [(github#13, ["build", "audit"])]: two triggers, no run
 ```
 
+- **Triggers.** An item asks for a pipeline with that pipeline's trigger
+  mark, such as `atelier:audit`; the working and blocked marks are
+  atelier's own. A run keeps its own pipeline while it works or has an
+  action pending; otherwise it uses the pipeline the item asks for, then
+  the one it last ran, then the project's first. A run asked for another
+  pipeline starts it with fresh steps, in a new generation.
+- **Ambiguity.** An item carrying two pipelines' triggers at once starts
+  neither: `act` names them in `Report::ambiguous`, in the project's
+  order, and changes no mark. It decides this before a run's events, so an
+  item with the working mark, both triggers and no run is reported, not
+  blocked as one that lost track. A person takes one trigger off, and the
+  next poll starts the other. A working run that gains another trigger
+  runs on. A run that stops while the item still carries another
+  pipeline's trigger starts that pipeline in the same poll, as a done or
+  blocked run does when asked again.
 - **Events.** A claim confirms itself. A running run hears its steps first,
   in order: a running step that settled or failed a round, or a settled
   restart step that runs again. Then it hears its item: closed, or without
   the working mark. A run whose steps differ from its pipeline's blocks.
+- **Blocked comments.** A comment that asks a person to retry a blocked run
+  names the pipeline the run was of, such as `audit`, not the trigger label
+  a project gives that pipeline: a project may rename the label, and the
+  comment asks for the pipeline's trigger mark again.
 - **Resuming.** A move's actions wait in the run's `pending` list, and each
   leaves it once done; a start that made a session leaves its announcement
   in its place. A stop between two actions resumes at the next one; a stop

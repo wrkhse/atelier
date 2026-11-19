@@ -6,6 +6,7 @@ mod pipelines;
 mod recovery;
 mod requests;
 mod sandbox;
+mod triggers;
 
 use std::fs;
 

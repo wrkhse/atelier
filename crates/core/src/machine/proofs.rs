@@ -55,7 +55,7 @@ struct Does {
     close: bool,
     working: bool,
     unworking: bool,
-    unbuild: bool,
+    unrequest: bool,
     blocked: bool,
     remove: bool,
 }
@@ -75,7 +75,7 @@ fn does(actions: &[Action]) -> Does {
             Action::CloseIssue => does.close = true,
             Action::Mark(Mark::Working) => does.working = true,
             Action::Unmark(Mark::Working) => does.unworking = true,
-            Action::Unmark(Mark::Build) => does.unbuild = true,
+            Action::Unmark(Mark::Requested) => does.unrequest = true,
             Action::Mark(Mark::Blocked) => does.blocked = true,
             Action::RemoveWorktree => does.remove = true,
             _ => {}
@@ -165,7 +165,7 @@ fn a_move_outside_rungs_keeps_the_marks_and_the_resident_steps_right() {
     if next.phase == Phase::Claiming && run.phase != Phase::Claiming {
         assert_eq!(event, Event::Requested);
         assert_eq!(next.progress, Progress::default());
-        assert!(does.working && does.unbuild);
+        assert!(does.working && does.unrequest);
     }
 
     if run.phase.is_working() && !next.phase.is_working() {
