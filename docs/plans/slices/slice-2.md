@@ -165,7 +165,7 @@ jobs:
 pull request and every root on a push, and runs each gate in its root as its
 own job, named such as `commands/clippy (.)`. A failure reaches the builder
 through sourcefed. How each job is contained, and the reports a gate must
-leave, is in [the CI runner](../../../.github/ci/README.md).
+leave, is in [the CI runner](https://github.com/wrkhse/atelier/tree/main/.github/ci).
 
 Files: [`plugins/github/src/ci.rs`](../../../plugins/github/src/ci.rs),
 [`.github/workflows/gates.yml`](../../../.github/workflows/gates.yml).

@@ -140,16 +140,16 @@ pull request cannot change how atelier treats it. The
 ## Roadmap
 
 - [ ] Rust gates found by themselves
-  ([#2](https://github.com/wrkhse/atelier/issues/2))
+      ([#2](https://github.com/wrkhse/atelier/issues/2))
 - [ ] TLA+ gates found by themselves
-  ([#3](https://github.com/wrkhse/atelier/issues/3))
+      ([#3](https://github.com/wrkhse/atelier/issues/3))
 - [ ] TypeScript gates found by themselves
-  ([#4](https://github.com/wrkhse/atelier/issues/4))
+      ([#4](https://github.com/wrkhse/atelier/issues/4))
 - [ ] A code map ([#5](https://github.com/wrkhse/atelier/issues/5))
 - [ ] Runs started from sourcefed events
-  ([#42](https://github.com/wrkhse/atelier/issues/42))
+      ([#42](https://github.com/wrkhse/atelier/issues/42))
 - [ ] Pipelines of steps, with `atelier finish` and `atelier stop`, in a
-  release ([#43](https://github.com/wrkhse/atelier/issues/43))
+      release ([#43](https://github.com/wrkhse/atelier/issues/43))
 
 ## More
 

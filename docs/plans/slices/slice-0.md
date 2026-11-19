@@ -35,7 +35,8 @@ toolchain; the [CLI reference](../../../crates/cli/README.md) describes its
 commands.
 
 Verification: native packaging smoke tests run the binary's version and help.
-Pull request gates run in [contained CI](../../../.github/ci/README.md).
+Pull request gates run in
+[contained CI](https://github.com/wrkhse/atelier/tree/main/.github/ci).
 
 ### Candidate and Homebrew service
 
