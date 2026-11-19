@@ -2,13 +2,24 @@
 set -euo pipefail
 
 # Modes: selftest, plan, plan-release and gate run in the gate container;
-# validate runs in a fresh one, offline, with the reports mounted read-only.
+# validate and partition run in a fresh one, offline, with the reports mounted
+# read-only.
 if [[ "$MODE" == validate ]]; then
   floor=()
   if [[ "${FLOOR:-}" == atelier ]]; then
     floor=(--atelier)
   fi
   exec /usr/bin/python3 -I /opt/ci/reports.py "$GATE" /reports "${floor[@]}"
+fi
+
+# A partition needs its caller's shard count. Refuse to start the validator
+# with anything else rather than let it judge a smaller set than was planned.
+if [[ "$MODE" == partition ]]; then
+  if ! [[ "${SHARDS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "partition needs a positive shard count in SHARDS, not '${SHARDS:-}'" >&2
+    exit 2
+  fi
+  exec /usr/bin/python3 -I /opt/ci/reports.py --partition "$SHARDS" /reports
 fi
 
 if [[ "$MODE" == selftest ]]; then
@@ -39,15 +50,26 @@ if [[ -n "${BASE:-}" ]]; then
   diff=(--diff "$BASE")
 fi
 
-if [[ "$MODE" == plan ]]; then
-  cargo build --locked -p atelier-cli >&2
-  /usr/bin/cp target/debug/atelier /reports/atelier
-  target/debug/atelier gates --json "${diff[@]}"
-  exit
-fi
-
-if [[ "$MODE" == plan-release ]]; then
-  /binary/atelier gates --json "${diff[@]}"
+# A plan prints the matrix the host turns into jobs. A sharded gate is
+# expanded here, so each shard is an entry of its own and the host needs no
+# knowledge of how a gate shards.
+if [[ "$MODE" == plan || "$MODE" == plan-release ]]; then
+  if [[ "$MODE" == plan ]]; then
+    cargo build --locked -p atelier-cli >&2
+    /usr/bin/cp target/debug/atelier /reports/atelier
+    matrix=$(target/debug/atelier gates --json "${diff[@]}")
+  else
+    matrix=$(/binary/atelier gates --json "${diff[@]}")
+  fi
+  if [[ -n "${ATELIER_MUTANTS_SHARDS:-}" ]]; then
+    # pipefail makes a refusal from shards.py the pipeline's status, and set -e
+    # stops the step: a malformed expansion never reaches the host as a plan.
+    expanded=$(printf '%s' "$matrix" \
+      | /usr/bin/python3 /opt/ci/shards.py expand "$ATELIER_MUTANTS_SHARDS" /work/.atelier/config.toml)
+    printf '%s\n' "$expanded"
+  else
+    printf '%s\n' "$matrix"
+  fi
   exit
 fi
 
