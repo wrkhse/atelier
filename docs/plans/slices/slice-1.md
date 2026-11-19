@@ -44,11 +44,10 @@ and the worktree on its branch.
 
 The terminal-control capture is the real service and the real issue, with the
 wait for the prompt sped up 2400 times. The GIF is 1200 pixels wide, 47.8
-seconds and 966 KB; it links to the H.264 original, 1600 pixels wide and
-264 KB. Frames from its beginning, middle and end are inspected for private
-data.
+seconds and 966 KB. Frames from its beginning, middle and end are inspected for
+private data.
 
-[![A labelled issue is claimed: labels swapped, the builder's session and branch commented, its worktree on the issue's branch](../../media/slice-1.gif)](../../media/slice-1.mp4)
+![A labelled issue is claimed: labels swapped, the builder's session and branch commented, its worktree on the issue's branch](../../media/slice-1.gif)
 
 ## What it builds
 

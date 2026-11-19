@@ -53,11 +53,10 @@ lists its 14 gates. A table that is not formatted is added under `docs/`, so
 repository's pull request, whose CI is the workflow `atelier init` wrote,
 shows each gate as its own check.
 
-The terminal-control capture is 39.9 seconds, 1600 pixels wide and 156 KB
-as H.264; the GIF is 1200 pixels wide and 775 KB. Frames from its middle and
-end are inspected for private data.
+The terminal-control capture GIF is 39.9 seconds, 1200 pixels wide and 775 KB.
+Frames from its middle and end are inspected for private data.
 
-[![atelier gates lists the gates; check fails on an unformatted docs table and fix fixes it; the fixture's pull request shows each gate as its own check](../../media/slice-2.gif)](../../media/slice-2.mp4)
+![atelier gates lists the gates; check fails on an unformatted docs table and fix fixes it; the fixture's pull request shows each gate as its own check](../../media/slice-2.gif)
 
 ## What it builds
 
