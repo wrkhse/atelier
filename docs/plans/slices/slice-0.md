@@ -30,11 +30,10 @@ The right pane shows the real Homebrew test executing that installed binary;
 the shell reports exit status 0. Slice 0 has no daemon or model session.
 
 The terminal-control capture runs in a scratch repository with isolated XDG
-configuration and state. The GIF is 1600 pixels wide, 10.4 seconds and 162 KB;
-it links to the H.264 original. Frames from its beginning and final result are
-inspected for private data.
+configuration and state. The GIF is 1600 pixels wide, 10.4 seconds and 162 KB.
+Frames from its beginning and final result are inspected for private data.
 
-[![The installed candidate prints its version and help; brew test passes](../../media/slice-0.gif)](../../media/slice-0.mp4)
+![The installed candidate prints its version and help; brew test passes](../../media/slice-0.gif)
 
 ## What it builds
 
@@ -152,7 +151,7 @@ tap job pass and the owner's local install reports the candidate version.
   `loaded: false`. Its command is `atelier daemon`, with logs in Homebrew's
   `var/log/atelier.log`.
 - Eight Mermaid fences across the changed Markdown pages render in GitHub's
-  actual preview. The recording's codec, width and size are checked by ffprobe.
+  actual preview. The recording's format, width and size are checked by ffprobe.
 
 Local Homebrew's RuboCop plugin emits an upstream obsolete-configuration warning
 about `IgnoredPatterns`. No formula offense is reported, and no warning is
