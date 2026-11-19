@@ -17,7 +17,8 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,9 @@ const TICK: Duration = Duration::from_millis(20);
 /// The most output kept from one stream: its end, where a tool says why it
 /// failed.
 const MAX_OUTPUT: usize = 1 << 20;
+
+/// How long `/bin/ps` may take to answer with atelier's process group.
+const PS_DEADLINE: Duration = Duration::from_secs(5);
 
 /// What a finished command printed, and whether it succeeded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,8 +114,18 @@ impl Signal {
     }
 }
 
-/// Prepares `kill <signal> -- -<group>` for one process group without
-/// starting it, or `None` when the target would reach more than that group.
+/// Prepares `/bin/kill <signal> -- -<group>` for one process group without
+/// starting it, so it signals that group alone. The program is absolute so
+/// `PATH` cannot substitute another executable.
+///
+/// It returns `None` for a target that is atelier itself, its parent, or
+/// the group atelier runs in: any of those would signal the daemon or the
+/// launcher that started it. It also returns `None` for a group outside
+/// `2..=i32::MAX`: `0` and `1` address atelier's own group or every
+/// permitted process, and `kill` truncates a larger number into its pid
+/// range, where it can do the same. When atelier's own group cannot be
+/// read, it refuses every target, since it cannot tell whether the target
+/// is its own group.
 ///
 /// Every group signal atelier sends is built here, so the guard holds at
 /// both the deadline kill above and a background step's cleanup.
@@ -121,7 +135,7 @@ impl Signal {
 ///
 /// let command = signal_group(Signal::Kill, 4242).unwrap();
 ///
-/// assert_eq!(command.get_program(), "kill");
+/// assert_eq!(command.get_program(), "/bin/kill");
 /// assert!(signal_group(Signal::Kill, 1).is_none());
 /// ```
 #[must_use]
@@ -133,12 +147,131 @@ pub fn signal_group(signal: Signal, group: u64) -> Option<Command> {
         return None;
     }
 
-    let mut command = Command::new("kill");
+    // Refuse before building anything: signalling atelier, its parent or its
+    // own group would signal the daemon or the launcher.
+    if refused(group) {
+        return None;
+    }
+
+    let mut command = Command::new("/bin/kill");
     command
         .args([signal.option(), "--", &format!("-{group}")])
         .stderr(Stdio::null());
 
     Some(command)
+}
+
+/// Whether `group` is a target a signal must not reach: atelier's own pid,
+/// its parent's pid, or the group atelier runs in. With no group readable,
+/// every target is refused.
+fn refused(group: u64) -> bool {
+    let Some(own_group) = own_group() else {
+        return true;
+    };
+
+    let own = [
+        u64::from(std::process::id()),
+        u64::from(std::os::unix::process::parent_id()),
+        u64::from(own_group),
+    ];
+
+    own.contains(&group)
+}
+
+/// The process group atelier runs in, read once and kept. `None` when this
+/// platform has no reader or the read fails, which refuses every target.
+/// Only a read that succeeded is kept, so a failed read is tried again by
+/// the next call instead of refusing every kill until a restart.
+fn own_group() -> Option<u32> {
+    static GROUP: OnceLock<u32> = OnceLock::new();
+
+    if let Some(group) = GROUP.get() {
+        return Some(*group);
+    }
+
+    let group = read_own_group()?;
+
+    // Another caller may have read it first; either value is the same group.
+    let _ = GROUP.set(group);
+
+    Some(group)
+}
+
+/// Reads atelier's process group with this platform's reader. Every reader
+/// compiles on every target, so only the call is chosen.
+fn read_own_group() -> Option<u32> {
+    if cfg!(target_os = "linux") {
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+
+        parse_pgrp(&stat)
+    } else if cfg!(target_os = "macos") {
+        read_pgid_with_ps()
+    } else {
+        None
+    }
+}
+
+/// Reads atelier's process group from `/bin/ps`, killing it at
+/// `PS_DEADLINE`. It polls the child itself rather than going through
+/// `run`: `run` signals the group on its own deadline, and
+/// `signal_group` reads the own group, so a read inside it would wait on
+/// itself.
+fn read_pgid_with_ps() -> Option<u32> {
+    let mut child = Command::new("/bin/ps")
+        .env("LC_ALL", "C")
+        .args(["-o", "pgid=", "-p", &std::process::id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    parse_pgid(&read_child(&mut child, PS_DEADLINE)?)
+}
+
+/// Reads what a child prints once it exits in `deadline`, killing and
+/// reaping the child this call owns when the deadline comes first. Output
+/// is returned only for a child that exited successfully.
+fn read_child(child: &mut Child, deadline: Duration) -> Option<String> {
+    let started = Instant::now();
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+
+                break None;
+            }
+            Ok(None) => thread::sleep(TICK),
+            Err(_) => break None,
+        }
+    };
+
+    if !status?.success() {
+        return None;
+    }
+
+    let mut stdout = child.stdout.take()?;
+    let mut printed = String::new();
+    stdout.read_to_string(&mut printed).ok()?;
+
+    Some(printed)
+}
+
+/// The process group in a `/proc/<pid>/stat` line: the third field after
+/// the command name, which may itself hold spaces and parentheses.
+fn parse_pgrp(stat: &str) -> Option<u32> {
+    let (_, rest) = stat.rsplit_once(')')?;
+
+    rest.split_whitespace().nth(2)?.parse().ok()
+}
+
+/// The group `ps -o pgid=` printed: its output trimmed, which must be
+/// digits.
+fn parse_pgid(ps: &str) -> Option<u32> {
+    ps.trim().parse().ok()
 }
 
 /// Reads `stream` to its end, keeping its last `MAX_OUTPUT` bytes. Reading
@@ -178,6 +311,23 @@ fn collect(handle: thread::JoinHandle<String>) -> String {
 mod tests {
     use super::*;
 
+    /// Whether `group` is a target the guard must refuse: atelier's own pid,
+    /// its parent's pid, or its own group. With no group readable, every
+    /// target is refused.
+    fn own_target(group: u64) -> bool {
+        let Some(own_group) = own_group() else {
+            return true;
+        };
+
+        let own = [
+            u64::from(std::process::id()),
+            u64::from(std::os::unix::process::parent_id()),
+            u64::from(own_group),
+        ];
+
+        own.contains(&group)
+    }
+
     #[test]
     fn group_signals_refuse_broad_targets_without_execution() {
         use std::ffi::OsStr;
@@ -203,17 +353,93 @@ mod tests {
             }
 
             for group in [2, highest] {
+                if own_target(group) {
+                    continue;
+                }
+
                 let command = signal_group(signal, group).expect("an explicit target");
                 let args: Vec<&OsStr> = command.get_args().collect();
                 let target = format!("-{group}");
 
-                assert_eq!(command.get_program(), OsStr::new("kill"));
+                assert_eq!(command.get_program(), OsStr::new("/bin/kill"));
                 assert_eq!(
                     args,
                     [OsStr::new(option), OsStr::new("--"), OsStr::new(&target)]
                 );
             }
         }
+    }
+
+    #[test]
+    fn own_targets_are_refused_without_execution() {
+        let own = u64::from(std::process::id());
+        let parent = u64::from(std::os::unix::process::parent_id());
+
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert!(own_group().is_some(), "own group unreadable");
+        }
+
+        // Inspect preparation only: even a missing guard must never run kill.
+        for signal in [Signal::Probe, Signal::Kill] {
+            assert!(
+                signal_group(signal, own).is_none(),
+                "prepared {signal:?} for atelier"
+            );
+            assert!(
+                signal_group(signal, parent).is_none(),
+                "prepared {signal:?} for atelier's parent"
+            );
+
+            if let Some(group) = own_group() {
+                assert!(
+                    signal_group(signal, u64::from(group)).is_none(),
+                    "prepared {signal:?} for atelier's group"
+                );
+            }
+
+            if !own_target(2) {
+                assert!(signal_group(signal, 2).is_some(), "refused a plain target");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn own_group_is_read_from_proc_stat() {
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("/proc/self/stat");
+        let (_, rest) = stat.rsplit_once(')').expect("a command name");
+        let group: u32 = rest
+            .split_whitespace()
+            .nth(2)
+            .expect("a process group")
+            .parse()
+            .expect("a numeric process group");
+
+        assert_eq!(own_group(), Some(group));
+        assert!(signal_group(Signal::Kill, u64::from(group)).is_none());
+    }
+
+    #[test]
+    fn parse_pgrp_reads_the_group_after_the_command_name() {
+        assert_eq!(
+            parse_pgrp("4242 (atelier) S 4241 4200 4242 0 -1"),
+            Some(4200)
+        );
+        assert_eq!(
+            parse_pgrp("4242 (a ) ( b) R 4241 4201 4242 0 -1"),
+            Some(4201)
+        );
+        assert_eq!(parse_pgrp("4242 (atelier) S 4241 nope 4242"), None);
+        assert_eq!(parse_pgrp(""), None);
+        assert_eq!(parse_pgrp("4242 (atelier) S 4241"), None);
+    }
+
+    #[test]
+    fn parse_pgid_reads_the_group_ps_printed() {
+        assert_eq!(parse_pgid(" 4200\n"), Some(4200));
+        assert_eq!(parse_pgid(""), None);
+        assert_eq!(parse_pgid("   \n"), None);
+        assert_eq!(parse_pgid("pgid\n"), None);
     }
 
     #[test]
@@ -268,5 +494,54 @@ mod tests {
             error.message.contains("/no/such/tool could not start"),
             "{error}"
         );
+    }
+
+    /// Spawns `/bin/sh -c <script>` with its output piped and no input, for
+    /// a test to read with its own deadline.
+    fn short_child(script: &str) -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a shell")
+    }
+
+    #[test]
+    fn a_child_that_exits_in_time_is_read() {
+        let mut child = short_child("echo 42");
+
+        assert_eq!(
+            read_child(&mut child, Duration::from_secs(5)),
+            Some("42\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_child_past_the_deadline_is_killed() {
+        let mut child = short_child("sleep 1; echo 42");
+
+        assert_eq!(read_child(&mut child, Duration::from_millis(100)), None);
+        // The helper kills and reaps only the child it owns, so no later wait is needed.
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_))),
+            "the child this call owned is reaped"
+        );
+    }
+
+    #[test]
+    fn a_child_that_fails_is_not_read() {
+        let mut child = short_child("echo 42; exit 1");
+
+        assert_eq!(read_child(&mut child, Duration::from_secs(5)), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_ps_reader_agrees_with_proc() {
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("/proc/self/stat");
+
+        assert_eq!(read_pgid_with_ps(), parse_pgrp(&stat));
     }
 }

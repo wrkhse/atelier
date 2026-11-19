@@ -1,4 +1,4 @@
-use atelier_core::{Failure, Filter, Listing, Mark, Repo, Tracker};
+use atelier_core::{Failure, Filter, Listing, Repo, Tag, Tracker};
 use atelier_core::{Setting, Settings};
 
 use crate::stand_in::Reply::{Captured, Done, Unreachable};
@@ -23,7 +23,7 @@ fn one_page_keeps_its_tag_and_an_unchanged_repository_answers_304() {
     let github = gh.tracker();
 
     let first = github
-        .issues(&repo(), Mark::Build, &Filter::default(), None)
+        .issues(&repo(), Tag::Trigger("build"), &Filter::default(), None)
         .unwrap();
     let Listing::Changed {
         etag: Some(etag), ..
@@ -32,7 +32,12 @@ fn one_page_keeps_its_tag_and_an_unchanged_repository_answers_304() {
         panic!("{first:?}")
     };
     let second = github
-        .issues(&repo(), Mark::Build, &Filter::default(), Some(etag))
+        .issues(
+            &repo(),
+            Tag::Trigger("build"),
+            &Filter::default(),
+            Some(etag),
+        )
         .unwrap();
 
     assert_eq!(ids(&first), ["3", "2", "1"]);
@@ -49,7 +54,7 @@ fn pages_are_followed_pull_requests_dropped_and_no_tag_kept() {
 
     let listing = gh
         .tracker()
-        .issues(&repo(), Mark::Build, &Filter::default(), None)
+        .issues(&repo(), Tag::Trigger("build"), &Filter::default(), None)
         .unwrap();
 
     assert_eq!(ids(&listing), ["7", "3", "2", "1"]);
@@ -68,7 +73,7 @@ fn a_filter_narrows_the_listing_by_mark_assignee_author_and_labels() {
     };
 
     gh.tracker()
-        .issues(&repo(), Mark::Working, &filter, None)
+        .issues(&repo(), Tag::Working, &filter, None)
         .unwrap();
 
     assert_eq!(
@@ -88,7 +93,7 @@ fn a_query_goes_through_search_with_no_tag() {
 
     let error = gh
         .tracker()
-        .issues(&repo(), Mark::Build, &filter, Some("\"tag\""))
+        .issues(&repo(), Tag::Trigger("build"), &filter, Some("\"tag\""))
         .unwrap_err();
 
     let call = &gh.calls()[0];
@@ -134,7 +139,9 @@ fn a_rate_limit_waits_a_refusal_is_final_and_an_unreachable_github_retries() {
     let tracker = gh.tracker();
 
     let limited = tracker.issue(&repo(), "6").unwrap_err();
-    let forbidden = tracker.mark(&repo(), "1", Mark::Build).unwrap_err();
+    let forbidden = tracker
+        .mark(&repo(), "1", Tag::Trigger("build"))
+        .unwrap_err();
     let unreachable = tracker.issue(&repo(), "6").unwrap_err();
 
     assert_eq!(
@@ -157,8 +164,8 @@ fn marks_comments_and_closing_change_the_issue_and_a_missing_label_is_no_failure
     ]);
     let github = gh.tracker();
 
-    github.mark(&repo(), "12", Mark::Working).unwrap();
-    github.unmark(&repo(), "12", Mark::Build).unwrap();
+    github.mark(&repo(), "12", Tag::Working).unwrap();
+    github.unmark(&repo(), "12", Tag::Trigger("build")).unwrap();
     github
         .comment(&repo(), "12", "atelier started a builder")
         .unwrap();
@@ -222,7 +229,12 @@ fn a_repository_that_is_not_owner_and_name_is_refused_before_any_call() {
     let github = gh.tracker();
 
     for name in ["atelier", "/atelier", "StevenJPx2/", "a/b/c"] {
-        let error = github.issues(&Repo(name.into()), Mark::Build, &Filter::default(), None);
+        let error = github.issues(
+            &Repo(name.into()),
+            Tag::Trigger("build"),
+            &Filter::default(),
+            None,
+        );
 
         assert!(error.unwrap_err().is_permanent(), "{name}");
     }
@@ -248,12 +260,15 @@ fn a_project_s_own_labels_are_listed_set_made_and_briefed() {
     let labels = Settings::default()
         .with("working", Setting::Table(working))
         .with("blocked", Setting::Table(blocked));
-    let tracker = gh.tracker_with(&Settings::default().with("labels", Setting::Table(labels)));
+    let tracker = gh.tracker_with(
+        &Settings::default().with("labels", Setting::Table(labels)),
+        &["build"],
+    );
 
     tracker
-        .issues(&repo(), Mark::Working, &Filter::default(), None)
+        .issues(&repo(), Tag::Working, &Filter::default(), None)
         .unwrap();
-    tracker.mark(&repo(), "12", Mark::Blocked).unwrap();
+    tracker.mark(&repo(), "12", Tag::Blocked).unwrap();
     let issue = tracker.issue(&repo(), "6").unwrap();
     tracker.create_labels(&repo()).unwrap();
 
@@ -278,4 +293,123 @@ fn a_project_s_own_labels_are_listed_set_made_and_briefed() {
         ]
     );
     assert!(Tracker::brief(&tracker, &repo(), &issue).contains("--add-label bot:stuck"));
+}
+
+#[test]
+fn a_second_pipeline_has_its_own_trigger_label_to_list_and_mark_by() {
+    let gh = StandIn::new(&[Captured("issues-page-2.txt"), Captured("issue-6.txt")]);
+    let tracker = gh.tracker_with(&Settings::default(), &["build", "audit"]);
+
+    tracker
+        .issues(&repo(), Tag::Trigger("audit"), &Filter::default(), None)
+        .unwrap();
+    tracker.mark(&repo(), "12", Tag::Trigger("audit")).unwrap();
+
+    let calls = gh.calls();
+    assert!(
+        calls[0][2].ends_with("&labels=atelier%3Aaudit"),
+        "{:?}",
+        calls[0]
+    );
+    assert_eq!(calls[1][6], "labels[]=atelier:audit");
+}
+
+#[test]
+fn a_pipeline_s_trigger_label_is_named_by_its_own_key() {
+    let gh = StandIn::new(&[Captured("issues-page-2.txt"), Captured("issue-6.txt")]);
+    let audit = Settings::default().with("name", Setting::Text("queue:audit".into()));
+    let labels = Settings::default().with("audit", Setting::Table(audit));
+    let settings = Settings::default().with("labels", Setting::Table(labels));
+    let tracker = gh.tracker_with(&settings, &["build", "audit"]);
+
+    tracker
+        .issues(&repo(), Tag::Trigger("audit"), &Filter::default(), None)
+        .unwrap();
+    tracker.mark(&repo(), "12", Tag::Trigger("audit")).unwrap();
+
+    let calls = gh.calls();
+    assert!(
+        calls[0][2].ends_with("&labels=queue%3Aaudit"),
+        "{:?}",
+        calls[0]
+    );
+    assert_eq!(calls[1][6], "labels[]=queue:audit");
+}
+
+#[test]
+fn a_tag_this_project_has_no_label_for_is_a_permanent_failure_that_names_it() {
+    let gh = StandIn::new(&[]);
+    let tracker = gh.tracker();
+
+    let listed = tracker
+        .issues(&repo(), Tag::Trigger("audit"), &Filter::default(), None)
+        .unwrap_err();
+    let marked = tracker
+        .mark(&repo(), "12", Tag::Trigger("audit"))
+        .unwrap_err();
+
+    assert!(listed.is_permanent());
+    assert!(listed.message.contains("audit"), "{listed}");
+    assert!(marked.is_permanent());
+    assert!(marked.message.contains("audit"), "{marked}");
+    assert_eq!(gh.calls().len(), 0);
+}
+
+/// A config change can drop a pipeline while its unmark is still pending.
+/// A tag this project has no label for is a pipeline it no longer has; its
+/// trigger is ignored, so the unmark settles without a call.
+#[test]
+fn unmarking_a_tag_this_project_has_no_label_for_settles() {
+    let gh = StandIn::new(&[]);
+    let tracker = gh.tracker();
+
+    tracker
+        .unmark(&repo(), "12", Tag::Trigger("audit"))
+        .unwrap();
+
+    assert_eq!(gh.calls().len(), 0);
+}
+
+#[test]
+fn a_project_whose_labels_collide_or_are_too_long_is_refused() {
+    let gh = StandIn::new(&[]);
+    let github = gh.github();
+    let collides = Settings::default().with(
+        "working",
+        Setting::Table(Settings::default().with("name", Setting::Text("atelier:audit".into()))),
+    );
+    let long = "a".repeat(51);
+    let overruns = Settings::default().with(
+        "audit",
+        Setting::Table(Settings::default().with("name", Setting::Text(long))),
+    );
+
+    for (key, fields) in [("working", collides), ("audit", overruns)] {
+        let settings = Settings::default().with("labels", Setting::Table(fields));
+        let error = github.tracker(&settings, &["build", "audit"]).unwrap_err();
+
+        assert_eq!(error.key, format!("labels.{key}.name"));
+    }
+}
+
+#[test]
+fn create_labels_makes_each_pipeline_s_trigger_in_the_project_s_order() {
+    let gh = StandIn::new(&[Done, Done, Done, Done, Done]);
+    let tracker = gh.tracker_with(&Settings::default(), &["build", "audit"]);
+
+    tracker.create_labels(&repo()).unwrap();
+
+    let calls = gh.calls();
+    let names: Vec<&str> = calls.iter().map(|call| call[2].as_str()).collect();
+
+    assert_eq!(
+        names,
+        [
+            "atelier:build",
+            "atelier:audit",
+            "atelier:working",
+            "atelier:blocked",
+            "improvement"
+        ]
+    );
 }

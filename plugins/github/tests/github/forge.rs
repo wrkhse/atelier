@@ -82,7 +82,7 @@ fn the_plugin_registers_both_roles_under_the_name_its_issues_carry() {
     let issue = registry
         .find_tracker(github.name())
         .unwrap()
-        .make(&Settings::default())
+        .make(&Settings::default(), &["build"])
         .unwrap()
         .issue(&repo(), "6")
         .unwrap();

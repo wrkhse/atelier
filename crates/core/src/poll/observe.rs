@@ -1,14 +1,16 @@
 use std::collections::BTreeMap;
 
-use super::{Plugins, Project, Record, State};
-use crate::{Filter, Issue, IssueKey, Listing, Mark, Phase, PluginError, Seen};
+use super::{Listed, Plugins, Project, Record, State};
+use crate::{Filter, Issue, IssueKey, Listing, Phase, PluginError, Seen};
 
 /// What one poll saw of a project.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Observation {
     pub issues: BTreeMap<IssueKey, Watched>,
+    /// Requests the project's worker read for this poll.
+    pub requests: BTreeMap<IssueKey, Vec<super::Request>>,
     /// Listing tags to keep once every issue is acted on.
-    pub etags: BTreeMap<(String, Mark), String>,
+    pub etags: BTreeMap<(String, Listed), String>,
 }
 
 /// One issue as the poll saw it.
@@ -18,13 +20,13 @@ pub struct Watched {
     pub seen: Seen,
 }
 
-/// The marks atelier lists: issues asking for a builder, and issues
-/// carrying the working mark, so one atelier never claimed is found.
-const LISTED: [Mark; 2] = [Mark::Build, Mark::Working];
-
 /// Asks the project's trackers what changed, reads every issue atelier is
 /// working on, and asks the forge for the pull request of each run whose
 /// pipeline has a step of the forge's.
+///
+/// Each tracker is listed once per pipeline, for its trigger, and once for
+/// the working mark, so an issue an earlier atelier never claimed is found
+/// too.
 ///
 /// # Errors
 ///
@@ -37,9 +39,13 @@ pub fn observe(
     let mut observation = Observation::default();
 
     for source in &plugins.trackers {
-        for mark in LISTED {
-            list(project, source, mark, state, &mut observation)?;
+        for pipeline in &project.pipelines {
+            let listed = Listed::Trigger(pipeline.name().to_owned());
+
+            list(project, source, listed, state, &mut observation)?;
         }
+
+        list(project, source, Listed::Working, state, &mut observation)?;
     }
 
     for (key, record) in &state.runs {
@@ -78,20 +84,20 @@ pub fn observe(
 fn list(
     project: &Project,
     source: &super::Source<'_>,
-    mark: Mark,
+    listed: Listed,
     state: &State,
     observation: &mut Observation,
 ) -> Result<(), PluginError> {
-    let key = (source.name.to_owned(), mark);
-    let etag = state.etags.get(&key).map(String::as_str);
-    let filter = if mark == Mark::Build {
-        source.filter.clone()
-    } else {
-        Filter::default()
+    let filter = match listed {
+        Listed::Trigger(_) => source.filter.clone(),
+        Listed::Working => Filter::default(),
     };
+    let key = (source.name.to_owned(), listed);
+    let tag = key.1.tag();
+    let etag = state.etags.get(&key).map(String::as_str);
 
     let Listing::Changed { issues, etag } =
-        source.tracker.issues(&project.repo, mark, &filter, etag)?
+        source.tracker.issues(&project.repo, tag, &filter, etag)?
     else {
         return Ok(());
     };
@@ -110,10 +116,10 @@ fn list(
     Ok(())
 }
 
-const fn observed(issue: Issue) -> Watched {
+fn observed(issue: Issue) -> Watched {
     let seen = Seen {
         open: issue.open,
-        marks: issue.marks,
+        marks: issue.marks.clone(),
         pull_request: None,
     };
 

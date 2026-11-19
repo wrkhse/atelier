@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use super::{Filter, Issue, Listing, PluginError, Repo, Session};
-use crate::{Brief, Mark, PullRequest};
+use crate::{Brief, PullRequest, Tag};
 
 /// Where issues live: lists, reads, marks, comments on and closes them.
 pub trait Tracker {
-    /// Open issues carrying `mark` that match `filter`, or `Unchanged`
-    /// when `etag` still holds.
+    /// Open issues carrying the tag's mark that match `filter`, or
+    /// `Unchanged` when `etag` still holds.
     ///
     /// # Errors
     ///
@@ -14,7 +14,7 @@ pub trait Tracker {
     fn issues(
         &self,
         repo: &Repo,
-        mark: Mark,
+        tag: Tag<'_>,
         filter: &Filter,
         etag: Option<&str>,
     ) -> Result<Listing, PluginError>;
@@ -24,19 +24,19 @@ pub trait Tracker {
     /// The tracker's failure.
     fn issue(&self, repo: &Repo, id: &str) -> Result<Issue, PluginError>;
 
-    /// Adds a mark; adding one already there succeeds.
+    /// Adds the tag's mark; adding one already there succeeds.
     ///
     /// # Errors
     ///
     /// The tracker's failure.
-    fn mark(&self, repo: &Repo, id: &str, mark: Mark) -> Result<(), PluginError>;
+    fn mark(&self, repo: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError>;
 
-    /// Removes a mark; removing one that is not there succeeds.
+    /// Removes the tag's mark; removing one that is not there succeeds.
     ///
     /// # Errors
     ///
     /// The tracker's failure.
-    fn unmark(&self, repo: &Repo, id: &str, mark: Mark) -> Result<(), PluginError>;
+    fn unmark(&self, repo: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError>;
 
     /// # Errors
     ///

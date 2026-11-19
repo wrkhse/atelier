@@ -101,7 +101,7 @@ both say 5.
 
 **Status: Containment required for CI, developers and the installed
 daemon's proof runs; mutation, fuzzing and process-signalling checks run
-only in contained CI (owner's proof contract, 2026-11-17).** On
+only in contained CI (owner's proof contract, 2026-11-15).** On
 2026-11-13, local mutation testing for PR #57 changed command-group validation
 to return group 1. The cleanup regression reached `kill -KILL -- -1` on the
 Mac: a broadcast target, not one command's process group. The mutation log
@@ -110,10 +110,36 @@ Kani and mutant checks are not passing evidence.
 
 Every group signal is built by `atelier_command::signal_group`, which
 refuses 0, 1 and any number `kill` would truncate to them, independently of
-parsing; the deadline kill and a background step's cleanup both use it. Its
-regression only prepares a command, so removing the guard produces an
+parsing. It also refuses atelier's own pid, its parent's pid and its own
+process group, keeping the group only from a read that succeeded, so a
+failed read refuses every target until a later read succeeds; on macOS that
+read waits for its `ps` child until a 5 s deadline, reads its output only
+after it exited successfully, and kills and reaps only that child.
+The deadline kill and a background step's cleanup both use it.
+When it refuses a target, the kill and a start's abandon log
+`<folder>: atelier refused to signal group <n>; the command may still be running in <worktree>`.
+A kill reports whether a signal was delivered, so a refusal or a failed
+`/bin/kill` is never read as a stop.
+Its regression only prepares a command, so removing the guard produces an
 assertion failure without invoking `kill`. A guard is defense in depth, not
 containment: mutation can change the guard too.
+
+A command step's group is identified by its retained leader's identity
+record, checked before any `observe` or `stop` sends a signal: the same
+boot, the leader alive and not a zombie, the same start identity, and still
+leading its group. A stale, legacy or malformed record fails closed. The
+boot is the kernel's boot id on Linux and `kern.bootsessionuuid` on macOS; a
+missing boot identity fails closed, as does a macOS value that is not a
+UUID: a start kills the command it began and removes its folder once that
+kill was delivered, keeping it when the signal was refused, and a check
+sends no signal. On macOS a start time resolves to the second, and checking
+before running `/bin/kill` leaves a window in which the leader can exit and
+its number be reused. An unrecorded or legacy command is left running, and
+named in the run's report and, once for that folder and reason, in the log,
+each ending
+`; atelier sent no signal, and the command may still be running in <worktree>`,
+or `in its worktree` when the folder records no worktree. The record is not
+containment and not a proof of ownership.
 
 The planner and every gate run on GitHub-hosted Linux runners inside
 non-root containers with private PID namespaces, dropped capabilities,
@@ -133,7 +159,7 @@ candidate installation and start. Linux containment does not establish
 Darwin-specific signalling behavior; disposable macOS verification requires
 separate approval. Historical audit results above retain their original scope.
 
-By the owner's proof contract of 2026-11-17, end-to-end proofs use the real
+By the owner's proof contract of 2026-11-15, end-to-end proofs use the real
 projects `wrkhse/atelier` and `wrkhse/chauffeur`: the installed daemon
 orchestrates their issues, branches, agent sessions and pull requests, and
 their gates, mutants and Kani included, run in contained CI, which the

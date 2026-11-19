@@ -13,7 +13,7 @@ impl Plugin for Both {
     }
 
     fn register<'a>(&'a self, registry: &mut Registry<'a>) {
-        registry.tracker(|settings| {
+        registry.tracker(|settings, _| {
             settings.only("", &["site"])?;
             Ok(Box::new(World::default()))
         });
@@ -93,9 +93,9 @@ fn each_project_builds_its_own_tracker_from_its_settings() {
     let fine = Settings::default().with("site", Setting::Text("example.org".into()));
     let misspelt = Settings::default().with("stie", Setting::Text("example.org".into()));
 
-    assert!(make.make(&fine).is_ok());
+    assert!(make.make(&fine, &["build"]).is_ok());
     assert_eq!(
-        make.make(&misspelt)
+        make.make(&misspelt, &["build"])
             .err()
             .map(|error| error.to_string())
             .as_deref(),

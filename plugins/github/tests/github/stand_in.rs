@@ -83,14 +83,15 @@ impl StandIn {
         GitHub::with_program(self.dir.join("gh"))
     }
 
-    /// The tracker for a project with `settings`.
-    pub fn tracker_with(&self, settings: &Settings) -> GitHubTracker {
-        self.github().tracker(settings).unwrap()
+    /// The tracker for a project with `settings` and `pipelines`.
+    pub fn tracker_with(&self, settings: &Settings, pipelines: &[&str]) -> GitHubTracker {
+        self.github().tracker(settings, pipelines).unwrap()
     }
 
-    /// The tracker for a project that sets nothing.
+    /// The tracker for a project that sets nothing, with a `build`
+    /// pipeline.
     pub fn tracker(&self) -> GitHubTracker {
-        self.tracker_with(&Settings::default())
+        self.tracker_with(&Settings::default(), &["build"])
     }
 
     /// Each call's arguments, in order.

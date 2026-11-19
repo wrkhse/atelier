@@ -133,6 +133,11 @@ impl Build {
     pub fn plugins(&self, resolved: &Resolved) -> Result<Built<'_>> {
         let registry = self.registry();
         let mut trackers = Vec::new();
+        let pipelines: Vec<&str> = resolved
+            .pipelines
+            .iter()
+            .map(|written| written.name.as_str())
+            .collect();
 
         for spec in &resolved.trackers {
             if trackers.iter().any(|(name, _, _)| name == &spec.plugin) {
@@ -144,7 +149,7 @@ impl Build {
 
             let make = registry.find_tracker(&spec.plugin)?;
             let tracker = make
-                .make(&spec.settings)
+                .make(&spec.settings, &pipelines)
                 .map_err(|error| eyre!("the {} tracker: {error}", spec.plugin))?;
 
             trackers.push((spec.plugin.clone(), tracker, spec.filter.clone()));

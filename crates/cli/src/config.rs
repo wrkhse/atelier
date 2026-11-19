@@ -271,9 +271,25 @@ fn checks(file: &File) -> Result<Vec<CheckSpec>> {
         .collect()
 }
 
+/// The labels atelier keeps for itself, which a pipeline may not be named
+/// after: a pipeline's trigger takes the `labels.<name>` key, and GitHub
+/// compares label names ignoring case.
+const MARKS: [&str; 3] = ["working", "blocked", "improvement"];
+
+fn is_own_mark(name: &str) -> bool {
+    MARKS.iter().any(|mark| name.eq_ignore_ascii_case(mark))
+}
+
 /// The built-in `build` first, unless the config writes `[pipeline.build]`,
-/// then each pipeline the config writes, by name.
+/// then each pipeline the config writes, by name. A written `working`,
+/// `blocked` or `improvement` is refused, since atelier keeps those labels.
 fn pipelines(written: &BTreeMap<String, PipelineFile>) -> Result<Vec<Written>> {
+    if let Some(name) = written.keys().find(|name| is_own_mark(name)) {
+        bail!(
+            "{CONFIG}: pipeline.{name}: {name} is atelier's own label; name the pipeline otherwise"
+        );
+    }
+
     let builtin: File = toml::from_str(BUILD).wrap_err("the built-in build pipeline")?;
     let mut all: Vec<Written> = Vec::new();
 
@@ -501,5 +517,41 @@ mod tests {
             [Origin::Found.to_string(), Origin::Set.to_string()],
             ["found", "set"]
         );
+    }
+
+    #[test]
+    fn a_pipeline_named_after_an_atelier_label_is_refused() {
+        let read = |name: &str| {
+            let file = PipelineFile::default();
+
+            pipelines(&BTreeMap::from([(name.to_owned(), file)]))
+        };
+        let refusal = |name: &str| {
+            format!(
+                "{CONFIG}: pipeline.{name}: {name} is atelier's own label; \
+                 name the pipeline otherwise"
+            )
+        };
+
+        for name in [
+            "working",
+            "blocked",
+            "improvement",
+            "Working",
+            "Improvement",
+        ] {
+            let error = read(name).unwrap_err().to_string();
+
+            assert_eq!(error, refusal(name), "{name:?}");
+        }
+
+        for name in ["build", "security-audit"] {
+            let found = read(name).unwrap();
+
+            assert!(
+                found.iter().any(|pipeline| pipeline.name == name),
+                "{name:?}: {found:?}"
+            );
+        }
     }
 }

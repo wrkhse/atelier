@@ -3,7 +3,7 @@
 `gates.yml` runs atelier's planner and every gate inside a fresh Linux
 container on a GitHub-hosted runner, and no developer runs a gate on their
 machine. The installed daemon runs no gate on the Mac; by the owner's proof
-contract of 2026-11-17 it observes these contained runs through
+contract of 2026-11-15 it observes these contained runs through
 `forge.checks` (see
 [the audit](../../docs/audits/atelier.md#host-mutation-signal-incident)).
 The packaging and docs workflows build on the runner itself; they run no

@@ -38,32 +38,35 @@ cargo run --locked -p atelier-cli -- --version
 - Every member inherits the workspace version, edition, license and lints.
 - The minimum is `rust-version` in the root `Cargo.toml`'s
   `[workspace.package]` (`1.100`); every crate inherits it, and the `msrv`
-  gate reads and checks it. Development and CI pin stable `1.100.0`. The
-  [Rust 1.100 page](../docs/plans/rust-1.100.md) lists what it leaves open.
-- Core has no dependencies and performs no I/O. Concrete tools stay outside it.
+  gate reads and checks it. Development and CI pin stable `1.100.0`.
+  The cleanups 1.100 allows are planned in
+  [#82](https://github.com/wrkhse/atelier/issues/82).
+- Core depends only on [rungs](https://github.com/wrkhse/rungs) and performs
+  no I/O. Concrete tools stay outside it.
 - Functions contain at most 70 nonblank, noncomment lines.
 - Failures are values; production paths contain no unwraps, expects or panics.
 - Each thread, queue, resource and external call has a limit and an owner.
+- Cleanup that must happen (ending a process group, a durable step folder,
+  releasing a queue reservation) is an explicit call that returns its error,
+  never a `Drop` or `DropGuard`, since no `Drop` runs after a `SIGKILL`.
 - A module with several concepts becomes a directory, one file per concept,
   with a README explaining the flow and usage.
 
 ## Checks
 
-These are the gates CI runs, each inside its contained runner; on a
-developer's Mac only `cargo fmt` runs, as [AGENTS.md](../AGENTS.md) says.
+The gate commands live in `.atelier/config.toml`; the
+[CI runner](https://github.com/wrkhse/atelier/tree/main/.github/ci)
+describes containment and report validation.
+On a developer's Mac only `cargo fmt` runs, as [AGENTS.md](../AGENTS.md) says.
 
-```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo nextest run --workspace --all-targets --all-features --locked
-cargo test --workspace --doc --all-features --locked
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-rustup toolchain install 1.100 --profile minimal  # rust-version in Cargo.toml
-RUSTUP_AUTO_INSTALL=0 cargo +1.100 check --workspace --all-targets --all-features --locked  # rust-version in Cargo.toml
-cargo deny check
-cargo mutants --workspace --timeout 120
-cargo kani -p atelier-core
-```
+Kani 0.68.0 uses its own `nightly-2026-08-21` toolchain, distinct from the
+stable workspace pin. Cargo accepts that nightly for the 1.100 `rust-version`,
+but an API stabilized late in 1.100 may be absent. An API used by Kani-compiled
+code (`crates/core` and `rungs`) must be available in that nightly or pass a
+contained Kani run. The Kani gate targets `atelier-core`; the runner validates
+its report as described in the CI reference.
 
-Kani proves the issue machine's promises for every phase and event; each
-harness takes about 20 seconds.
+Cargo 1.100 moves intermediate build artifacts; atelier reads only final ones:
+`target/<triple>/release/atelier` in releases, `target/release/atelier` in
+packaging, and `CARGO_BIN_EXE_atelier` in the CLI tests. The nextest gate
+installs 0.9.151, which supports that layout.

@@ -88,6 +88,7 @@ impl IssueFile {
         let (phase, progress) = self.phase.run();
         let steps = BUILD.map(|id| StepRecord {
             id: id.to_owned(),
+            plugin: String::new(),
             session: None,
             why: None,
         });
@@ -283,7 +284,7 @@ mod tests {
         );
         assert_eq!(
             pending("26"),
-            [Action::Mark(Mark::Working), Action::Unmark(Mark::Build)]
+            [Action::Mark(Mark::Working), Action::Unmark(Mark::Requested)]
         );
     }
 

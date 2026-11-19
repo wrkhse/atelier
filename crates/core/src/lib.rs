@@ -25,15 +25,15 @@ pub use pipeline::{
 };
 pub use plugin::{MakeChecks, MakeTracker, MissingPlugin, On, Plugin, Registry, Role};
 pub use poll::{
-    Move, Observation, Plugins, Project, Record, Report, Source, State, StepRecord, Watched, act,
-    observe,
+    Command, Listed, Move, Observation, Plugins, Project, Record, Report, Request, Source, State,
+    StepRecord, Watched, act, observe,
 };
 pub use roles::{
     Agent, CiFile, Failure, Filter, Forge, Issue, IssueKey, Kind, Listing, Observed, Outcome,
     Outcomes, PluginError, Repo, RunContext, Session, Started, Step, Tracker, WorktreeRequest,
     Worktrees,
 };
-pub use seen::{Marks, PullRequest, Rollup, Seen};
+pub use seen::{Marks, PullRequest, Rollup, Seen, Tag};
 pub use settings::{Setting, Settings, SettingsError};
 
 /// The step machine pipelines run on.

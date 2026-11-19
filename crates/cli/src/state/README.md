@@ -5,6 +5,12 @@ written whole to a temporary file and renamed into place. A file an earlier
 rc wrote is read too: each issue becomes a run of the built-in `build`
 where it was, and the next save writes it as runs.
 
+A listing tag belongs to a tracker and a mark: `working`, or a trigger named
+after the pipeline whose label lists it. A pending action's mark is
+`requested`, `working` or `blocked`; `requested` starts its pipeline. An
+`0.1.0-rc.8` file's `build` mark reads as `requested` in an action and as the
+`build` pipeline's trigger in a listing tag.
+
 | File       | Holds                                                          |
 | ---------- | -------------------------------------------------------------- |
 | `mod.rs`   | `load` and `write`, and each run as the file keeps it          |

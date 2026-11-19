@@ -5,9 +5,9 @@
 [#1](https://github.com/wrkhse/atelier/issues/1). The `sourcefed` trigger
 follows as slice 4 ([#42](https://github.com/wrkhse/atelier/issues/42)).
 Pipelines run on [rungs](https://github.com/wrkhse/rungs) `v0.1.0`, and
-an earlier rc's `state.json` is read into runs of `build`. Left:
-`atelier finish` and `atelier stop`, and a trigger mark for each pipeline;
-until then the build mark starts `build`.
+an earlier rc's `state.json` is read into runs of `build`. Agents settle
+their steps with `atelier finish`, and a person stops a run with
+`atelier stop`.
 
 ## You can
 
@@ -245,6 +245,10 @@ pub trait Step {
     fn start(&self, run: &RunContext<'_>, step: &StepSpec)
         -> Result<Started, PluginError>;
 
+    /// Releases resources kept in the step's folder on every run exit;
+    /// safe when no start made anything, or cleanup already ran.
+    fn stop(&self, folder: &Path) -> Result<(), PluginError>;
+
     /// What a poll sees: running, settled, a failed round, or, for a
     /// settled step, that it runs again.
     fn observe(&self, run: &RunContext<'_>, step: &StepSpec)
@@ -309,12 +313,28 @@ impl Tree for BranchTree {}
 ```
 
 A command runs in the background, in its own process group, so a poll never
-waits on it and a daemon restarted while it runs leaves it running. A start
-empties the step's folder and starts the command there; a later poll reads how
-it ended. It settles `passed` on exit 0, and `failed` on any other exit, past
-its limit, which kills its whole group, or when it stopped without an exit
-status; each says why, with the last 20 lines it printed. `ATELIER_BASE` is
-`origin/<base>`, as for the gates.
+waits on it and a daemon restarted while it runs leaves it running. Its step's
+folder holds `started`, `worktree`, `identity`, `output` and `exit`; a start
+writes `started` and `worktree` before it spawns the command there, and a
+later poll reads how it ended. A start on a folder that already exists first
+stops whatever command the folder still names, through the same identity
+check, so a start repeated after a daemon crash cannot orphan a running
+command. It empties the folder only once a fresh check finds the leader gone
+or its record from another boot. While the record still names a leader that
+is stopping, the start fails with a transient error saying the command an
+earlier start left in the folder is still stopping, keeps the folder until
+it is gone, and retries on the next poll. A legacy record (a `group` file
+and no identity), an unpublished identity or an invalid one is kept: the
+start fails with a transient error saying the command an earlier start left
+in the folder cannot be stopped, followed by the unsignalled text, and the
+folder stays as the only trace of a command that may still run. A start
+that cannot spawn removes the folder it just made, since nothing ran; one
+abandoned because its identity could not be recorded removes the folder
+once its group kill was delivered, keeping it only when the signal was
+refused. The command settles `passed` on exit 0, and `failed` on any other
+exit, past its limit, which kills its whole group, or when it stopped
+without an exit status; each says why, with the last 20 lines it printed.
+`ATELIER_BASE` is `origin/<base>`, as for the gates.
 
 ```rust
 pub struct Outcome {
@@ -331,6 +351,61 @@ pub fn start(
 
 pub fn observe(folder: &Path, settings: &Settings)
     -> Result<Option<Outcome>, PluginError>;
+```
+
+The command's shell leads its own process group and stays alive until the
+command's top level ends, then writes `exit`; the leader's identity record
+sits beside it, written before the start returns: `identity.tmp` is
+written, synced, renamed to `identity`, and the folder synced. It holds the
+leader's pid, boot and start identity. The boot is the kernel's boot id on
+Linux and `kern.bootsessionuuid` on macOS. A reaper thread waits on the
+leader, so it is reaped once it ends; if that thread cannot start, the leader
+stays a zombie until the daemon exits, and the identity check reads a zombie
+as gone. Before `observe` or `stop` sends a signal, it checks the record: the
+same boot, the leader alive and not a zombie, the same start identity, and
+still leading its group. A record from another boot, or for a leader that is
+gone, settles `failed` without a signal. A legacy folder with only `group`, a
+malformed record, a leader outside `2..=i32::MAX`, or a command that started
+but never published its identity fails closed: `observe` settles `failed`
+with the reason, which reaches the run's comment, and `stop` sends nothing
+and returns no error, so the run still ends. A start over such a folder
+fails with a transient error and keeps it, since the folder is the only
+trace of a command that may still run. While a start keeps failing this way,
+the run waits at that step; a person ends the run with
+`atelier stop "<pipeline> <issue>"`, and the folder stays for them to check
+and remove, since a later run starts in its own generation's folder.
+`observe`'s reason ends
+`<what>; atelier sent no signal, and the command may still be running in <worktree>`,
+and `stop`'s log line puts the folder before it, logged once for that folder
+and reason rather than on every poll; both say `in its worktree` when the
+folder records no worktree, and `<what>` names the record that could not
+name a leader. A kill reports whether a signal was delivered, so a refused
+signal or a failed `/bin/kill` is never read as a stop. A start's fresh
+check keeps a folder whose leader still runs. When `signal_group` refuses a
+target, the kill and abandon log
+`<folder>: atelier refused to signal group <n>; the command may still be running in <worktree>`.
+
+```rust
+pub struct Identity {
+    pub leader: u32,
+    pub boot: String,
+    pub start: String,
+}
+
+pub enum Leader {
+    Running,
+    Rebooted,
+    Gone,
+}
+
+impl Identity {
+    pub fn of(leader: u32) -> Result<Self, String>;
+    pub fn render(&self) -> String;
+    pub fn parse(text: &str) -> Result<Self, String>;
+    pub fn check(&self) -> Result<Leader, String>;
+}
+
+pub fn stop(folder: &Path) -> Result<(), PluginError>;
 ```
 
 ### The `build` pipeline
@@ -431,15 +506,142 @@ kind with the plugin a role's kind resolved to:
 
 ### Triggers and runs
 
-- **A tracker's mark starts a run.** An item carrying `atelier:<pipeline>`
-  starts that pipeline, so `atelier:build` keeps its meaning. `atelier init`
-  creates a label for each pipeline. In this slice the tracker's listing finds
-  them, as today; from slice 4 the trigger role does, with sourcefed's events
+- **Each pipeline has its trigger mark.** On GitHub it is the label
+  `atelier:<pipeline>`, and a project renames it as `labels.<pipeline>`.
+  `atelier init` creates a label for each of the project's pipelines. A
+  blocked comment names the run's pipeline, not its trigger label, which a
+  project may rename, so it asks for that pipeline's trigger mark whatever
+  the label reads.
+- **A tracker's listing finds the marks.** Each poll lists each tracker once
+  per pipeline, for that pipeline's trigger, and once for `working`, so an
+  item an earlier atelier took is found too. A trigger listing with a
+  tracker query filter is a GitHub search, which answers no etag, so each
+  pipeline costs one search call per poll against search's 30 a minute:
+  about seven pipelines at the 15-second minimum poll. The `working` listing
+  stays REST, with an etag like a trigger listing without a filter. From
+  slice 4 the trigger role finds them from sourcefed's events
   ([#42](https://github.com/wrkhse/atelier/issues/42)), and the listing only
   reconciles.
+- **A trigger mark starts its pipeline.** An item carrying `atelier:audit`
+  starts `audit`, so `atelier:build` keeps its meaning.
+- **An open item carrying two pipelines' triggers starts neither.** It waits
+  until a person leaves one. The daemon logs
+  `github#12: carries the trigger marks of build, audit; atelier starts none until one is left`
+  whenever atelier reads the item again: when a listing that holds it
+  changes, again after a poll whose etags were not kept because another
+  item failed, and on every poll while a listing that holds it keeps no
+  etag, which happens for a listing of more than one page or one answered
+  from a search. The line does not repeat while every listing answers
+  unchanged.
+- **A working run goes on.** A run that gains another pipeline's trigger
+  while it works keeps its own pipeline; the other waits until the run is
+  over and the item is open.
+- **A Done or Blocked run that sees a trigger starts that pipeline in a new
+  generation**, keeping each step's last session.
+- **A pipeline named `working`, `blocked` or `improvement`, in any case, is
+  refused**, and so is a label that collides with another's name once a
+  project renames it, ignoring case, and a trigger label over GitHub's 50
+  characters.
 - **A run** is one pass of a pipeline for one item, such as `build github#12`.
   It replaces "an issue" in `state.json` and `atelier status`. An item has at
   most one working run at a time.
+
+#### Structure
+
+A tracker carries a mark as a `Tag`: a pipeline's trigger by name, or atelier's
+own `working` or `blocked`. `Mark::on` turns the mark an action carries into
+the tag of the pipeline its run is for, so a claim's `Unmark(Mark::Requested)`
+takes that pipeline's trigger and leaves any other. `Marks` is what an item
+carries, as a poll saw it.
+
+```rust
+pub enum Tag<'a> {
+    Trigger(&'a str),
+    Working,
+    Blocked,
+}
+
+impl Mark {
+    pub const fn on(self, pipeline: &str) -> Tag<'_>;
+}
+
+pub struct Marks {
+    working: bool,
+    blocked: bool,
+    triggers: BTreeSet<String>,
+}
+
+impl Marks {
+    pub fn has(&self, tag: Tag<'_>) -> bool;
+    pub fn with(self, tag: Tag<'_>) -> Self;
+    pub fn without(self, tag: Tag<'_>) -> Self;
+    pub fn triggers(&self) -> impl Iterator<Item = &str>;
+}
+```
+
+A tracker lists the open items carrying one tag that match a filter, and
+marks or unmarks an item with one; adding a mark that is there, or removing
+one that is not, succeeds. `issues` answers `Unchanged` while the listing's
+etag still holds.
+
+```rust
+pub trait Tracker {
+    fn issues(
+        &self,
+        repo: &Repo,
+        tag: Tag<'_>,
+        filter: &Filter,
+        etag: Option<&str>,
+    ) -> Result<Listing, PluginError>;
+    fn issue(&self, repo: &Repo, id: &str) -> Result<Issue, PluginError>;
+    fn mark(&self, repo: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError>;
+    fn unmark(&self, repo: &Repo, id: &str, tag: Tag<'_>) -> Result<(), PluginError>;
+    fn comment(&self, repo: &Repo, id: &str, text: &str) -> Result<(), PluginError>;
+    fn close(&self, repo: &Repo, id: &str) -> Result<(), PluginError>;
+    fn reference(&self, issue: &Issue) -> String;
+    fn brief(&self, repo: &Repo, issue: &Issue) -> String;
+}
+```
+
+A listing atelier keeps the etag of is one pipeline's trigger or `working`,
+and the state keeps each one by its tracker.
+
+```rust
+pub enum Listed {
+    Trigger(String),
+    Working,
+}
+
+pub struct State {
+    pub runs: BTreeMap<IssueKey, Record>,
+    pub etags: BTreeMap<(String, Listed), String>,
+}
+```
+
+A poll's report names each move, each failure, and each item whose triggers
+atelier starts none of, with those pipelines in the project's order.
+
+```rust
+pub struct Report {
+    pub moves: Vec<Move>,
+    pub failures: Vec<(IssueKey, PluginError)>,
+    pub ambiguous: Vec<(IssueKey, Vec<String>)>,
+}
+```
+
+A plugin registers its tracker as a constructor, so each project builds its
+own from its `[[tracker]]` settings and its pipelines' names, in the project's
+order.
+
+```rust
+impl<'a> MakeTracker<'a> {
+    pub fn make(
+        &self,
+        settings: &Settings,
+        pipelines: &[&str],
+    ) -> Result<Box<dyn Tracker + 'a>, SettingsError>;
+}
+```
 
 ### The machine
 
@@ -481,7 +683,10 @@ stateDiagram-v2
 - A push resets each started restart step, and every step that depends on it, to
   Pending; failed rounds are kept, so CI rounds still add up across pushes.
 - Stopping, blocking and Done each remove the working mark, interrupt every
-  resident step that started, and remove the worktree.
+  resident step that started, cancel background commands, and remove the
+  worktree. Each step's plugin cleans up its own folder; the record keeps
+  which plugin started it even if its pipeline is removed. Each pass has a
+  separate folder under `steps/<item>/<pipeline>/<generation>/<step>`.
 
 rungs proves its own promises
 ([rungs#1](https://github.com/wrkhse/rungs/issues/1)), for every plan of up
@@ -528,9 +733,9 @@ impl StepSpec {
 
 A run is its phase and its steps' progress. `step` is pure and total: an
 event that does not apply leaves the run and names nothing. A request claims
-with fresh progress; a claim that fails also takes the build mark, so it is
-not requested again until a person asks. A failed round under a step's
-`rounds` names `Start` again; `last` makes it final at once, as a pull
+with fresh progress; a claim that fails also takes that pipeline's trigger,
+so it is not requested again until a person asks. A failed round under a
+step's `rounds` names `Start` again; `last` makes it final at once, as a pull
 request closed without merging does. `Pushed` restarts only a settled step.
 
 ```rust
@@ -552,6 +757,7 @@ pub enum Event {
     StartFailed { step: u8 },
     Pushed { step: u8 },
     Changed,
+    Stop,
     Unmarked,
     IssueClosed,
     LostTrack,
@@ -639,6 +845,7 @@ pub struct Project {
 }
 
 pub struct Record {
+    pub generation: u64,
     pub pipeline: String,
     pub phase: Phase,
     pub progress: Progress,
@@ -652,6 +859,7 @@ pub struct Record {
 
 pub struct StepRecord {
     pub id: String,
+    pub plugin: String,
     pub session: Option<Session>,
     pub why: Option<String>,
 }
@@ -682,7 +890,70 @@ exactly one running agent step declares the outcome; if several do, it
 refuses with their ids and requires `--step <id>`. Each agent step's prompt
 includes its explicit finish command.
 
-Files: `crates/cli/src/requests.rs`, `finish.rs`, `stop.rs`.
+Files: `crates/cli/src/requests/`, `finish.rs`, `stop.rs`, and
+`crates/core/src/poll/request.rs`.
+
+#### Structure
+
+A request names the run's generation, so one left from an older pass cannot
+affect a fresh run. A finish also names the running agent step's session and
+failed-round count; a stale request or a replay changes nothing. A stop
+preempts finishes and pending starts and removes the trigger mark, so the
+same request cannot start the run again.
+
+```rust
+pub struct Request {
+    pub generation: u64,
+    pub command: Command,
+}
+
+pub enum Command {
+    Finish {
+        step: String,
+        outcome: Outcome,
+        session: String,
+        failed: u8,
+    },
+    Stop,
+}
+
+pub struct Observation {
+    pub issues: BTreeMap<IssueKey, Watched>,
+    pub requests: BTreeMap<IssueKey, Vec<Request>>,
+    pub etags: BTreeMap<(String, Listed), String>,
+}
+```
+
+Each project's queue has 128 slots under
+`~/.local/state/atelier/requests/<owner>/<repo>/`. A temporary file reserves
+a slot before it is written and renamed; a reader sees only ready files. A
+full queue refuses another request without waiting. Each request is at most
+8 KiB, and a finish reason at most 4096 bytes. The worker acknowledges only
+after every action succeeds and its effects are saved, so a crash between
+acting and acknowledgement replays safely.
+
+```rust
+pub fn submit(folder: &Path, key: &IssueKey, request: &Request) -> Result<()>;
+pub fn read(folder: &Path) -> Result<Vec<Queued>>;
+pub fn acknowledge(queued: &[Queued]) -> Result<()>;
+```
+
+Finish finds the working run whose worktree contains its path; stop finds a
+pipeline/item key across the watched projects, with `--repo owner/name`
+when several match. The builder's session title remains the issue title;
+each agent step's prompt includes its outcomes and an explicit finish
+command naming its own step.
+
+```rust
+pub struct Target {
+    pub repo: String,
+    pub key: IssueKey,
+    pub record: Record,
+}
+
+pub fn in_worktree(paths: &Paths, path: &Path) -> Result<Target>;
+pub fn by_key(paths: &Paths, selector: &str, repo: Option<&str>) -> Result<Target>;
+```
 
 ### State from an older rc
 
@@ -690,6 +961,13 @@ Files: `crates/cli/src/requests.rs`, `finish.rs`, `stop.rs`.
 an older file into the written-out `build`: Building is `builder` running; Open
 is `builder` settled `opened` and `checks` running; Green is `ready` running;
 and Ready is `merge` running.
+
+A trigger mark is written as `requested`, and an earlier rc's `build` mark
+reads as `requested`. A listing tag keeps its pipeline's name, so an earlier
+file's `build` listing is the `build` pipeline's trigger. An older rc cannot
+read `requested`: its daemon refuses to start, naming `state.json` and the
+parse error, and the Homebrew service's `keep_alive` starts it again, which
+refuses again. Rolling back past this rc needs the state file restored first.
 
 Files: `crates/cli/src/state/`.
 
@@ -728,9 +1006,33 @@ On 2026-11-13, a host mutation run changed command-group validation to accept
 group 1. A cleanup test reached `kill -KILL -- -1` on the Mac. Every group
 signal is built by `atelier_command::signal_group`, which refuses groups 0
 and 1 and numbers `kill` would truncate to them, independently of file
-parsing; its regression constructs commands without executing them. This guard does not
-replace process isolation. [The incident record](../../audits/atelier.md#host-mutation-signal-incident)
+parsing. It also refuses atelier's own pid, its parent's pid and its own
+process group, keeping the group only from a read that succeeded, so a
+failed read refuses every target until a later read succeeds; on macOS that
+read waits for its `ps` child until a 5 s deadline, reads its output only
+after it exited successfully, and kills and reaps only that child. Its
+regression constructs commands without executing them. This guard does not
+replace process isolation.
+[The incident record](../../audits/atelier.md#host-mutation-signal-incident)
 keeps the evidence and containment rule.
+
+The identity record narrows which process a signal reaches; it does not
+contain the command. macOS resolves a start time to the second, and checking
+before `/bin/kill` runs leaves a window in which the leader can exit and its
+number be reused. A boot identity the system cannot report fails closed, and
+so does a macOS value that is not a UUID: a start kills the command it
+began and removes its folder once that kill was delivered, keeping it when
+the signal was refused, and a check sends no signal. A limit or a stop
+reaches the group only while its leader runs. Once the command's top level
+exits normally, its exit status is written and a stop sends nothing, so
+background processes it left behind are not signalled. Neither are
+descendants that leave the group or outlive a leader killed by something
+else. An unrecorded or legacy command is left running, and named in the log,
+once for that folder and reason, and in the run's report, each ending
+`; atelier sent no signal, and the command may still be running in <worktree>`,
+or `in its worktree` when the folder records no worktree. This is not
+containment and not a proof of ownership. Tests that start or signal
+processes run only in the contained CI gates.
 
 On the development Mac, only editing, `git`, `gh` and `cargo fmt` are allowed.
 No compile, Clippy, test, metadata, docs build, Kani, mutants or atelier binary
@@ -770,9 +1072,26 @@ assert run was Running, next is not      implies it interrupts and
 ```
 
 - `atelier.command`: a passing command, a failing one, and one past its time
-  limit.
+  limit; a stale or tampered identity, from another boot or another start,
+  settles without a signal; a legacy or malformed record fails closed, and a
+  start repeated over one fails and keeps it; a start repeated on a folder
+  whose record still names a running command stops it; a record whose leader
+  is still stopping keeps the folder until a fresh check finds it gone; a
+  refused signal is not read as a stop; a spawn that fails leaves no folder,
+  and an abandoned start removes its folder once the kill was delivered; the
+  unsignalled line is logged once for that folder and reason; and the leader
+  is reaped once the command ends.
 - `atelier finish` and `atelier stop` against a running daemon in a temporary
   state folder.
+- Each pipeline's trigger in its own label: `atelier:audit` on an open item
+  starts `audit`; an item carrying `atelier:build` and `atelier:audit` starts
+  neither, is logged with both, and starts `build` once a person takes
+  `atelier:audit` off. `atelier init` makes a label for each pipeline's
+  trigger, in the project's order, and a trigger renamed by
+  `labels.<pipeline>` is the one the tracker lists and marks by.
+- The refusals: a pipeline called `working`, `blocked` or `improvement`, in
+  any case, is refused with its name; so are two labels that collide after a
+  rename, ignoring case, and a trigger label over GitHub's 50 characters.
 - An older `state.json` read by the new daemon, with each run where it was.
 
 ## End to end

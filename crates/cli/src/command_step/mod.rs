@@ -1,6 +1,7 @@
 //! `atelier.command`: a shell command a pipeline runs in the run's
 //! worktree, with a time limit.
 
+pub mod identity;
 pub mod run;
 
 use atelier_core::{
@@ -69,6 +70,9 @@ impl Step for Atelier {
     }
 
     /// Starts the command in the run's worktree, in the background.
+    ///
+    /// It waits, on the poll thread, for the leader to publish its own identity,
+    /// which is bounded and which only a hung prologue reaches.
     fn start(&self, run: &RunContext<'_>, step: &StepSpec) -> Result<Started, PluginError> {
         let worktree = run.worktree.ok_or_else(|| {
             PluginError::permanent("a command runs in the run's worktree; git.worktree makes it")
@@ -76,6 +80,10 @@ impl Step for Atelier {
 
         run::start(run.folder, worktree, run.base, &step.settings)?;
         Ok(Started::Nothing)
+    }
+
+    fn stop(&self, folder: &std::path::Path) -> Result<(), PluginError> {
+        run::stop(folder)
     }
 
     /// How the command ended, once it has.

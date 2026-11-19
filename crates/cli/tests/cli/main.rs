@@ -4,7 +4,9 @@
 mod gates;
 mod pipelines;
 mod recovery;
+mod requests;
 mod sandbox;
+mod triggers;
 
 use std::fs;
 
@@ -124,10 +126,12 @@ fn passing_checks_wake_the_builder_to_mark_its_pull_request_ready() {
     sandbox.wait("the builder told", |sandbox| prompts(sandbox).len() >= 2);
     let before = listings(&sandbox);
     sandbox.wait("a later poll", |sandbox| listings(sandbox) >= before + 2);
+    sandbox.wait("the ready step to run", |sandbox| {
+        sandbox.step("12", "ready").as_deref() == Some("running")
+    });
     drop(daemon);
 
     let prompts = prompts(&sandbox);
-    assert_eq!(sandbox.step("12", "ready").as_deref(), Some("running"));
     assert_eq!(prompts.len(), 2, "{prompts:?}");
     assert!(
         prompts[1].starts_with("api post /api/session/ses_e34e74974ffezeihakyxaDRnbK/prompt "),
