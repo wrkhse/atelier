@@ -3,24 +3,14 @@
 **Status: Implemented, `0.1.0-rc.2`.** The candidate installs through Homebrew
 and passes its real formula test.
 
-You can install atelier and check its version. The issue loop and daemon are
-planned for slice 1; the service definition is available but is not started.
-
-```sh
-brew install StevenJPx2/taps/atelier
-
-atelier --version
-# atelier 0.1.0-rc.2
-```
+You can install atelier and check its version. The
+[project README](../../../README.md) shows the setup flow for using atelier.
 
 ```mermaid
 flowchart LR
-    PR["Pull request<br/>format, lint, tests, mutation"] --> Merge["Owner approves<br/>merge and tag"]
-    Merge --> Build["Three native builds<br/>package and smoke"]
-    Build --> Release["GitHub release<br/>archives and SHA256SUMS"]
-    Release --> Approval["Owner approves<br/>release environment"]
-    Approval --> Tap["Generate, audit, install<br/>push formula"]
-    Tap --> Install["brew install<br/>atelier --version"]
+    Release["GitHub release<br/>archives and SHA256SUMS"] --> Tap["Homebrew formula"]
+    Tap --> Install["Install atelier<br/>check version and help"]
+    Install --> Test["Homebrew formula test"]
 ```
 
 ## Recording
@@ -39,97 +29,22 @@ Frames from its beginning and final result are inspected for private data.
 
 ### Workspace and command
 
-Five crates share one version and strict lints. The library crates carry only
-crate documentation; slice 1 adds their behavior. Core and Git have no
-external dependencies. The CLI uses the approved `clap` dependency.
+The workspace builds the `atelier` binary. The
+[crates reference](../../../crates/README.md) describes its members and
+toolchain; the [CLI reference](../../../crates/cli/README.md) describes its
+commands.
 
-Files: `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `clippy.toml`,
-`deny.toml`, `.cargo/mutants.toml`, `crates/*` and `plugins/*`.
-
-```sh
-cargo run --locked -p atelier-cli -- --version
-# atelier 0.1.0-rc.2
-```
-
-#### Structure
-
-The command model is empty: Clap supplies help and version. The entry point
-prints parsing errors and returns status 2, without calling `process::exit`.
-
-```rust
-struct Cli {}
-
-fn main() -> std::io::Result<ExitCode>;
-```
-
-Verification: the packaged smoke run executes the built binary's `--version`
-and `--help` on each target; slice 0 has no Rust tests. Mutation testing
-excludes `main` by name until slice 1 gives it behavior to test. The MSRV check runs on
-the workspace's declared minimum. Development and CI pin stable Rust 1.100.0;
-the [Rust 1.100 page](../rust-1.100.md) lists what it leaves open.
-
-### Check workflow
-
-Every pull request runs Rust formatting, Clippy with warnings denied, nextest,
-doc tests, rustdoc, cargo-deny, an MSRV check, Python format and lint, and two
-native release builds with packaged smoke tests. Mutation testing covers the
-pull request's Rust diff.
-
-Files: `pyproject.toml`; the checks run through `.atelier/config.toml` and
-`.github/workflows/atelier.yml`, as [slice 2](slice-2.md) builds them, and
-the packaged smoke tests in `.github/workflows/package.yml`.
-
-```sh
-cargo nextest run --workspace --locked --no-tests=warn
-# 0 tests run
-
-cargo mutants --workspace --timeout 120
-# no mutants to test
-```
-
-#### Structure
-
-Three jobs own distinct gates: `rust`, `msrv` and `package`. Package runs
-on macOS arm64 and Linux x64. Actions are pinned by commit SHA; checkout does
-not retain credentials. A newer run cancels a superseded check run.
-
-Verification: the local commands in [Crates](../../../crates/README.md#checks)
-and [Release tooling](../../../scripts/README.md#verify) pass. Pull request CI
-must pass before merge. Kani proofs belong to slice 1's state machine.
+Verification: native packaging smoke tests run the binary's version and help.
+Pull request gates run in [contained CI](../../../.github/ci/README.md).
 
 ### Candidate and Homebrew service
 
-A version tag builds macOS arm64, Linux arm64 and Linux x64. Each runner checks
-the tag against the workspace version, packages its native binary and runs it.
-The publish job creates a GitHub release with all three archives and SHA256SUMS.
+The candidate release provides native archives and a Homebrew formula with a
+service definition. [Release tooling](../../../scripts/README.md) describes
+packaging, formula generation and verification.
 
-The tap job waits in the protected `release` environment for the owner's
-review. Its dedicated deploy key writes only to `StevenJPx2/homebrew-taps`.
-It generates the formula from the published checksums, audits it, installs and
-tests it, then pushes the formula. Missing credentials fail the job.
-
-Files: `.github/workflows/release.yml` and [`scripts/`](../../../scripts/README.md).
-
-```sh
-python3 scripts/release.py package \
-  --target darwin-arm64 --binary target/release/atelier
-
-python3 scripts/release.py smoke dist/atelier-*.tar.gz
-# ...: packaged version and help passed
-```
-
-#### Structure
-
-The script exposes five commands: `version`, `package`, `sums`, `formula`
-and `smoke`. Archive layout, file-size limits and validation live in
-[Release tooling](../../../scripts/README.md). The service template runs
-`atelier daemon` with `keep_alive true`, Homebrew's standard PATH and one
-log under Homebrew's `var/log/`.
-
-Verification: the native tarball smoke test on each target, then
-`brew style`, `brew audit --strict --online`, install and `brew test` in
-the protected job. The workflow is complete only after all three builds and the
-tap job pass and the owner's local install reports the candidate version.
+Verification: the release run builds and smoke-tests each target. The protected
+tap job audits, installs and tests the formula before publication.
 
 ## End to end
 
@@ -156,6 +71,3 @@ tap job pass and the owner's local install reports the candidate version.
 Local Homebrew's RuboCop plugin emits an upstream obsolete-configuration warning
 about `IgnoredPatterns`. No formula offense is reported, and no warning is
 suppressed. The protected CI style and strict online audit gates pass.
-
-Slice 1 waits for the owner's review of this candidate. No service or builder
-starts as part of slice 0's proof.
