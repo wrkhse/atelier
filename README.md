@@ -1,7 +1,7 @@
 # atelier
 
 atelier is a CI engine that gives monorepos easy access to best-practice CI. A
-builder agent and issue detection through sourcefed extend it.
+builder agent extends it.
 
 With the builder, atelier turns a labelled GitHub issue into a pull request
 ready for your review.
