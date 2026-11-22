@@ -1,6 +1,10 @@
 # atelier
 
-atelier turns a labelled GitHub issue into a pull request ready for your review.
+atelier is a CI engine that gives monorepos easy access to best-practice CI. A
+builder agent extends it.
+
+With the builder, atelier turns a labelled GitHub issue into a pull request
+ready for your review.
 You add `atelier:build` to an issue; atelier starts an OpenCode builder on its
 own branch and worktree, the builder opens a draft pull request and pushes fixes
 until every check passes, then marks it ready.
@@ -9,6 +13,72 @@ Your project's gates run in GitHub's CI, one check each, and their fixes, such
 as a formatter, run on every commit a builder makes. Labels on the issue
 show where its work is, and the daemon saves each step before taking it, so it
 can stop at any moment and carry on where it was.
+
+## Design
+
+atelier is a step machine. A mark on an item starts a run of one of the
+project's pipelines; each step settles with an outcome, and steps whose needs
+hold start together. The label-to-pull-request loop is the built-in `build`
+pipeline:
+
+```mermaid
+flowchart LR
+    Mark["atelier:build"] --> Work["git.worktree"]
+    Work --> Builder["agent.session<br/>builder"]
+    Builder --> Checks["forge.checks<br/>CI gates"]
+    Checks --> Ready["forge.ready"]
+    Ready --> Merge["forge.merge"]
+    Merge --> Done["Done<br/>item closed, worktree removed"]
+```
+
+**Pipelines.** A project defines any number of pipelines, each a set of steps
+in its config. A step's `uses` names a kind by role or plugin; `after` and
+`after_any` name the outcomes it waits for, and `outcomes`, `rounds` and
+`restart` bound how it settles. Steps that become ready together start
+together, a failed step starts again under its `rounds` limit, and a final
+failure with no step to receive it blocks the run.
+
+**Runs.** A run is one pass of a pipeline for one item, such as
+`build github#12`, and an item has at most one working run. When no step runs
+and none can start, the run is Done and closes the item with a comment listing
+every step's outcome. Every way out removes the working mark, interrupts
+resident agent sessions, cancels background commands and removes the worktree.
+
+**The machine.** Core lowers each pipeline to a plan on
+[rungs](https://github.com/StevenJPx2/rungs/issues/1), a `no_std` step machine
+with no dependencies and no I/O, proven with Kani for starts, skips, bounded
+attempts, restarts and completion. Each run's progress is saved before an
+action, so a stop at any point resumes from the last saved step.
+
+**Roles.** Plugins fill roles that core knows by contract, not by name:
+
+| Role    | Does                                       | Plugin here                |
+| ------- | ------------------------------------------ | -------------------------- |
+| Trigger | Says when a run starts or stops            | sourcefed                  |
+| Tracker | Reads, marks, comments on and closes items | github, local              |
+| Forge   | Finds the pull request and its checks      | github                     |
+| Agent   | Starts a resident session with the brief   | opencode                   |
+| Checks  | Names each root's gates and fixes          | commands, language plugins |
+
+**The brief.** Core assembles the builder's brief from its contract, the item,
+the pull request, the project's `AGENTS.md` and the forge's denials, and the
+agent renders it as a session prompt and permissions. A resident agent settles
+a step by running `atelier finish <outcome>` in its worktree.
+
+**Gates as proof.** Checks plugins find each root and name its gates and
+fixes; the forge turns the gates the diff touches into one CI check each, and a
+per-worktree hook runs the fixes before every commit. A person merges the pull
+request, the forge reports the merge and the run closes the item.
+
+**Triggers.** The sourcefed trigger connects to sourcefed's daemon on loopback
+and creates a monitor for each pipeline and trigger. An event starts a run for
+its item and pipeline, is acknowledged only after the run is saved, and the
+tracker re-lists marked items at start and on overflow.
+
+**The CLI.** The CLI assembles the plugins and owns I/O. Its daemon gives each
+project its own thread and keeps one writer for `state.json`, which saves
+before each action so a repeated action is harmless. Labels stay the source of
+truth; `state.json` holds each run's progress and what the tracker cannot.
 
 ## Install
 
@@ -150,6 +220,7 @@ pull request cannot change how atelier treats it. The
       ([#42](https://github.com/wrkhse/atelier/issues/42))
 - [ ] Pipelines of steps, with `atelier finish` and `atelier stop`, in a
       release ([#43](https://github.com/wrkhse/atelier/issues/43))
+- [ ] atelier as a tack plugin ([#85](https://github.com/wrkhse/atelier/issues/85))
 
 ## More
 
@@ -159,7 +230,9 @@ pull request cannot change how atelier treats it. The
   [github](plugins/github/README.md), [opencode](plugins/opencode/README.md)
   and [commands](plugins/commands/README.md) plugins.
 - [The design](docs/plans/README.md), with the recordings of each part working,
-  and [the architecture](https://github.com/wrkhse/atelier/issues/1).
+  and the architecture in [the plan](https://github.com/wrkhse/atelier/issues/1),
+  [pipelines of steps](https://github.com/wrkhse/atelier/issues/43) and
+  [the sourcefed trigger](https://github.com/wrkhse/atelier/issues/42).
 - [Working on atelier](AGENTS.md) and
   [the CI runner](https://github.com/wrkhse/atelier/tree/main/.github/ci).
 - Every page as a site, at
