@@ -1,8 +1,7 @@
 # atelier
 
-atelier is a CI engine that gives monorepos easy access to best-practice CI. It
-is a tack plugin; a builder agent and issue detection through sourcefed are
-extensions.
+atelier is a CI engine that gives monorepos easy access to best-practice CI. A
+builder agent and issue detection through sourcefed extend it.
 
 With the builder, atelier turns a labelled GitHub issue into a pull request
 ready for your review.
@@ -221,6 +220,7 @@ pull request cannot change how atelier treats it. The
       ([#42](https://github.com/wrkhse/atelier/issues/42))
 - [ ] Pipelines of steps, with `atelier finish` and `atelier stop`, in a
       release ([#43](https://github.com/wrkhse/atelier/issues/43))
+- [ ] atelier as a tack plugin ([#85](https://github.com/wrkhse/atelier/issues/85))
 
 ## More
 
