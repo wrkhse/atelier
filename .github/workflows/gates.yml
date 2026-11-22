@@ -35,9 +35,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # buildx's type=gha cache writes through this token. A pull request
-      # writes only its own scope, and main alone writes the shared one.
-      actions: write
     outputs:
       image: ${{ steps.image.outputs.image }}
     steps:
