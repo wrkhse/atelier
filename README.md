@@ -1,6 +1,10 @@
 # atelier
 
-atelier turns a labelled GitHub issue into a pull request ready for your review.
+atelier is a CI engine that gives monorepos easy access to best-practice CI. A
+builder agent extends it.
+
+With the builder, atelier turns a labelled GitHub issue into a pull request
+ready for your review.
 You add `atelier:build` to an issue; atelier starts an OpenCode builder on its
 own branch and worktree, the builder opens a draft pull request and pushes fixes
 until every check passes, then marks it ready.
@@ -216,6 +220,7 @@ pull request cannot change how atelier treats it. The
       ([#42](https://github.com/wrkhse/atelier/issues/42))
 - [ ] Pipelines of steps, with `atelier finish` and `atelier stop`, in a
       release ([#43](https://github.com/wrkhse/atelier/issues/43))
+- [ ] atelier as a tack plugin ([#85](https://github.com/wrkhse/atelier/issues/85))
 
 ## More
 
