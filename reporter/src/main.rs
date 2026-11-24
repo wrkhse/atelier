@@ -1,12 +1,18 @@
-//! Reports each gate of a recorded `moon ci` run as a GitHub check.
+//! Validates each gate of a recorded `moon ci` run and writes the job
+//! summary. A report that cannot be read fails every gate. It does not create
+//! GitHub checks: the gate job's own status is the check.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::env;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use atelier_reporter::{GateCheck, GateState, ReportError, checks, report};
+use atelier_reporter::{GateCheck, GateState, ReportError, report};
 use clap::Parser;
 
-/// Report each gate of a moon CI run as a GitHub check.
+/// Validate each gate of a moon CI run and write the job summary.
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Args {
@@ -14,34 +20,25 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     report: PathBuf,
 
-    /// A check to report, such as `rust/fmt`; repeat for each gate.
+    /// A gate to validate, such as `rust/fmt`; repeat for each gate.
     #[arg(long = "gate", value_name = "NAME", required = true)]
     gates: Vec<String>,
-
-    /// The repository the checks belong to; required unless validating only.
-    #[arg(
-        long,
-        value_name = "OWNER/REPO",
-        required_unless_present = "validate_only"
-    )]
-    repo: Option<String>,
-
-    /// The commit the checks belong to; required unless validating only.
-    #[arg(long, required_unless_present = "validate_only")]
-    sha: Option<String>,
 
     /// The largest report read, in bytes.
     #[arg(long, value_name = "N", default_value_t = 8_388_608)]
     max_report_bytes: u64,
-
-    /// Check the report and print each gate without creating checks; fails
-    /// when any gate failed.
-    #[arg(long)]
-    validate_only: bool,
 }
 
+/// Fails when a gate is listed twice, the report could not be read, any
+/// gate failed, or the job summary could not be written.
 fn main() -> ExitCode {
     let args = Args::parse();
+
+    if let Some(gate) = repeated(&args.gates) {
+        eprintln!("gate {gate} is listed more than once");
+        return ExitCode::FAILURE;
+    }
+
     let read = report::read(&args.report, args.max_report_bytes);
     let gate_checks = match &read {
         Ok(ci) => report::results(ci, &args.gates),
@@ -52,17 +49,24 @@ fn main() -> ExitCode {
         eprintln!("{}: {error}", args.report.display());
     }
 
-    let ok = if args.validate_only {
-        validate(&gate_checks)
-    } else {
-        publish(&gate_checks, args.repo.as_deref(), args.sha.as_deref())
-    };
+    let summarized = summarize(&gate_checks);
+    let passed = validate(&gate_checks);
 
-    if ok && read.is_ok() {
+    if passed && summarized && read.is_ok() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// The first gate named again after an earlier mention, if any.
+fn repeated(gates: &[String]) -> Option<&str> {
+    let mut seen = BTreeSet::new();
+
+    gates
+        .iter()
+        .map(String::as_str)
+        .find(|gate| !seen.insert(*gate))
 }
 
 /// A report that could not be read fails every gate with the reason.
@@ -76,6 +80,36 @@ fn unreadable(gates: &[String], error: &ReportError) -> Vec<GateCheck> {
     gates.iter().map(failed).collect()
 }
 
+/// Appends each gate's outcome to the job summary file that
+/// `GITHUB_STEP_SUMMARY` names; true when it names none or the write
+/// succeeded.
+fn summarize(gate_checks: &[GateCheck]) -> bool {
+    let named = env::var_os("GITHUB_STEP_SUMMARY").filter(|path| !path.is_empty());
+    let Some(path) = named else {
+        return true;
+    };
+
+    let path = Path::new(&path);
+
+    if let Err(error) = append_summary(path, gate_checks) {
+        eprintln!("job summary {}: {error}", path.display());
+        return false;
+    }
+
+    true
+}
+
+fn append_summary(path: &Path, gate_checks: &[GateCheck]) -> io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "## Gate results")?;
+
+    for check in gate_checks {
+        writeln!(file, "- {}: {}", check.name, outcome(check.state))?;
+    }
+
+    Ok(())
+}
+
 /// Prints each gate; true only when every gate passed.
 fn validate(gate_checks: &[GateCheck]) -> bool {
     for check in gate_checks {
@@ -85,26 +119,6 @@ fn validate(gate_checks: &[GateCheck]) -> bool {
     gate_checks
         .iter()
         .all(|check| check.state == GateState::Passed)
-}
-
-/// Creates each check and prints its gate once it exists; false without a
-/// repository or commit, or at the first check that could not be created.
-fn publish(gate_checks: &[GateCheck], repo: Option<&str>, sha: Option<&str>) -> bool {
-    let (Some(repo), Some(sha)) = (repo, sha) else {
-        eprintln!("publishing checks needs --repo and --sha");
-        return false;
-    };
-
-    for check in gate_checks {
-        if let Err(error) = checks::create(check, repo, sha) {
-            eprintln!("{}: {error}", check.name);
-            return false;
-        }
-
-        println!("{}: {}", check.name, outcome(check.state));
-    }
-
-    true
 }
 
 const fn outcome(state: GateState) -> &'static str {

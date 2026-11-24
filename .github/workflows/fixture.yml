@@ -1,0 +1,93 @@
+# Proves each gate fails closed: one deliberate violation fails only its gate,
+# and the restored code passes it. See fixtures/rust/README.md.
+name: fixture
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Kani, Miri and MSRV get native violations in the next pull request of
+  # this slice; until then the reporter's tests cover how their failures map
+  # to a failed check, fail-closed.
+  violation:
+    name: "violation rust/${{ matrix.gate }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [fmt, clippy, test, mutants]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI_SUPPORT: ${{ github.workspace }}/.github/ci
+      SOURCE: ${{ github.workspace }}
+      GATE: rust/${{ matrix.gate }}
+      GATES: rust/${{ matrix.gate }}
+      BASE: origin/main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Reads .prototools and installs moon 2.6.5.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+          components: rustfmt,clippy,rust-src
+      # Built before the violation, so the validator is the clean reporter.
+      # It is static musl, so it runs in the bookworm gate image whatever
+      # glibc the runner has.
+      - name: Build reporter
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-reporter \
+            --target x86_64-unknown-linux-musl
+      # The mutants gate diffs BASE...HEAD, so the violation is committed in
+      # this checkout. Nothing is pushed, and the job holds no credential.
+      - name: Apply the violation
+        run: |
+          echo "CLEAN_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          bash fixtures/violations/${{ matrix.gate }}.sh
+          git add -A reporter
+          git -c user.name=fixture -c user.email=fixture@invalid \
+            commit --quiet --message "test: $GATE violation"
+      # A non-empty report shows moon ran the task, so a failure before the
+      # gate, such as the image build, never counts as the expected one.
+      - name: Expect the gate to fail
+        run: |
+          status=0
+          bash "$CI_SUPPORT/run.sh" gate || status=$?
+          if [[ "$status" -eq 0 ]]; then
+            echo "::error::$GATE passed with its violation applied; it must fail"
+            exit 1
+          fi
+          if [[ ! -s "$RUNNER_TEMP/atelier-reports/container/ci-report.json" ]]; then
+            echo "::error::$GATE failed (exit $status) before moon wrote a report"
+            exit 1
+          fi
+          echo "$GATE failed with its violation applied (exit $status), as expected"
+      - name: Restore and expect the gate to pass
+        run: |
+          git reset --hard --quiet "$CLEAN_HEAD"
+          git clean -fd reporter
+          if [[ -n "$(git status --porcelain -- reporter)" ]]; then
+            echo "::error::reporter/ is not restored to $CLEAN_HEAD"
+            exit 1
+          fi
+          # A fresh report and reporter copy, so nothing from the failed run
+          # is judged.
+          rm -rf "$RUNNER_TEMP/atelier-reports" "$RUNNER_TEMP/atelier"
+          if ! bash "$CI_SUPPORT/run.sh" gate; then
+            echo "::error::$GATE failed on the restored code; it must pass"
+            exit 1
+          fi

@@ -1,5 +1,6 @@
 # atelier's own gates, seeded from .atelier/config.toml at f687307 (#87).
-# moon ci runs each one; the reporter publishes one GitHub check per gate.
+# moon ci runs each one; the reporter judges each moon result, and the gate
+# job's status is the GitHub check.
 taskOptions:
   runInCI: always
   cache: false

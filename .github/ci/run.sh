@@ -7,7 +7,7 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux \
   exit 2
 fi
 
-# run.sh MODE, with GATES and BASE from the environment.
+# run.sh MODE, with GATE, GATES and BASE from the environment.
 export MODE=${1:?mode}
 export GATE=${GATE:-}
 export ROOT=${ROOT:-.}
@@ -30,7 +30,7 @@ case "$MODE" in
 esac
 
 # The reporter the workflow built must be a plain file, never a link.
-reporter="$source/target/release/atelier-reporter"
+reporter="$source/target/x86_64-unknown-linux-musl/release/atelier-reporter"
 if [[ ! -f "$reporter" || -L "$reporter" ]]; then
   echo "the reporter is not a plain file at $reporter" >&2
   exit 1
@@ -84,15 +84,6 @@ contained() {
     || { echo "container $name is not contained" >&2; exit 1; }
 }
 
-# summary TEXT: append known, bounded lines to the job summary, the
-# reporter's "rust/fmt: passed" or "rust/fmt: failed"; container output never
-# reaches it unfiltered.
-summary() {
-  [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
-  grep -E '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+: (passed|failed)$' <<< "$1" \
-    | cut -b1-500 | head -n 20 | sed 's/$/\n/' >> "$GITHUB_STEP_SUMMARY" || true
-}
-
 # start NAME: run it within the mode's limit; its exit status.
 start() {
   timeout --signal=TERM --kill-after=30s "$limit" docker start --attach "$1"
@@ -101,16 +92,12 @@ start() {
 # validate: a fresh, offline container judges the copied report with the
 # reporter, both read-only; the gate cannot change either.
 validate() {
-  local verdict status=0
   MODE=validate
   limit=10m
   create "atelier-validate-$id" none \
     "type=bind,source=$output,target=/reports,readonly" \
     "type=bind,source=$binary,target=/binary,readonly"
-  verdict=$(start "atelier-validate-$id") || status=1
-  echo "$verdict"
-  summary "$verdict"
-  return "$status"
+  start "atelier-validate-$id"
 }
 
 id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM"

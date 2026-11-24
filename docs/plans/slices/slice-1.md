@@ -22,7 +22,8 @@ flowchart LR
     Preset[".moon/tasks/rust.yml"] --> Moon["moon ci"]
     Moon --> Report["ciReport.json"]
     Report --> Reporter["atelier reporter"]
-    Reporter --> Checks["one GitHub check per gate"]
+    Reporter --> Job["gate job passes or fails"]
+    Job --> Checks["one GitHub check per gate"]
 ```
 
 ## What it builds
@@ -42,43 +43,36 @@ violation per gate fails only that gate.
 
 ### The reporter
 
-A Rust binary at `reporter/` reads moon's `ciReport.json` and creates one
-GitHub check per gate through the `gh` CLI. It maps a moon task result by the
-target's task id, turns passed or cached results into a passing check, and
-turns a failed, missing, malformed or oversized result into a failing check.
-The fail-closed rules and their tests are ported from `.github/ci/reports.py`
-and `test_reports.py` at f687307.
+A Rust binary at `reporter/` reads moon's `ciReport.json`, fails closed when a
+gate's result is missing, empty, malformed or failed, and writes the job
+summary. Each gate is its own CI job, and the job's status is the check. No job
+creates checks through an API or holds a write token. The fail-closed rules are
+ported from the report validation in `.github/ci/reports.py` at f687307.
 
 Usage:
 
 ```sh
-atelier-reporter \
-  --report .moon/cache/ciReport.json \
-  --gate rust/fmt --gate rust/clippy \
-  --repo wrkhse/atelier --sha "$GITHUB_SHA"
+atelier-reporter --report .moon/cache/ciReport.json --gate rust/fmt
 ```
 
-With `--validate-only` the binary judges the report without a token, for the
-offline validation container.
-
-Verification: a recorded moon result produces exactly one check per gate; a
-missing result fails its gate. Tests cover every mapping and failure mode with a
-stand-in `gh`.
+Verification: a recorded moon result makes its gate job pass or fail; a missing
+or invalid result fails it. Unit and integration tests with a stand-in report
+prove it.
 
 ### Project wiring
 
 `.github/workflows/gates.yml` installs the pinned moon and Rust tools, builds
-the reporter, runs `moon ci` inside the bounded non-root container from
-`.github/ci`, then publishes the checks on the runner with a token. A fresh
-offline container validates the report before publication. No gate runs on a
-developer's machine.
+the reporter and runs `moon ci` inside the bounded non-root container from
+`.github/ci`. The gate job's status is the check, and no job has a write token.
+A fresh offline container validates the report. No gate runs on a developer's
+machine.
 
 Verification: on a fixture pull request every Rust gate is its own check, a
 deliberate violation fails its gate, and restoring the code passes it.
 
 ## End to end
 
-The fixture pull request runs all seven gates in CI, the reporter posts one
-check per gate, a deliberate violation fails only its gate, and restoring the
-code passes it. The released candidate is recorded working end to end before
+The fixture pull request runs all seven gates in CI, each gate's job reports its
+own check, a deliberate violation fails only its gate, and restoring the code
+passes it. The released candidate is recorded working end to end before
 review.

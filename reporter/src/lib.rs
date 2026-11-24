@@ -1,6 +1,5 @@
 //! Reads a recorded moon CI report and reports each gate as a GitHub check.
 
-pub mod checks;
 pub mod report;
 
 use std::fmt;

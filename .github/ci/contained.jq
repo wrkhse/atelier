@@ -1,6 +1,7 @@
 # The exact settings run.sh gives a container, judged against `docker inspect`:
 # $network and, as positional arguments, every TYPE:SOURCE:TARGET mount.
-# test_reports.py runs it against inspection.json, one bad setting at a time.
+# inspection.json is a saved inspection, a fixture to check this filter
+# against; CI exercises the filter on every container run.sh creates.
 .[0] as $c | $c.HostConfig as $h
 | $c.Config.User == "10001:10001"
 and $h.CapDrop == ["ALL"] and ($h.CapAdd // [] | length == 0)

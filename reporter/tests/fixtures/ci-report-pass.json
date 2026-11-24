@@ -1,0 +1,77 @@
+{
+  "actions": [
+    {
+      "allowFailure": false,
+      "createdAt": "2026-11-24T09:00:01.120000",
+      "duration": { "secs": 0, "nanos": 412000000 },
+      "error": null,
+      "finishedAt": "2026-11-24T09:00:01.532000",
+      "flaky": false,
+      "label": "RunTask(reporter:fmt)",
+      "node": {
+        "action": "run-task",
+        "params": { "args": [], "env": [], "interactive": false, "persistent": false, "target": "reporter:fmt" }
+      },
+      "nodeIndex": 1,
+      "startedAt": "2026-11-24T09:00:01.120000",
+      "status": "passed"
+    },
+    {
+      "allowFailure": false,
+      "createdAt": "2026-11-24T09:00:01.600000",
+      "duration": { "secs": 21, "nanos": 80000000 },
+      "error": null,
+      "finishedAt": "2026-11-24T09:00:22.680000",
+      "flaky": false,
+      "label": "RunTask(reporter:clippy)",
+      "node": {
+        "action": "run-task",
+        "params": { "args": [], "env": [], "interactive": false, "persistent": false, "target": "reporter:clippy" }
+      },
+      "nodeIndex": 2,
+      "startedAt": "2026-11-24T09:00:01.600000",
+      "status": "passed"
+    },
+    {
+      "allowFailure": false,
+      "createdAt": "2026-11-24T09:00:22.700000",
+      "duration": { "secs": 9, "nanos": 310000000 },
+      "error": null,
+      "finishedAt": "2026-11-24T09:00:32.010000",
+      "flaky": false,
+      "label": "RunTask(reporter:test)",
+      "node": {
+        "action": "run-task",
+        "params": { "args": [], "env": [], "interactive": false, "persistent": false, "target": "reporter:test" }
+      },
+      "nodeIndex": 3,
+      "startedAt": "2026-11-24T09:00:22.700000",
+      "status": "passed"
+    },
+    {
+      "allowFailure": false,
+      "createdAt": "2026-11-24T09:00:32.100000",
+      "duration": { "secs": 74, "nanos": 500000000 },
+      "error": null,
+      "finishedAt": "2026-11-24T09:01:46.600000",
+      "flaky": false,
+      "label": "RunTask(reporter:mutants)",
+      "node": {
+        "action": "run-task",
+        "params": { "args": [], "env": [], "interactive": false, "persistent": false, "target": "reporter:mutants" }
+      },
+      "nodeIndex": 4,
+      "startedAt": "2026-11-24T09:00:32.100000",
+      "status": "passed"
+    }
+  ],
+  "context": {
+    "affectedOnly": false,
+    "initialTargets": ["reporter:fmt", "reporter:clippy", "reporter:test", "reporter:mutants"],
+    "primaryTargets": ["reporter:fmt", "reporter:clippy", "reporter:test", "reporter:mutants"],
+    "profile": null,
+    "targetStates": {}
+  },
+  "duration": { "secs": 105, "nanos": 480000000 },
+  "status": "passed"
+}

@@ -16,7 +16,8 @@ Slice 1, the Rust gate presets on moon, is in progress
 flowchart LR
     Presets[".moon/tasks/rust.yml"] --> Moon["moon ci"]
     Moon --> Reporter["atelier reporter"]
-    Reporter --> Checks["one GitHub check per gate"]
+    Reporter --> Job["gate job passes or fails"]
+    Job --> Checks["one GitHub check per gate"]
 ```
 
 The approved design has three parts, built together in slice 1.
@@ -25,8 +26,8 @@ The approved design has three parts, built together in slice 1.
 cargo-mutants and MSRV as moon tasks. Presets stay plain task files, so moving
 to another runner later stays cheap.
 
-**Reporter (in progress).** The reporter reads moon's results and posts one GitHub
-check per gate. A missing or failed result fails its gate. The reporter maps a
+**Reporter (in progress).** The reporter judges moon's results; each gate's CI
+job is the check. A missing or failed result fails its gate. The reporter maps a
 result by the moon target's task id.
 
 **Runner (in progress).** Project wiring runs `moon ci` and the reporter in CI.

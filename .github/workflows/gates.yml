@@ -1,6 +1,5 @@
-# atelier's gates as moon tasks, run by moon ci inside a bounded, non-root
-# container, then published as one GitHub check per gate. See
-# .github/ci/README.md.
+# atelier's gates as moon tasks, each run by moon ci inside a bounded,
+# non-root container. See .github/ci/README.md.
 name: gates
 
 on:
@@ -8,12 +7,20 @@ on:
   workflow_dispatch:
 
 jobs:
-  gates:
+  # Each gate is its own job, and the job's status is the GitHub check, so
+  # no job holds a token that can write checks.
+  gate:
+    name: "rust/${{ matrix.gate }}"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
-      checks: write
+    env:
+      GATE: rust/${{ matrix.gate }}
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [fmt, clippy, test, kani, miri, mutants, msrv]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,41 +32,29 @@ jobs:
         with:
           toolchain: 1.100.0
           components: rustfmt,clippy,rust-src
-      # The pinned nightly and Miri live in the gate image, where the miri
-      # gate runs.
-      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2
-        with:
-          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.152,cargo-deny@0.20.2,cargo-shear@1.14.0
-      - run: |
-          cargo install --locked kani-verifier --version 0.68.0
-          cargo kani setup
+      # Kani, Miri, nextest and cargo-mutants live in the gate image; only
+      # the reporter is built on the runner. It is static musl, so it runs in
+      # the bookworm gate image whatever glibc the runner has.
       - name: Build reporter
-        run: cargo build --release --locked -p atelier-reporter
-      - name: Compute mutant diff
-        shell: bash
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || 'origin/main' }}
         run: |
-          base="$BASE_SHA"
-          mkdir -p target
-          git diff "$base"...HEAD -- '*.rs' > target/mutants.diff
-      - id: gate
-        name: Run gates in the container
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-reporter \
+            --target x86_64-unknown-linux-musl
+      - name: Run the gate in the container
         env:
           CI_SUPPORT: ${{ github.workspace }}/.github/ci
           SOURCE: ${{ github.workspace }}
-          GATES: rust/fmt rust/clippy rust/test rust/kani rust/miri rust/mutants rust/msrv
+          GATES: rust/${{ matrix.gate }}
           BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
         run: bash "$CI_SUPPORT/run.sh" gate
-      # Runs after a failed gate too: a missing or invalid report publishes
-      # every gate as failed.
-      - name: Publish checks
+      # Writes the gate's line to GITHUB_STEP_SUMMARY, after a failed gate
+      # too. The offline container above remains the validator of record.
+      - name: Summarize the gate result
         if: ${{ !cancelled() }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ runner.temp }}/atelier-reports/container/ci-report.json
         run: >-
-          ./target/release/atelier-reporter
-          --report "$RUNNER_TEMP/atelier-reports/container/ci-report.json"
-          --gate rust/fmt --gate rust/clippy --gate rust/test --gate rust/kani
-          --gate rust/miri --gate rust/mutants --gate rust/msrv
-          --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA"
+          ./target/x86_64-unknown-linux-musl/release/atelier-reporter --validate-only
+          --report "$REPORT" --gate "$GATE"

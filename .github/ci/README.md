@@ -1,15 +1,18 @@
 # Contained CI gates
 
-`gates.yml` runs atelier's gates as moon tasks inside a fresh Linux container
-on a GitHub-hosted runner, then publishes one GitHub check per gate. No
-developer runs a gate on their machine.
+`gates.yml` runs each of atelier's gates as its own matrix job on a
+GitHub-hosted runner, with the gate's moon task inside a fresh Linux
+container. The job's status is the gate's GitHub check, such as
+`rust/fmt`, so no job holds a token that can write, and nothing creates
+checks through the API. No developer runs a gate on their machine.
 
 ```mermaid
 flowchart LR
-    Checkout["checkout<br/>no persisted credential"] --> Build["runner: build<br/>atelier-reporter"]
-    Build --> Gate["container: moon ci<br/>writes /reports/ci-report.json"]
+    Matrix["gates.yml<br/>one job per gate"] --> Checkout["checkout<br/>no persisted credential"]
+    Checkout --> Build["runner: build<br/>atelier-reporter"]
+    Build --> Gate["container: moon ci :fmt<br/>writes /reports/ci-report.json"]
     Gate --> Validate["fresh offline container:<br/>atelier-reporter --validate-only"]
-    Validate --> Publish["runner: atelier-reporter<br/>one check per gate"]
+    Validate --> Check["job status<br/>is the check rust/fmt"]
 ```
 
 | File              | Holds                                                                                 |
@@ -25,10 +28,14 @@ The gates are the tasks in `.moon/tasks/rust.yml`: `rust/fmt`,
 `rust/msrv`. The report checks that `reports.py` and `test_reports.py` did at
 f687307 are ported into the Rust reporter, `atelier-reporter`.
 
+The runner builds the reporter as a static musl binary for the container,
+but Kani, Miri, the tests and the mutants execute only inside the gate
+container, never on the runner or a developer machine.
+
 ## The container
 
 ```sh
-GATES="rust/fmt rust/clippy" BASE="$BASE" bash "$CI_SUPPORT/run.sh" gate
+GATE=rust/fmt GATES=rust/fmt BASE="$BASE" bash "$CI_SUPPORT/run.sh" gate
 ```
 
 Each container runs as user `10001` with its own PID namespace, all
@@ -47,21 +54,23 @@ equal to `Memory`, and exactly the intended mounts, every one read-only. This
 guards against regressions and daemon defaults, not against an edit to
 `run.sh` itself.
 
-No container has a Docker socket, runner home, runner command files or token.
+No job has a token beyond read access to the repository, and no container
+has a Docker socket, runner home, runner command files or token.
 The checkout is mounted read-only at `/source` after `actions/checkout`
 drops its credential, and the reporter, a plain file, at `/binary`. Only
 plain files and folders cross back to the runner, into
-`atelier-reports/container/`; links `docker cp` would keep are deleted. The
-job summary takes only lines such as `rust/fmt: passed` or `rust/fmt: failed`
-from the validator, 500 bytes each.
+`atelier-reports/container/`; links `docker cp` would keep are deleted.
 
 ## Reports
 
-A gate container that exits non-zero, or writes no non-empty
-`ci-report.json`, fails. A fresh container, offline, with the report and
-the reporter mounted read-only, then validates the report; the gate cannot
-change either. The rule is fail-closed: a missing or invalid report fails
-every gate, and the reporter publishes each one as a failed check.
+The gate container runs `moon ci` for its one task. A gate container that
+exits non-zero, or writes no non-empty `ci-report.json`, fails. A fresh
+container, offline, with the report and the reporter mounted read-only, then
+validates the report inside the same job; the gate cannot change either. A
+last step runs the reporter on the runner, after a failed gate too, to write
+the gate's line to the job summary; the offline container stays the
+validator of record. The rule is fail-closed: a missing or invalid report
+fails the job, and so the check.
 
 ## Self-test
 
@@ -69,7 +78,8 @@ every gate, and the reporter publishes each one as a failed check.
 bash "$CI_SUPPORT/run.sh" selftest
 ```
 
-It needs `SOURCE` and a built `target/release/atelier-reporter`, and checks
+It needs `SOURCE` and a built
+`target/x86_64-unknown-linux-musl/release/atelier-reporter`, and checks
 that the reporter is executable and that moon and jq run, with no network.
 
 Atelier's own pull requests run the workflow and `.github/ci` they contain,

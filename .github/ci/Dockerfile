@@ -26,7 +26,6 @@ RUN rustup component add clippy rustfmt rust-src \
     && rustup toolchain install nightly-2026-08-21 --profile minimal \
        --component miri,rust-src \
     && cargo install --locked cargo-nextest@0.9.152 cargo-mutants@27.1.0 \
-       cargo-deny@0.20.2 cargo-shear@1.14.0 \
     && cargo install --locked kani-verifier --version 0.68.0 \
     && rm -rf "$CARGO_HOME/registry" "$CARGO_HOME/git" \
     && chmod -R a+w "$CARGO_HOME" "$RUSTUP_HOME"

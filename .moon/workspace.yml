@@ -1,2 +1,6 @@
 projects:
   reporter: "reporter"
+
+# moon ci compares against this branch when it resolves the merge base.
+vcs:
+  defaultBranch: "main"

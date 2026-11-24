@@ -33,13 +33,17 @@ if [[ "$MODE" != gate ]]; then
   exit 2
 fi
 
+# GATE is one gate, such as rust/fmt; moon ci runs only its task.
+gate=${GATE:?gate}
+task=${gate##*/}
+
 # The host checkout is read-only and has no persisted checkout credential.
 # All source execution stays here.
 cp -R /source/. /work/
 git config --global --add safe.directory /work
 cd /work
 
-# An unreachable base fails the gate; it never passes as an empty diff.
+# The mutants task reads this diff. An unreachable base fails the gate; it never passes as an empty diff.
 mkdir -p target
 if [[ -z "${BASE:-}" ]]; then
   : > target/mutants.diff
@@ -52,7 +56,7 @@ fi
 
 # moon's own status; its report is judged in a separate container.
 status=0
-moon ci || status=$?
+moon ci ":$task" || status=$?
 
 report=.moon/cache/ciReport.json
 if [[ ! -f "$report" || -L "$report" || ! -s "$report" ]]; then

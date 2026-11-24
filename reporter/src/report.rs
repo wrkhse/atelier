@@ -119,8 +119,10 @@ fn invalid(error: &serde_json::Error) -> ReportError {
 /// One check per gate, in the order of `gates`.
 ///
 /// A gate such as `rust/fmt` matches the `run-task` actions whose target
-/// ends in its task id, `:fmt`. It passes only when it has actions and every
-/// one of them succeeded. The detail names the first action that did not
+/// ends in its task id, `:fmt`. Matching is on the task id after the gate's
+/// last slash, so a full target such as `reporter:fmt` is not accepted as a
+/// gate name. It passes only when it has actions and every one of them
+/// succeeded. The detail names the first action that did not
 /// succeed, or the first action when all did.
 #[must_use]
 pub fn results(report: &CiReport, gates: &[String]) -> Vec<GateCheck> {
@@ -288,6 +290,44 @@ mod tests {
     #[test]
     fn a_repeated_field_is_invalid() {
         let refused = parse(DUPLICATE_STATUS.as_bytes()).err();
+
+        let expected = ReportError::Invalid("unexpected json shape at line 1".to_owned());
+        assert_eq!(refused, Some(expected));
+    }
+
+    #[test]
+    fn malformed_json_is_invalid() {
+        let path = written("malformed", "{x}");
+
+        let refused = read(&path, 1024).err();
+
+        let expected = ReportError::Invalid("malformed json at line 1".to_owned());
+        assert_eq!(refused, Some(expected));
+        fs::remove_file(&path).expect("remove report");
+    }
+
+    #[test]
+    fn truncated_json_is_invalid() {
+        let path = written("truncated", r#"{"actions":[{"node":"#);
+
+        let refused = read(&path, 1024).err();
+
+        let expected = ReportError::Invalid("truncated json at line 1".to_owned());
+        assert_eq!(refused, Some(expected));
+        fs::remove_file(&path).expect("remove report");
+    }
+
+    #[test]
+    fn an_object_without_actions_is_invalid() {
+        let refused = parse(b"{}").err();
+
+        let expected = ReportError::Invalid("unexpected json shape at line 1".to_owned());
+        assert_eq!(refused, Some(expected));
+    }
+
+    #[test]
+    fn actions_of_the_wrong_type_are_invalid() {
+        let refused = parse(br#"{"actions":1}"#).err();
 
         let expected = ReportError::Invalid("unexpected json shape at line 1".to_owned());
         assert_eq!(refused, Some(expected));
