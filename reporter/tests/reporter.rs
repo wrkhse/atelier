@@ -1,4 +1,7 @@
 //! Runs the built reporter on a recorded moon report.
+//!
+//! These are process-boundary tests, run by the test gate. Miri checks the
+//! library code and cannot spawn processes, so it skips them.
 
 use std::env;
 use std::fs;
@@ -67,6 +70,7 @@ fn stdout_lines(output: &Output) -> Vec<String> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn validate_only_reports_every_gate() {
     let dir = scratch("validate").expect("scratch folder");
     let report = fixture(&dir, "ci-report.json").expect("copy the fixture");
@@ -80,6 +84,7 @@ fn validate_only_reports_every_gate() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn validate_only_succeeds_when_all_gates_pass() {
     let dir = scratch("validate-pass").expect("scratch folder");
     let report = fixture(&dir, "ci-report-pass.json").expect("copy the fixture");
@@ -100,6 +105,7 @@ fn validate_only_succeeds_when_all_gates_pass() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn validate_only_fails_every_gate_of_a_missing_report() {
     let dir = scratch("missing").expect("scratch folder");
     let report = dir.join("absent.json");
@@ -119,6 +125,7 @@ fn validate_only_fails_every_gate_of_a_missing_report() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn summary_is_written_for_each_gate() {
     let dir = scratch("summary").expect("scratch folder");
     let report = fixture(&dir, "ci-report-pass.json").expect("copy the fixture");
@@ -141,6 +148,7 @@ fn summary_is_written_for_each_gate() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn duplicate_gate_is_refused() {
     let dir = scratch("duplicate").expect("scratch folder");
     let report = fixture(&dir, "ci-report-pass.json").expect("copy the fixture");
