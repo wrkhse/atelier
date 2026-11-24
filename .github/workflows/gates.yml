@@ -56,5 +56,5 @@ jobs:
         env:
           REPORT: ${{ runner.temp }}/atelier-reports/container/ci-report.json
         run: >-
-          ./target/x86_64-unknown-linux-musl/release/atelier-reporter --validate-only
+          ./target/x86_64-unknown-linux-musl/release/atelier-reporter
           --report "$REPORT" --gate "$GATE"

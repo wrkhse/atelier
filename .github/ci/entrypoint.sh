@@ -11,7 +11,7 @@ if [[ "$MODE" == validate ]]; then
     echo "no gates to validate" >&2
     exit 1
   fi
-  args=(--validate-only --report /reports/ci-report.json)
+  args=(--report /reports/ci-report.json)
   for gate in "${gates[@]}"; do
     args+=(--gate "$gate")
   done

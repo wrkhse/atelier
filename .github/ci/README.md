@@ -11,7 +11,7 @@ flowchart LR
     Matrix["gates.yml<br/>one job per gate"] --> Checkout["checkout<br/>no persisted credential"]
     Checkout --> Build["runner: build<br/>atelier-reporter"]
     Build --> Gate["container: moon ci :fmt<br/>writes /reports/ci-report.json"]
-    Gate --> Validate["fresh offline container:<br/>atelier-reporter --validate-only"]
+    Gate --> Validate["fresh offline container:<br/>atelier-reporter validates"]
     Validate --> Check["job status<br/>is the check rust/fmt"]
 ```
 

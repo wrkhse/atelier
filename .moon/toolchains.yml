@@ -1,1 +1,2 @@
-rust: {}
+# No toolchain integration: the gate tasks are plain commands, and the gate
+# container already has Rust on PATH.
