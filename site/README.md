@@ -8,9 +8,8 @@ pulls these pages from `main` when it builds. Here it runs locally and checks
 every pull request. The Worker `atelier-docs`, at
 [atelier-docs.stevenjpx2.workers.dev](https://atelier-docs.stevenjpx2.workers.dev),
 redirects readers to the corresponding page in the hub. Paths under
-`/plans/` and `/audits/` map to `/atelier/docs/plans/` and
-`/atelier/docs/audits/`; paths under the repository's top-level folders keep
-their path under `/atelier/`. Each rule covers its own paths, so none depends
+`/plans/` map to `/atelier/docs/plans/`; paths under the repository's top-level folders
+keep their path under `/atelier/`. Each rule covers its own paths, so none depends
 on the order Cloudflare tries them in, and any other path shows `404.html`,
 which links to the hub.
 
@@ -20,7 +19,7 @@ which links to the hub.
 | `.vitepress/theme/index.ts`    | Draws `mermaid` blocks in the site's font and colours, again when the page or the colour scheme changes                     |
 | `.vitepress/theme/mermaid.css` | How a diagram sits in its column, and opened full screen                                                                    |
 | `cloudflare.config.ts`         | The Worker and its account; `wrangler.config.ts` names the folder it serves                                                 |
-| `redirect/_redirects`          | Maps legacy plan and audit paths to `/atelier/docs/`, and each top-level folder to `/atelier/`; `404.html` links to the hub |
+| `redirect/_redirects`          | Maps legacy plan paths to `/atelier/docs/plans/`, and each top-level folder to `/atelier/`; `404.html` links to the hub |
 
 - **Run:** `bun install`, then `bun run dev`.
 - **Build:** `bun run build` writes `.vitepress/dist/`, and fails on a dead

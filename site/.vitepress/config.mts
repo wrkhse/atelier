@@ -21,27 +21,16 @@ function pages(folder = ROOT): string[] {
     .toSorted()
 }
 
-/** A folder's `README.md` is its index page, so `crates/core/src/machine/` links work. */
+/** A folder's `README.md` is its index page, so folder links work. */
 const rewrite = (page: string) => page.replace(/(^|\/)README\.md$/, "$1index.md")
-
-/** Pages with no heading of their own, such as the prompt a builder is sent word for word. */
-const TITLES: Record<string, string> = {
-  "crates/core/prompts/builder.md": "The builder's contract",
-}
 
 function title(page: string): string {
   const heading = readFileSync(join(ROOT, page), "utf8").match(/^# (.+)$/m)?.[1].replaceAll("`", "")
-  return TITLES[page] ?? heading ?? page
+  return heading ?? page
 }
 
 function link(page: string): string {
   return `/${rewrite(page).replace(/(^|\/)index\.md$/, "$1").replace(/\.md$/, "")}`
-}
-
-/** A crate's or plugin's own README reads as its name, such as `core`; other pages by their title. */
-function crateName(page: string): string {
-  const parts = page.split("/")
-  return parts.length === 3 ? parts[1] : title(page)
 }
 
 function sidebar(all: string[]): DefaultTheme.SidebarItem[] {
@@ -70,9 +59,6 @@ function sidebar(all: string[]): DefaultTheme.SidebarItem[] {
   return [
     { text: "atelier", link: "/" },
     section("Slices", "docs/plans/"),
-    section("Crates", "crates/", crateName),
-    section("Plugins", "plugins/", crateName),
-    section("Audits", "docs/audits/"),
     { text: "Repository", items: [...under("scripts/"), ...under("site/")].map((page) => item(page)) },
   ]
 }
@@ -98,7 +84,7 @@ const all = pages()
 
 export default defineConfig({
   title: "atelier",
-  description: "A personal software factory driven by labelled issues",
+  description: "A CI engine for monorepos: gate presets on moon, one GitHub check per gate",
   srcDir: ROOT,
   srcExclude: ["**/node_modules/**", "target/**", "mutants.out*/**"],
   rewrites: Object.fromEntries(all.map((page) => [page, rewrite(page)])),
@@ -112,9 +98,9 @@ export default defineConfig({
   lastUpdated: true,
   themeConfig: {
     nav: [
-      { text: "Plan", link: `${REPOSITORY}/issues/1` },
+      { text: "Design", link: "https://github.com/wrkhse/atelier/issues/85" },
       { text: "Slices", link: "/docs/plans/" },
-      { text: "Crates", link: "/crates/" },
+      { text: "Plan", link: "https://github.com/wrkhse/atelier/issues/1" },
     ],
     sidebar: sidebar(all),
     outline: [2, 3],
