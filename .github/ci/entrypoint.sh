@@ -43,12 +43,14 @@ cp -R /source/. /work/
 git config --global --add safe.directory /work
 cd /work
 
-# The mutants task reads this diff. An unreachable base fails the gate; it never passes as an empty diff.
-mkdir -p target
+# The mutants task runs from the reporter project and reads this diff there.
+# An unreachable base fails the gate; it never passes as an empty diff.
+diff=reporter/target/mutants.diff
+mkdir -p reporter/target
 if [[ -z "${BASE:-}" ]]; then
-  : > target/mutants.diff
+  : > "$diff"
 elif git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-  git diff "$BASE"...HEAD -- '*.rs' > target/mutants.diff
+  git diff "$BASE"...HEAD -- '*.rs' > "$diff"
 else
   echo "base $BASE is unavailable" >&2
   exit 1
