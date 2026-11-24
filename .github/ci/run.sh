@@ -1,0 +1,145 @@
+#!/bin/bash
+# GitHub-hosted Linux only. Never use this runner on a developer machine.
+set -euo pipefail
+if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux \
+  || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]]; then
+  echo "run.sh runs only on a GitHub-hosted Linux runner; run checks in CI" >&2
+  exit 2
+fi
+
+# run.sh MODE, with GATES and BASE from the environment.
+export MODE=${1:?mode}
+export GATE=${GATE:-}
+export ROOT=${ROOT:-.}
+export BASE=${BASE:-}
+export GATES=${GATES:-}
+support=${CI_SUPPORT:?pinned CI support directory}
+source=${SOURCE:?checkout}
+# Host-written inspections sit beside container/, which holds only what a
+# container wrote. The reporter sits alone in atelier/, mounted as /binary.
+reports="$RUNNER_TEMP/atelier-reports"
+output="$reports/container"
+binary="$RUNNER_TEMP/atelier"
+mkdir -p "$output" "$binary"
+
+# Each job stays inside its 90 minutes: a gate is gate + validate.
+case "$MODE" in
+  selftest | validate) limit=10m ;;
+  gate) limit=75m ;;
+  *) echo "unknown mode $MODE" >&2; exit 2 ;;
+esac
+
+# The reporter the workflow built must be a plain file, never a link.
+reporter="$source/target/release/atelier-reporter"
+if [[ ! -f "$reporter" || -L "$reporter" ]]; then
+  echo "the reporter is not a plain file at $reporter" >&2
+  exit 1
+fi
+install -m 0555 "$reporter" "$binary/atelier-reporter"
+
+docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
+names=()
+trap 'docker rm --force "${names[@]}" >/dev/null 2>&1 || true' EXIT
+
+# Leave the runner one CPU and 2 GiB; any hosted runner size fits.
+cpus=$(( $(nproc) > 1 ? $(nproc) - 1 : 1 ))
+total=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+memory="$(( total > 4096 ? total - 2048 : total / 2 ))m"
+
+# create NAME NETWORK MOUNT...: no runner home, credentials, command files or
+# container-engine socket. Omitting --pid keeps Docker's private PID
+# namespace. The process limit counts threads: three mutant jobs run rustc
+# and nextest.
+create() {
+  local name=$1 network=$2
+  shift 2
+  local mounts=()
+  for mount in "$@"; do
+    mounts+=(--mount "$mount")
+  done
+  docker create --name "$name" --init --user 10001:10001 \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --pids-limit 4096 --memory "$memory" --memory-swap "$memory" --cpus "$cpus" \
+    --network "$network" --ipc private --stop-timeout 10 \
+    "${mounts[@]}" \
+    --env MODE --env GATE --env ROOT --env BASE --env GATES atelier-gates >/dev/null
+  names+=("$name")
+  local sources=()
+  for mount in "$@"; do
+    sources+=("$(sed -E 's/.*type=([^,]*),source=([^,]*),target=([^,]*).*/\1:\2:\3/' <<< "$mount")")
+  done
+  contained "$name" "$network" "${sources[@]}"
+}
+
+# contained NAME NETWORK TYPE:SOURCE:TARGET...: refuse to start a container whose
+# recorded settings differ from contained.jq's exact values; the inspection is
+# kept as evidence. This guards against regressions and daemon defaults, not against
+# an edit to run.sh itself.
+contained() {
+  local name=$1 network=$2
+  shift 2
+  docker inspect "$name" > "$reports/$name.json"
+  jq -e --arg network "$network" --from-file "$support/contained.jq" --args \
+    "$@" < "$reports/$name.json" >/dev/null \
+    || { echo "container $name is not contained" >&2; exit 1; }
+}
+
+# summary TEXT: append known, bounded lines to the job summary, the
+# reporter's "rust/fmt: passed" or "rust/fmt: failed"; container output never
+# reaches it unfiltered.
+summary() {
+  [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
+  grep -E '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+: (passed|failed)$' <<< "$1" \
+    | cut -b1-500 | head -n 20 | sed 's/$/\n/' >> "$GITHUB_STEP_SUMMARY" || true
+}
+
+# start NAME: run it within the mode's limit; its exit status.
+start() {
+  timeout --signal=TERM --kill-after=30s "$limit" docker start --attach "$1"
+}
+
+# validate: a fresh, offline container judges the copied report with the
+# reporter, both read-only; the gate cannot change either.
+validate() {
+  local verdict status=0
+  MODE=validate
+  limit=10m
+  create "atelier-validate-$id" none \
+    "type=bind,source=$output,target=/reports,readonly" \
+    "type=bind,source=$binary,target=/binary,readonly"
+  verdict=$(start "atelier-validate-$id") || status=1
+  echo "$verdict"
+  summary "$verdict"
+  return "$status"
+}
+
+id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM"
+status=0
+
+if [[ "$MODE" == validate ]]; then
+  validate || status=1
+  exit "$status"
+fi
+
+# The gate fetches crates over Docker's bridge, never the host's network; the
+# self-test needs no network.
+network=bridge
+if [[ "$MODE" == selftest ]]; then
+  network=none
+fi
+
+create "atelier-$MODE-$id" "$network" \
+  "type=bind,source=$source,target=/source,readonly" \
+  "type=bind,source=$binary,target=/binary,readonly"
+
+start "atelier-$MODE-$id" || status=$?
+
+# Evidence collection cannot turn a failed, timed-out or killed run green.
+# docker cp keeps links, so only plain files and folders cross to the host.
+docker cp "atelier-$MODE-$id:/reports/." "$output/" >&2 || true
+find "$output" -mindepth 1 ! -type f ! -type d -delete
+
+if [[ "$MODE" == gate ]]; then
+  validate || status=1
+fi
+exit "$status"

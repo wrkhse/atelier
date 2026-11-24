@@ -1,0 +1,65 @@
+# atelier's gates as moon tasks, run by moon ci inside a bounded, non-root
+# container, then published as one GitHub check per gate. See
+# .github/ci/README.md.
+name: gates
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Reads .prototools and installs moon 2.6.5.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+          components: rustfmt,clippy,rust-src
+      # The pinned nightly and Miri live in the gate image, where the miri
+      # gate runs.
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.152,cargo-deny@0.20.2,cargo-shear@1.14.0
+      - run: |
+          cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+      - name: Build reporter
+        run: cargo build --release --locked -p atelier-reporter
+      - name: Compute mutant diff
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: |
+          base="$BASE_SHA"
+          mkdir -p target
+          git diff "$base"...HEAD -- '*.rs' > target/mutants.diff
+      - id: gate
+        name: Run gates in the container
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          GATES: rust/fmt rust/clippy rust/test rust/kani rust/miri rust/mutants rust/msrv
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: bash "$CI_SUPPORT/run.sh" gate
+      # Runs after a failed gate too: a missing or invalid report publishes
+      # every gate as failed.
+      - name: Publish checks
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          ./target/release/atelier-reporter
+          --report "$RUNNER_TEMP/atelier-reports/container/ci-report.json"
+          --gate rust/fmt --gate rust/clippy --gate rust/test --gate rust/kani
+          --gate rust/miri --gate rust/mutants --gate rust/msrv
+          --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA"
