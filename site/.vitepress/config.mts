@@ -7,12 +7,12 @@ const REPOSITORY = "https://github.com/wrkhse/atelier"
 const BRANCH = "main"
 const SITE = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const ROOT = resolve(SITE, "..")
-const SKIPPED = new Set([".agents", ".git", ".github", ".vitepress", "node_modules", "target", "dist"])
+const SKIPPED = new Set([".agents", ".git", ".github", ".vitepress", "node_modules"])
 
 /** Every Markdown file in the repository, relative to its root. */
 function pages(folder = ROOT): string[] {
   return readdirSync(folder, { withFileTypes: true })
-    .filter((entry) => !SKIPPED.has(entry.name) && !entry.name.startsWith("mutants.out"))
+    .filter((entry) => !SKIPPED.has(entry.name))
     .flatMap((entry) => {
       const path = join(folder, entry.name)
       if (entry.isDirectory()) return pages(path)
@@ -21,34 +21,23 @@ function pages(folder = ROOT): string[] {
     .toSorted()
 }
 
-/** A folder's `README.md` is its index page, so `crates/core/src/machine/` links work. */
+/** A folder's `README.md` is its index page, so folder links work. */
 const rewrite = (page: string) => page.replace(/(^|\/)README\.md$/, "$1index.md")
-
-/** Pages with no heading of their own, such as the prompt a builder is sent word for word. */
-const TITLES: Record<string, string> = {
-  "crates/core/prompts/builder.md": "The builder's contract",
-}
 
 function title(page: string): string {
   const heading = readFileSync(join(ROOT, page), "utf8").match(/^# (.+)$/m)?.[1].replaceAll("`", "")
-  return TITLES[page] ?? heading ?? page
+  return heading ?? page
 }
 
 function link(page: string): string {
   return `/${rewrite(page).replace(/(^|\/)index\.md$/, "$1").replace(/\.md$/, "")}`
 }
 
-/** A crate's or plugin's own README reads as its name, such as `core`; other pages by their title. */
-function crateName(page: string): string {
-  const parts = page.split("/")
-  return parts.length === 3 ? parts[1] : title(page)
-}
-
 function sidebar(all: string[]): DefaultTheme.SidebarItem[] {
   const under = (prefix: string) => all.filter((page) => page.startsWith(prefix))
   const item = (page: string, text = title(page)) => ({ text, link: link(page) })
   /** A folder's pages under its title; a README is the title's own page, not an item. */
-  const section = (text: string, folder: string, label = (page: string) => title(page)) => {
+  const section = (text: string, folder: string) => {
     const index = `${folder}README.md`
     // In the order the README links them; pages it does not link come last.
     const readme = all.includes(index) ? readFileSync(join(ROOT, index), "utf8") : ""
@@ -59,27 +48,19 @@ function sidebar(all: string[]): DefaultTheme.SidebarItem[] {
     const pages = under(folder)
       .filter((page) => page !== index)
       .toSorted((a, b) => at(a) - at(b) || a.localeCompare(b))
-    const labels = pages.map(label)
-    // Two pages with one title, such as each plugin's fixtures, say whose they are.
-    const items = pages.map((page, at) => {
-      const repeated = labels.filter((other) => other === labels[at]).length > 1
-      return item(page, repeated ? `${labels[at]} · ${page.split("/")[1]}` : labels[at])
-    })
+    const items = pages.map((page) => item(page))
     return all.includes(index) ? { text, link: link(index), items } : { text, items }
   }
   return [
     { text: "atelier", link: "/" },
     section("Slices", "docs/plans/"),
-    section("Crates", "crates/", crateName),
-    section("Plugins", "plugins/", crateName),
-    section("Audits", "docs/audits/"),
-    { text: "Repository", items: [...under("scripts/"), ...under("site/")].map((page) => item(page)) },
+    { text: "Site", items: under("site/").map((page) => item(page)) },
   ]
 }
 
 /**
- * A relative link to a file the site does not render, such as a `.rs` file
- * or a folder without a README, goes to that path on GitHub instead.
+ * A relative link to a file the site does not render, such as a source file,
+ * goes to that path on GitHub instead.
  */
 function sourceLink(href: string, from: string): string {
   if (/^([a-z]+:|#|\/)/i.test(href)) return href
@@ -98,9 +79,9 @@ const all = pages()
 
 export default defineConfig({
   title: "atelier",
-  description: "A personal software factory driven by labelled issues",
+  description: "A CI engine for monorepos: gate presets on moon, one GitHub check per gate",
   srcDir: ROOT,
-  srcExclude: ["**/node_modules/**", "target/**", "mutants.out*/**"],
+  srcExclude: ["**/node_modules/**"],
   rewrites: Object.fromEntries(all.map((page) => [page, rewrite(page)])),
   cleanUrls: true,
   // Pages live outside this folder, so their imports resolve from its node_modules.
@@ -112,9 +93,9 @@ export default defineConfig({
   lastUpdated: true,
   themeConfig: {
     nav: [
-      { text: "Plan", link: `${REPOSITORY}/issues/1` },
+      { text: "Design", link: "https://github.com/wrkhse/atelier/issues/85" },
       { text: "Slices", link: "/docs/plans/" },
-      { text: "Crates", link: "/crates/" },
+      { text: "Plan", link: "https://github.com/wrkhse/atelier/issues/1" },
     ],
     sidebar: sidebar(all),
     outline: [2, 3],
