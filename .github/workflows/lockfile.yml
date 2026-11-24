@@ -2,7 +2,10 @@
 # it; download the artifact and commit it.
 name: lockfile
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/rust-moon-presets]
 
 permissions:
   contents: read
