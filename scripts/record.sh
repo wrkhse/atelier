@@ -23,6 +23,7 @@ VERSION=${RELEASE_TAG#v}
 ARCHIVE="atelier-$RELEASE_TAG-linux-x64.tar.gz"
 RELEASE_DIR="$RUNNER_TEMP/release"
 REL="$RUNNER_TEMP/rel"
+REPORTER_PATH="$REL/bin/atelier-reporter"
 SCRATCH="$RUNNER_TEMP/scratch"
 SUPPORT="$RUNNER_TEMP/ci-support"
 RECORDING="$RUNNER_TEMP/demo.termctrl"
@@ -36,7 +37,6 @@ GATE_LOG="$WORK/gate.log"
 RESULTS="$RUNNER_TEMP/atelier-reports/container/ci-report.json"
 GATE_TASKS=(fmt clippy test kani miri mutants msrv)
 SESSION=demo
-REPORTER_PATH=target/x86_64-unknown-linux-musl/release/atelier-reporter
 GIF_MAX_BYTES=3000000
 GIF_MAX_WIDTH=1200
 
@@ -80,19 +80,32 @@ verify_release() {
   (cd "$RELEASE_DIR" && sha256sum -c "$ARCHIVE.sha256")
 }
 
-stage_release() {
+check_released_reporter_binary() {
   local reported
 
+  if [[ "$REPORTER_PATH" != "$REL/"* || ! -f "$REPORTER_PATH" \
+    || -L "$REPORTER_PATH" ]]; then
+    echo "released reporter: expected a plain file in $REL: $REPORTER_PATH" >&2
+    return 1
+  fi
+
+  if ! reported=$("$REPORTER_PATH" --version); then
+    echo "released reporter: --version failed at $REPORTER_PATH" >&2
+    return 1
+  fi
+  if [[ "$reported" != "atelier-reporter $VERSION" ]]; then
+    echo "released reporter: expected 'atelier-reporter $VERSION'," \
+      "got '$reported'" >&2
+    return 1
+  fi
+}
+
+stage_release() {
   rm -rf "$REL"
   mkdir -p "$REL"
   tar -xzf "$RELEASE_DIR/$ARCHIVE" -C "$REL"
 
-  reported=$("$REL/bin/atelier-reporter" --version)
-
-  if [[ "$reported" != "atelier-reporter $VERSION" ]]; then
-    echo "the released reporter reports '$reported', expected $VERSION" >&2
-    return 1
-  fi
+  check_released_reporter_binary
 }
 
 write_crate() {
@@ -166,7 +179,6 @@ vcs:
 YAML
 
   write_crate
-  install -D -m 0755 "$REL/bin/atelier-reporter" "$SCRATCH/$REPORTER_PATH"
   commit_scratch
 }
 
@@ -239,6 +251,7 @@ start_panes() {
 
 start_recording() {
   local intro="atelier: the rust/fmt gate"
+  local reporter_export="export REPORTER='$REPORTER_PATH'"
 
   printf '%s\n' "$intro from release $RELEASE_TAG" >> "$CAPTIONS"
   wait_until 10 pane_has "$RIGHT" -F -- "$intro"
@@ -248,8 +261,14 @@ start_recording() {
   termctrl wait "$SESSION" "$intro" --timeout 20000
   termctrl mark "$SESSION" ready
 
-  type_line "./$REPORTER_PATH --version"
+  type_line "$reporter_export"
+  wait_until 10 pane_has "$LEFT" -F -- "$reporter_export"
+
+  type_line "'$REPORTER_PATH' --version"
   wait_until 30 pane_has "$LEFT" -x -F -- "atelier-reporter $VERSION"
+
+  # Keep the full command even when the pane wraps it.
+  capture "$LEFT" > "$SCREENS/ready-command.txt"
   type_line "export GATE=rust/fmt GATES=rust/fmt BASE=origin/main"
 }
 
@@ -324,7 +343,7 @@ summary_step() {
   tmux send-keys -t "$LEFT" C-l
   wait_until 10 pane_lacks "$LEFT" '^gate exit [0-9]+$'
 
-  typed="./$REPORTER_PATH --report \"\$RESULTS\" ${gates[*]}"
+  typed="'$REPORTER_PATH' --report \"\$RESULTS\" ${gates[*]}"
   type_line "$typed; echo \"exit \$?\"; echo \"gate exit \$gate_status\""
   wait_until 30 pane_has "$LEFT" '^gate exit [0-9]+$'
 
@@ -340,6 +359,7 @@ summary_step() {
   fi
 
   termctrl mark "$SESSION" final-summary
+  printf '%s\n' "$screen" > "$SCREENS/summary-command.txt"
   save_screen final-summary
 }
 
@@ -427,6 +447,36 @@ check_screens() {
   expect_count "$(screen_file final-pass)" 1 0 final-pass
   expect_count "$all" 2 1 "the three screens"
   expect_summary "$(screen_file final-summary)"
+}
+
+check_released_reporter() {
+  local source_reporter=target/x86_64-unknown-linux-musl/release/atelier-reporter
+  local status=0
+
+  check_released_reporter_binary
+
+  if ! rg -qF -- "'$REPORTER_PATH' --version" "$SCREENS/ready-command.txt"; then
+    echo "released reporter: saved intro lacks the release --version command" >&2
+    return 1
+  fi
+  if ! rg -qF -- "'$REPORTER_PATH' --report" "$SCREENS/summary-command.txt"; then
+    echo "released reporter: saved summary lacks the release --report command" >&2
+    return 1
+  fi
+
+  rg -qF --no-ignore -- "$source_reporter" "$SCREENS" "$GATE_LOG" || status=$?
+
+  case "$status" in
+    0)
+      echo "released reporter: source-built path in saved screen or gate log" >&2
+      return 1
+      ;;
+    1) ;;
+    *)
+      echo "released reporter: could not scan saved screens and gate log" >&2
+      return 1
+      ;;
+  esac
 }
 
 # expect_summary FILE: exactly one passed line per gate and no failed line.
@@ -564,6 +614,7 @@ main() {
   start_panes
   drive
   check_screens
+  check_released_reporter
   export_video
   make_gif
   cp "$GIF" "$GITHUB_WORKSPACE/slice-1.gif"

@@ -30,7 +30,7 @@ case "$MODE" in
 esac
 
 # The reporter the workflow built must be a plain file, never a link.
-reporter="$source/target/x86_64-unknown-linux-musl/release/atelier-reporter"
+reporter=${REPORTER:-"$source/target/x86_64-unknown-linux-musl/release/atelier-reporter"}
 if [[ ! -f "$reporter" || -L "$reporter" ]]; then
   echo "the reporter is not a plain file at $reporter" >&2
   exit 1
