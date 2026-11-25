@@ -56,12 +56,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          version=$(cargo metadata --locked --no-deps --format-version 1 | \
-            python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "atelier-reporter"))')
+          version=$(
+            cargo metadata --locked --no-deps --format-version 1 | python3 -c '
+          import json
+          import sys
+
+          packages = json.load(sys.stdin)["packages"]
+          print(next(
+              p["version"] for p in packages if p["name"] == "atelier-reporter"
+          ))
+          '
+          )
 
           expected="${TAG#v}"
           if [[ "$version" != "$expected" ]]; then
-            echo "workspace version $version does not match tag $TAG (expected $expected)" >&2
+            echo "workspace version $version does not match tag $TAG" \
+              "(expected $expected)" >&2
             exit 1
           fi
       - name: Package
@@ -77,8 +87,8 @@ jobs:
           rm -rf "$stage"
           mkdir -p "$stage/.moon/tasks" "$stage/.moon/scripts" "$stage/bin"
 
+          # Consumers define their own project mappings in .moon/workspace.yml.
           cp .moon/tasks/rust.yml "$stage/.moon/tasks/rust.yml"
-          cp .moon/workspace.yml "$stage/.moon/workspace.yml"
           cp .moon/toolchains.yml "$stage/.moon/toolchains.yml"
           cp .moon/scripts/msrv.sh "$stage/.moon/scripts/msrv.sh"
           cp .prototools "$stage/.prototools"
@@ -89,13 +99,14 @@ jobs:
           mkdir -p dist
           tar -czf "dist/atelier-$TAG-$ARCHIVE.tar.gz" -C "$stage" \
             .moon/tasks/rust.yml \
-            .moon/workspace.yml \
             .moon/toolchains.yml \
             .moon/scripts/msrv.sh \
             .prototools \
             bin/atelier-reporter \
             README.md \
             LICENSE
+      # Reads .prototools and installs the pinned moon version for the query.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
       - name: Smoke test the archive
         shell: bash
         env:
@@ -105,11 +116,11 @@ jobs:
           set -euo pipefail
 
           unpacked=$(mktemp -d)
+          trap 'rm -rf "$unpacked"' EXIT
           tar -xzf "dist/atelier-$TAG-$ARCHIVE.tar.gz" -C "$unpacked"
 
           for path in \
             .moon/tasks/rust.yml \
-            .moon/workspace.yml \
             .moon/toolchains.yml \
             .moon/scripts/msrv.sh \
             .prototools \
@@ -123,7 +134,29 @@ jobs:
           done
 
           "$unpacked/bin/atelier-reporter" --help
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+
+          # Give the extracted preset a consumer workspace with one Rust project.
+          cd "$unpacked"
+          git init -q
+          mkdir smoke
+          printf 'projects:\n  smoke: smoke\n' > .moon/workspace.yml
+          printf 'language: rust\n' > smoke/moon.yml
+
+          moon --version
+          moon query tasks | python3 -c '
+          import json
+          import sys
+
+          tasks = json.load(sys.stdin)["tasks"].get("smoke", {})
+          expected = {"fmt", "clippy", "test", "kani", "miri", "mutants", "msrv"}
+          missing = expected - tasks.keys()
+
+          if missing:
+              names = ", ".join(sorted(missing))
+              sys.exit(f"archive preset is missing tasks: {names}")
+          '
+      # actions/upload-artifact v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: atelier-${{ github.ref_name }}-${{ matrix.archive }}
           path: dist/*
@@ -137,7 +170,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      # actions/download-artifact v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: atelier-*
           path: dist
@@ -177,4 +211,6 @@ jobs:
       - name: Explain skip
         env:
           TAG: ${{ github.ref_name }}
-        run: echo "Tag $TAG is not a release candidate (expected v*-rc.*); skipping publish."
+        run: |
+          echo "Tag $TAG is not a release candidate" \
+            "(expected v*-rc.*); skipping publish."

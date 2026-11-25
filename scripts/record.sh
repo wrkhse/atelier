@@ -33,8 +33,7 @@ SCREENS="$WORK/screens"
 EDIT="$WORK/edit.json"
 GIF="$WORK/slice-1.gif"
 GATE_LOG="$WORK/gate.log"
-RESULTS="$WORK/ci-report.json"
-FIXTURE="$GITHUB_WORKSPACE/reporter/tests/fixtures/ci-report-pass.json"
+RESULTS="$RUNNER_TEMP/atelier-reports/container/ci-report.json"
 GATE_TASKS=(fmt clippy test kani miri mutants msrv)
 SESSION=demo
 REPORTER_PATH=target/x86_64-unknown-linux-musl/release/atelier-reporter
@@ -96,45 +95,12 @@ stage_release() {
   fi
 }
 
-# A recorded moon result for atelier's seven gates: one passing run-task
-# action each, shaped like the reporter's ci-report-pass.json fixture.
-write_results() {
-  local actions
-
-  jq '
-    .actions[0] as $template
-    | ($ARGS.positional | map("reporter:" + .)) as $targets
-    | .actions = [
-        $targets | to_entries[]
-        | .key as $index
-        | .value as $target
-        | $template
-        | .label = "RunTask(\($target))"
-        | .node.params.target = $target
-        | .nodeIndex = ($index + 1)
-        | .status = "passed"
-      ]
-    | .context.initialTargets = $targets
-    | .context.primaryTargets = $targets
-    | .status = "passed"
-  ' "$FIXTURE" --args "${GATE_TASKS[@]}" > "$RESULTS"
-
-  actions=$(jq '[.actions[] | select(.status == "passed")] | length' \
-    "$RESULTS")
-
-  if [[ "$actions" != "${#GATE_TASKS[@]}" ]]; then
-    echo "$RESULTS has $actions passing actions," \
-      "expected ${#GATE_TASKS[@]}" >&2
-    return 1
-  fi
-}
-
 write_crate() {
   printf '/target\n' > "$SCRATCH/.gitignore"
 
   cat > "$SCRATCH/Cargo.toml" <<'TOML'
 [workspace]
-members = ["app"]
+members = ["reporter"]
 resolver = "3"
 
 [workspace.package]
@@ -142,22 +108,33 @@ edition = "2024"
 rust-version = "1.100"
 TOML
 
-  cat > "$SCRATCH/app/Cargo.toml" <<'TOML'
+  # The Kani and Miri preset tasks select this package by name.
+  cat > "$SCRATCH/reporter/Cargo.toml" <<'TOML'
 [package]
-name = "app"
+name = "atelier-reporter"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 TOML
 
-  printf 'layer: library\nlanguage: rust\n' > "$SCRATCH/app/moon.yml"
+  printf 'layer: library\nlanguage: rust\n' > "$SCRATCH/reporter/moon.yml"
 
-  cat > "$SCRATCH/app/src/lib.rs" <<'RUST'
+  cat > "$SCRATCH/reporter/src/lib.rs" <<'RUST'
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adds_two_numbers() {
+        assert_eq!(super::add(2, 3), 5);
+    }
+}
 RUST
+
+  cargo generate-lockfile --offline --manifest-path "$SCRATCH/Cargo.toml"
 }
 
 # origin/main holds the moon workspace alone; the crate is one commit ahead
@@ -171,27 +148,23 @@ commit_scratch() {
   "${git[@]}" commit --quiet -m "chore: moon workspace"
   "${git[@]}" update-ref refs/remotes/origin/main HEAD
   "${git[@]}" switch --quiet --create demo
-  "${git[@]}" add Cargo.toml app
-  "${git[@]}" commit --quiet -m "feat: add the app crate"
+  "${git[@]}" add Cargo.toml Cargo.lock reporter
+  "${git[@]}" commit --quiet -m "feat: add the reporter crate"
 }
 
 make_scratch() {
-  local workspace="$SCRATCH/.moon/workspace.yml"
-
   rm -rf "$SCRATCH" "$SUPPORT"
-  mkdir -p "$SCRATCH/app/src"
+  mkdir -p "$SCRATCH/reporter/src"
   cp -R "$REL/.moon" "$SCRATCH/.moon"
   cp "$REL/.prototools" "$SCRATCH/.prototools"
   cp -R "$GITHUB_WORKSPACE/.github/ci" "$SUPPORT"
 
-  # The released workspace names its one project, reporter. The scratch
-  # crate is app, so that entry alone changes; the tasks stay as released.
-  if ! rg -qx '  reporter: "reporter"' "$workspace"; then
-    echo "$workspace does not name the reporter project" >&2
-    return 1
-  fi
-
-  sed -i 's|^  reporter: "reporter"$|  app: "app"|' "$workspace"
+  cat > "$SCRATCH/.moon/workspace.yml" <<'YAML'
+projects:
+  reporter: "reporter"
+vcs:
+  defaultBranch: "main"
+YAML
 
   write_crate
   install -D -m 0755 "$REL/bin/atelier-reporter" "$SCRATCH/$REPORTER_PATH"
@@ -320,32 +293,49 @@ expect_diff() {
 
   seen="$(tmux capture-pane -p -J -S - -t "$LEFT")$(cat "$GATE_LOG")"
 
-  if ! rg -q 'Diff in .*app/src/lib\.rs' <<< "$seen"; then
-    echo "the failed run shows no rustfmt diff for app/src/lib.rs" >&2
+  if ! rg -q 'Diff in .*reporter/src/lib\.rs' <<< "$seen"; then
+    echo "the failed run shows no rustfmt diff for reporter/src/lib.rs" >&2
     return 1
   fi
 }
 
-# summary_step: the released reporter judges the recorded results for all
-# seven gates, so the final frame lists one check per gate.
-summary_step() {
-  local gates=() task screen typed
+# The runner writes RESULTS and also validates it in a separate container.
+all_gates_step() {
+  local typed
 
-  for task in "${GATE_TASKS[@]}"; do
-    gates+=(--gate "rust/$task")
-  done
-
+  rm -rf "$RUNNER_TEMP/atelier-reports"
   tmux send-keys -t "$LEFT" C-l
   wait_until 10 pane_lacks "$LEFT" '^exit [0-9]+$'
 
+  typed="GATE=all GATES=\"$*\" bash \"\$CI_SUPPORT/run.sh\" gate 2>>\"\$GATE_LOG\""
+  type_line "$typed; gate_status=\$?; echo \"gate exit \$gate_status\""
+  wait_until 5100 pane_has "$LEFT" '^gate exit [0-9]+$'
+}
+
+# summary_step: the released reporter judges the container's results for all
+# seven gates, so the final frame lists one check per gate.
+summary_step() {
+  local gates=() gate screen typed
+
+  for gate in "$@"; do
+    gates+=(--gate "$gate")
+  done
+
+  tmux send-keys -t "$LEFT" C-l
+  wait_until 10 pane_lacks "$LEFT" '^gate exit [0-9]+$'
+
   typed="./$REPORTER_PATH --report \"\$RESULTS\" ${gates[*]}"
-  type_line "$typed; echo \"exit \$?\""
-  wait_until 30 pane_has "$LEFT" '^exit [0-9]+$'
+  type_line "$typed; echo \"exit \$?\"; echo \"gate exit \$gate_status\""
+  wait_until 30 pane_has "$LEFT" '^gate exit [0-9]+$'
 
   screen=$(capture "$LEFT")
 
   if ! rg -qx "exit 0" <<< "$screen"; then
     echo "final-summary: the reporter did not exit 0" >&2
+    return 1
+  fi
+  if ! rg -qx "gate exit 0" <<< "$screen"; then
+    echo "final-summary: the all-gates run did not exit 0" >&2
     return 1
   fi
 
@@ -354,10 +344,12 @@ summary_step() {
 }
 
 restored() {
-  ! rg -qF 'ugly( )' "$SCRATCH/app/src/lib.rs"
+  ! rg -qF 'ugly( )' "$SCRATCH/reporter/src/lib.rs"
 }
 
 drive() {
+  local gates=("${GATE_TASKS[@]/#/rust/}")
+
   start_recording
 
   caption caption-clean "1. Clean crate: run the gate"
@@ -365,20 +357,21 @@ drive() {
   caption caption-clean-result "1. Result: rust/fmt: passed"
 
   caption caption-violation "2. Append an unformatted line, run again"
-  type_line "echo 'pub fn  ugly( )->u64{ 1 }' >> app/src/lib.rs"
-  wait_until 10 rg -qF 'ugly( )' "$SCRATCH/app/src/lib.rs"
+  type_line "echo 'pub fn  ugly( )->u64{ 1 }' >> reporter/src/lib.rs"
+  wait_until 10 rg -qF 'ugly( )' "$SCRATCH/reporter/src/lib.rs"
   gate_step violation-fail failed 1
   expect_diff
   caption caption-violation-result "2. Result: rust/fmt: failed"
 
   caption caption-final "3. Restore the file, run again"
-  type_line "git checkout -- app/src/lib.rs"
+  type_line "git checkout -- reporter/src/lib.rs"
   wait_until 10 restored
   gate_step final-pass passed 0
   caption caption-final-result "3. Result: rust/fmt: passed"
 
-  caption caption-summary "4. Recorded moon results, one check per gate"
-  summary_step
+  caption caption-summary "4. Real moon results, one check per gate"
+  all_gates_step "${gates[@]}"
+  summary_step "${gates[@]}"
 
   termctrl stop "$SESSION"
   tmux kill-session -t "$SESSION"
@@ -487,7 +480,7 @@ write_edit_plan() {
     {
       "from": "caption-final-result",
       "to": "final-summary",
-      "caption": "4. Recorded moon results: one check per gate",
+      "caption": "4. Real moon results: one check per gate",
       "speed": 1,
       "hold_ms": 3500
     }
@@ -561,7 +554,6 @@ main() {
   fetch_release
   verify_release
   stage_release
-  write_results
   make_scratch
 
   # Built before recording, so run.sh's own build is cached and quick.

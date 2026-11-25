@@ -4,11 +4,23 @@ A CI engine for monorepos: gate presets on moon, one GitHub check per gate.
 
 ## Status
 
-The presets, reporter and wiring are in progress, not shipped. This repository
-holds the approved design and its slice plans. Install and usage instructions
-arrive with the first release candidate. The CI workflow here builds these docs.
-Slice 1, the Rust gate presets on moon, is in progress
-([#87](https://github.com/wrkhse/atelier/issues/87)).
+The Rust gate presets and reporter are in the 0.2.0-rc.1 release candidate,
+with one GitHub check per gate. Install instructions are in this README and
+the release.
+
+## Install
+
+Download and verify the Linux x64 release archive, then extract it:
+
+```sh
+gh release download v0.2.0-rc.1 --repo wrkhse/atelier \
+  --pattern 'atelier-v0.2.0-rc.1-linux-x64.tar.gz' --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf atelier-v0.2.0-rc.1-linux-x64.tar.gz
+export PATH="$PWD/bin:$PATH"
+```
+
+The archive also carries the moon task presets.
 
 ## Design
 

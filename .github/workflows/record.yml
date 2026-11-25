@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: record-${{ inputs.tag || github.event.workflow_run.head_sha }}
+  group: record-${{ inputs.tag || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
@@ -41,9 +41,11 @@ jobs:
           fetch-tags: true
           persist-credentials: false
       - name: Resolve the release tag
+        id: release
         env:
           EVENT: ${{ github.event_name }}
           INPUT_TAG: ${{ inputs.tag }}
+          HEAD_REF: ${{ github.event.workflow_run.head_branch }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
@@ -51,29 +53,34 @@ jobs:
           if [[ "$EVENT" == workflow_dispatch ]]; then
             tag=$INPUT_TAG
           else
-            mapfile -t tags < <(git tag --points-at "$HEAD_SHA" --list 'v*-rc.*')
-
-            if [[ "${#tags[@]}" -ne 1 ]]; then
-              echo "expected one rc tag at $HEAD_SHA, found ${#tags[@]}" >&2
-              exit 1
-            fi
-
-            tag=${tags[0]}
+            tag=$HEAD_REF
           fi
 
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
-            echo "$tag is not a release candidate tag" >&2
-            exit 1
+            echo "$tag is not a release candidate tag; skipping recording"
+            exit 0
           fi
 
-          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          if [[ "$EVENT" == workflow_run ]]; then
+            tag_sha=$(git rev-parse --verify "refs/tags/$tag^{commit}")
+
+            if [[ "$tag_sha" != "$HEAD_SHA" ]]; then
+              echo "release candidate tag $tag does not point at $HEAD_SHA" >&2
+              exit 1
+            fi
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       # Reads .prototools and installs moon 2.6.5, as gates.yml does.
       - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+        if: steps.release.outputs.tag != ''
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        if: steps.release.outputs.tag != ''
         with:
           toolchain: 1.100.0
           components: rustfmt,clippy
       - name: Install the recording tools
+        if: steps.release.outputs.tag != ''
         run: |
           set -euo pipefail
 
@@ -83,6 +90,7 @@ jobs:
           fc-cache -f
       # terminal-control builds with Zig 0.15.2, checked before it is used.
       - name: Install Zig
+        if: steps.release.outputs.tag != ''
         run: |
           set -euo pipefail
 
@@ -94,16 +102,20 @@ jobs:
           tar -xf zig-x86_64-linux-0.15.2.tar.xz
           echo "$RUNNER_TEMP/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
       - name: Install terminal-control
+        if: steps.release.outputs.tag != ''
         run: |
           set -euo pipefail
 
           cargo install --locked terminal-control --version 1.2.1
           termctrl --version
       - name: Record the released gate
+        if: steps.release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: bash scripts/record.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.release.outputs.tag != ''
         with:
           name: slice-1-recording
           path: slice-1.gif

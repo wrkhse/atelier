@@ -33,9 +33,8 @@ if [[ "$MODE" != gate ]]; then
   exit 2
 fi
 
-# GATE is one gate, such as rust/fmt; moon ci runs only its task.
+# GATE is all or one gate, such as rust/fmt.
 gate=${GATE:?gate}
-task=${gate##*/}
 
 # The host checkout is read-only and has no persisted checkout credential.
 # All source execution stays here.
@@ -58,7 +57,11 @@ fi
 
 # moon's own status; its report is judged in a separate container.
 status=0
-moon ci ":$task" || status=$?
+if [[ "$gate" == all ]]; then
+  moon ci || status=$?
+else
+  moon ci ":${gate##*/}" || status=$?
+fi
 
 report=.moon/cache/ciReport.json
 if [[ ! -f "$report" || -L "$report" || ! -s "$report" ]]; then
