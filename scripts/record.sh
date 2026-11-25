@@ -25,6 +25,7 @@ RELEASE_DIR="$RUNNER_TEMP/release"
 REL="$RUNNER_TEMP/rel"
 REPORTER_PATH="$REL/bin/atelier-reporter"
 SCRATCH="$RUNNER_TEMP/scratch"
+SOURCE_REPORTER=target/x86_64-unknown-linux-musl/release/atelier-reporter
 SUPPORT="$RUNNER_TEMP/ci-support"
 RECORDING="$RUNNER_TEMP/demo.termctrl"
 VIDEO="$RUNNER_TEMP/slice-1.mp4"
@@ -290,7 +291,7 @@ gate_step() {
 
   # The pane's shell expands these, so the recording shows the real command.
   # shellcheck disable=SC2016
-  type_line 'bash "$CI_SUPPORT/run.sh" gate 2>>"$GATE_LOG"; echo "exit $?"'
+  type_line 'bash "$CI_SUPPORT/run.sh" record-gate 2>>"$GATE_LOG"; echo "exit $?"'
   wait_until 900 pane_has "$LEFT" '^exit [0-9]+$'
 
   screen=$(capture "$LEFT")
@@ -325,7 +326,8 @@ all_gates_step() {
   tmux send-keys -t "$LEFT" C-l
   wait_until 10 pane_lacks "$LEFT" '^exit [0-9]+$'
 
-  typed="GATE=all GATES=\"$*\" bash \"\$CI_SUPPORT/run.sh\" gate 2>>\"\$GATE_LOG\""
+  typed="GATE=all GATES=\"$*\" bash \"\$CI_SUPPORT/run.sh\" record-gate"
+  typed+=" 2>>\"\$GATE_LOG\""
   type_line "$typed; gate_status=\$?; echo \"gate exit \$gate_status\""
   # The gate and validation have 85 minutes combined, plus runner overhead.
   wait_until 5400 pane_has "$LEFT" '^gate exit [0-9]+$'
@@ -450,7 +452,6 @@ check_screens() {
 }
 
 check_released_reporter() {
-  local source_reporter=target/x86_64-unknown-linux-musl/release/atelier-reporter
   local reporter="'$REPORTER_PATH'"
   local status=0 markers timestamp marker frame
   local seen_version=0 seen_report=0
@@ -476,7 +477,7 @@ check_released_reporter() {
       echo "released reporter: termctrl show failed at marker $marker" >&2
       return 1
     fi
-    if [[ "$frame" == *"$source_reporter"* ]]; then
+    if [[ "$frame" == *"$SOURCE_REPORTER"* ]]; then
       echo "released reporter: source-built path at marker $marker" >&2
       return 1
     fi
@@ -508,7 +509,12 @@ check_released_reporter() {
     return 1
   fi
 
-  rg -qF --no-ignore -- "$source_reporter" "$SCREENS" "$GATE_LOG" || status=$?
+  if ! rg -qxF -- "reporter: $REPORTER_PATH" "$GATE_LOG"; then
+    echo "released reporter: gate log lacks reporter: $REPORTER_PATH" >&2
+    return 1
+  fi
+
+  rg -qF --no-ignore -- "$SOURCE_REPORTER" "$SCREENS" "$GATE_LOG" || status=$?
 
   case "$status" in
     0)
@@ -651,6 +657,11 @@ main() {
   verify_release
   stage_release
   make_scratch
+
+  if [[ -e "$SCRATCH/$SOURCE_REPORTER" || -L "$SCRATCH/$SOURCE_REPORTER" ]]; then
+    echo "released reporter: source-built reporter at $SCRATCH/$SOURCE_REPORTER" >&2
+    return 1
+  fi
 
   # Built before recording, so run.sh's own build is cached and quick.
   docker build --tag atelier-gates --file "$SUPPORT/Dockerfile" "$SUPPORT"
