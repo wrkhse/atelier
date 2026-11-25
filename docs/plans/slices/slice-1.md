@@ -28,9 +28,8 @@ flowchart LR
 
 ## Recording
 
-The released candidate runs the Rust gates with one check per gate.
-
-![The released candidate runs the Rust gates with one check per gate](https://github.com/wrkhse/atelier/releases/download/v0.2.0-rc.1/slice-1-recording.gif)
+The recording is attached to the
+[v0.2.0-rc.1 release](https://github.com/wrkhse/atelier/releases/tag/v0.2.0-rc.1).
 
 ## What it builds
 

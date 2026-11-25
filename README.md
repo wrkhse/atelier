@@ -4,7 +4,7 @@ A CI engine for monorepos: gate presets on moon, one GitHub check per gate.
 
 ## Status
 
-The Rust gate presets and reporter shipped in v0.2.0-rc.1, with one GitHub
+The Rust gate presets and reporter are in v0.2.0-rc.1, with one GitHub
 check per gate. Install instructions are in this README and the release.
 
 ## Install
