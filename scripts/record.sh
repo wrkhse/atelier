@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Records the released atelier build running its rust/fmt gate end to end: a
 # two-pane terminal (commands on the left, captions on the right) driven by
-# tmux, recorded by termctrl and exported as a GIF. GitHub-hosted Linux only;
-# the gate itself runs in the contained runner of .github/ci.
+# tmux, recorded by termctrl and exported as a GIF. It ends on the released
+# reporter judging recorded moon results for all seven gates. GitHub-hosted
+# Linux only; the gate itself runs in the contained runner of .github/ci.
 set -euo pipefail
 
 if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux \
@@ -11,7 +12,15 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux \
   exit 2
 fi
 
-RELEASE_TAG=${RELEASE_TAG:-v0.2.0-rc.1}
+RELEASE_TAG=${RELEASE_TAG:?the release tag to record, such as v0.2.0-rc.1}
+
+if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+  echo "RELEASE_TAG $RELEASE_TAG is not a release candidate tag" >&2
+  exit 2
+fi
+
+VERSION=${RELEASE_TAG#v}
+ARCHIVE="atelier-$RELEASE_TAG-linux-x64.tar.gz"
 RELEASE_DIR="$RUNNER_TEMP/release"
 REL="$RUNNER_TEMP/rel"
 SCRATCH="$RUNNER_TEMP/scratch"
@@ -24,6 +33,9 @@ SCREENS="$WORK/screens"
 EDIT="$WORK/edit.json"
 GIF="$WORK/slice-1.gif"
 GATE_LOG="$WORK/gate.log"
+RESULTS="$WORK/ci-report.json"
+FIXTURE="$GITHUB_WORKSPACE/reporter/tests/fixtures/ci-report-pass.json"
+GATE_TASKS=(fmt clippy test kani miri mutants msrv)
 SESSION=demo
 REPORTER_PATH=target/x86_64-unknown-linux-musl/release/atelier-reporter
 GIF_MAX_BYTES=3000000
@@ -31,77 +43,90 @@ GIF_MAX_WIDTH=1200
 
 LEFT=
 RIGHT=
-MOON_FROM=
-PROTO_FROM=
-REPORTER_FROM=
-ORIGIN=
-VERSION_PATTERN=
 
-# The release job may still be publishing when this runs, so the download is
-# retried: 10 attempts, 30 seconds apart.
+# This runs only after the release workflow succeeded, so a missing asset,
+# checksum or version fails the recording; nothing else is ever recorded.
 fetch_release() {
-  local attempt
-
   rm -rf "$RELEASE_DIR"
   mkdir -p "$RELEASE_DIR"
 
-  for ((attempt = 1; attempt <= 10; attempt++)); do
-    if gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-      --pattern 'atelier-*-linux-x64.tar.gz' --pattern SHA256SUMS \
-      --dir "$RELEASE_DIR" --clobber; then
-      return 0
-    fi
+  gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+    --pattern "$ARCHIVE" --pattern SHA256SUMS --dir "$RELEASE_DIR"
 
-    echo "release $RELEASE_TAG asset unavailable (attempt $attempt of 10)" >&2
+  if [[ ! -f "$RELEASE_DIR/$ARCHIVE" || ! -f "$RELEASE_DIR/SHA256SUMS" ]]; then
+    echo "release $RELEASE_TAG lacks $ARCHIVE or SHA256SUMS" >&2
+    return 1
+  fi
+}
 
-    if ((attempt < 10)); then
-      sleep 30
-    fi
-  done
+# Exactly one SHA256SUMS line names the archive; it alone is checked.
+verify_release() {
+  local count line
 
-  return 1
+  count=$(rg -c -F -- "$ARCHIVE" "$RELEASE_DIR/SHA256SUMS") || count=0
+
+  if [[ "$count" != 1 ]]; then
+    echo "SHA256SUMS has $count lines for $ARCHIVE, expected 1" >&2
+    return 1
+  fi
+
+  line=$(rg -F -- "$ARCHIVE" "$RELEASE_DIR/SHA256SUMS")
+
+  if [[ "$line" != *"  $ARCHIVE" ]]; then
+    echo "SHA256SUMS line for $ARCHIVE is malformed: $line" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$line" > "$RELEASE_DIR/$ARCHIVE.sha256"
+  (cd "$RELEASE_DIR" && sha256sum -c "$ARCHIVE.sha256")
 }
 
 stage_release() {
-  local archives=("$RELEASE_DIR"/atelier-*-linux-x64.tar.gz)
-  local version=${RELEASE_TAG#v}
-
-  if ((${#archives[@]} != 1)) || [[ ! -f "${archives[0]}" ]]; then
-    echo "expected one linux-x64 archive in $RELEASE_DIR" >&2
-    return 1
-  fi
-
-  (cd "$RELEASE_DIR" && sha256sum --check --ignore-missing SHA256SUMS)
+  local reported
 
   rm -rf "$REL"
   mkdir -p "$REL"
-  tar -xzf "${archives[0]}" -C "$REL"
+  tar -xzf "$RELEASE_DIR/$ARCHIVE" -C "$REL"
 
-  MOON_FROM="$REL/.moon"
-  PROTO_FROM="$REL/.prototools"
-  REPORTER_FROM="$REL/bin/atelier-reporter"
-  ORIGIN="release $RELEASE_TAG"
-  VERSION_PATTERN="^atelier-reporter ${version//./\\.}$"
-}
+  reported=$("$REL/bin/atelier-reporter" --version)
 
-# Only when the release never published its asset: the workflow then built
-# the reporter from this checkout, and the captions say so.
-stage_fallback() {
-  local reporter=${FALLBACK_REPORTER:-}
-
-  if [[ -z "$reporter" || ! -f "$reporter" || -L "$reporter" ]]; then
-    echo "release $RELEASE_TAG has no linux-x64 asset and no fallback" >&2
+  if [[ "$reported" != "atelier-reporter $VERSION" ]]; then
+    echo "the released reporter reports '$reported', expected $VERSION" >&2
     return 1
   fi
+}
 
-  echo "::warning::release $RELEASE_TAG asset unavailable;" \
-    "recording the reporter built from $GITHUB_SHA"
+# A recorded moon result for atelier's seven gates: one passing run-task
+# action each, shaped like the reporter's ci-report-pass.json fixture.
+write_results() {
+  local actions
 
-  MOON_FROM="$GITHUB_WORKSPACE/.moon"
-  PROTO_FROM="$GITHUB_WORKSPACE/.prototools"
-  REPORTER_FROM=$reporter
-  ORIGIN="checkout ${GITHUB_SHA:0:7}, no release asset"
-  VERSION_PATTERN='^atelier-reporter [^ ]+$'
+  jq '
+    .actions[0] as $template
+    | ($ARGS.positional | map("reporter:" + .)) as $targets
+    | .actions = [
+        $targets | to_entries[]
+        | .key as $index
+        | .value as $target
+        | $template
+        | .label = "RunTask(\($target))"
+        | .node.params.target = $target
+        | .nodeIndex = ($index + 1)
+        | .status = "passed"
+      ]
+    | .context.initialTargets = $targets
+    | .context.primaryTargets = $targets
+    | .status = "passed"
+  ' "$FIXTURE" --args "${GATE_TASKS[@]}" > "$RESULTS"
+
+  actions=$(jq '[.actions[] | select(.status == "passed")] | length' \
+    "$RESULTS")
+
+  if [[ "$actions" != "${#GATE_TASKS[@]}" ]]; then
+    echo "$RESULTS has $actions passing actions," \
+      "expected ${#GATE_TASKS[@]}" >&2
+    return 1
+  fi
 }
 
 write_crate() {
@@ -155,8 +180,8 @@ make_scratch() {
 
   rm -rf "$SCRATCH" "$SUPPORT"
   mkdir -p "$SCRATCH/app/src"
-  cp -R "$MOON_FROM" "$SCRATCH/.moon"
-  cp "$PROTO_FROM" "$SCRATCH/.prototools"
+  cp -R "$REL/.moon" "$SCRATCH/.moon"
+  cp "$REL/.prototools" "$SCRATCH/.prototools"
   cp -R "$GITHUB_WORKSPACE/.github/ci" "$SUPPORT"
 
   # The released workspace names its one project, reporter. The scratch
@@ -169,7 +194,7 @@ make_scratch() {
   sed -i 's|^  reporter: "reporter"$|  app: "app"|' "$workspace"
 
   write_crate
-  install -D -m 0755 "$REPORTER_FROM" "$SCRATCH/$REPORTER_PATH"
+  install -D -m 0755 "$REL/bin/atelier-reporter" "$SCRATCH/$REPORTER_PATH"
   commit_scratch
 }
 
@@ -226,11 +251,14 @@ start_panes() {
   fi
 
   # The pane's shell inherits these; the visible export adds the gate.
-  export SOURCE="$SCRATCH" CI_SUPPORT="$SUPPORT" GATE_LOG
+  export SOURCE="$SCRATCH" CI_SUPPORT="$SUPPORT" GATE_LOG RESULTS
 
+  # Without GITHUB_STEP_SUMMARY, the recorded results never reach the job
+  # summary as if they were this run's gates.
   LEFT=$(tmux new-session -d -s "$SESSION" -x 120 -y 34 -c "$SCRATCH" \
     -P -F '#{pane_id}' \
-    env PS1='$ ' HISTFILE=/dev/null bash --noprofile --norc -i)
+    env -u GITHUB_STEP_SUMMARY PS1='$ ' HISTFILE=/dev/null \
+    bash --noprofile --norc -i)
   tmux set-option -t "$SESSION" status off
   RIGHT=$(tmux split-window -h -l 44 -t "$LEFT" -P -F '#{pane_id}' \
     tail -n +1 -F "$CAPTIONS")
@@ -240,7 +268,7 @@ start_panes() {
 start_recording() {
   local intro="atelier: the rust/fmt gate"
 
-  printf '%s\n' "$intro from $ORIGIN" >> "$CAPTIONS"
+  printf '%s\n' "$intro from release $RELEASE_TAG" >> "$CAPTIONS"
   wait_until 10 pane_has "$RIGHT" -F -- "$intro"
 
   termctrl start "$SESSION" --record "$RECORDING" --cols 120 --rows 34 \
@@ -249,7 +277,7 @@ start_recording() {
   termctrl mark "$SESSION" ready
 
   type_line "./$REPORTER_PATH --version"
-  wait_until 30 pane_has "$LEFT" "$VERSION_PATTERN"
+  wait_until 30 pane_has "$LEFT" -x -F -- "atelier-reporter $VERSION"
   type_line "export GATE=rust/fmt GATES=rust/fmt BASE=origin/main"
 }
 
@@ -298,6 +326,33 @@ expect_diff() {
   fi
 }
 
+# summary_step: the released reporter judges the recorded results for all
+# seven gates, so the final frame lists one check per gate.
+summary_step() {
+  local gates=() task screen typed
+
+  for task in "${GATE_TASKS[@]}"; do
+    gates+=(--gate "rust/$task")
+  done
+
+  tmux send-keys -t "$LEFT" C-l
+  wait_until 10 pane_lacks "$LEFT" '^exit [0-9]+$'
+
+  typed="./$REPORTER_PATH --report \"\$RESULTS\" ${gates[*]}"
+  type_line "$typed; echo \"exit \$?\""
+  wait_until 30 pane_has "$LEFT" '^exit [0-9]+$'
+
+  screen=$(capture "$LEFT")
+
+  if ! rg -qx "exit 0" <<< "$screen"; then
+    echo "final-summary: the reporter did not exit 0" >&2
+    return 1
+  fi
+
+  termctrl mark "$SESSION" final-summary
+  save_screen final-summary
+}
+
 restored() {
   ! rg -qF 'ugly( )' "$SCRATCH/app/src/lib.rs"
 }
@@ -321,6 +376,9 @@ drive() {
   wait_until 10 restored
   gate_step final-pass passed 0
   caption caption-final-result "3. Result: rust/fmt: passed"
+
+  caption caption-summary "4. Recorded moon results, one check per gate"
+  summary_step
 
   termctrl stop "$SESSION"
   tmux kill-session -t "$SESSION"
@@ -375,6 +433,30 @@ check_screens() {
   expect_count "$(screen_file violation-fail)" 0 1 violation-fail
   expect_count "$(screen_file final-pass)" 1 0 final-pass
   expect_count "$all" 2 1 "the three screens"
+  expect_summary "$(screen_file final-summary)"
+}
+
+# expect_summary FILE: exactly one passed line per gate and no failed line.
+expect_summary() {
+  local task count passed failed
+
+  for task in "${GATE_TASKS[@]}"; do
+    count=$(matches "^rust/$task: passed\b" "$1")
+
+    if [[ "$count" != 1 ]]; then
+      echo "final-summary: $count rust/$task: passed lines, expected 1" >&2
+      return 1
+    fi
+  done
+
+  passed=$(matches '^rust/[a-z]+: passed\b' "$1")
+  failed=$(matches '^rust/[a-z]+: failed\b' "$1")
+
+  if [[ "$passed" != "${#GATE_TASKS[@]}" || "$failed" != 0 ]]; then
+    echo "final-summary: $passed passed and $failed failed lines," \
+      "expected ${#GATE_TASKS[@]} and 0" >&2
+    return 1
+  fi
 }
 
 write_edit_plan() {
@@ -397,15 +479,15 @@ write_edit_plan() {
     },
     {
       "from": "caption-violation-result",
-      "to": "final-pass",
+      "to": "caption-final-result",
       "caption": "3. File restored -> rust/fmt: passed",
       "speed": 2,
       "hold_ms": 2500
     },
     {
-      "from": "final-pass",
-      "to": "caption-final-result",
-      "caption": "The released gate passes the restored crate",
+      "from": "caption-final-result",
+      "to": "final-summary",
+      "caption": "4. Recorded moon results: one check per gate",
       "speed": 1,
       "hold_ms": 3500
     }
@@ -476,12 +558,10 @@ main() {
   mkdir -p "$SCREENS"
   : > "$GATE_LOG"
 
-  if fetch_release; then
-    stage_release
-  else
-    stage_fallback
-  fi
-
+  fetch_release
+  verify_release
+  stage_release
+  write_results
   make_scratch
 
   # Built before recording, so run.sh's own build is cached and quick.

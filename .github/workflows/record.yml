@@ -2,39 +2,76 @@
 # as a two-pane terminal GIF. CI only: scripts/record.sh refuses to run
 # anywhere but a GitHub-hosted Linux runner, and every gate run goes through
 # the contained runner in .github/ci. The recording shows the release asset
-# for RELEASE_TAG, not a build of this checkout. The supervisor reviews its
-# frames before attaching the GIF to the release.
+# for RELEASE_TAG and nothing else: a missing asset, checksum or version
+# fails the job. The supervisor reviews its frames before attaching the GIF
+# to the release.
 name: record
 
 on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
+    inputs:
+      tag:
+        description: "Release candidate tag to record, such as v0.2.0-rc.1"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: record-${{ github.ref }}
+  group: record-${{ inputs.tag || github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 jobs:
   record:
+    # A release run that did not succeed published nothing worth recording.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.0-rc.1' }}
     steps:
+      # Full history brings every tag, so the release's tag can be found.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+      - name: Resolve the release tag
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT" == workflow_dispatch ]]; then
+            tag=$INPUT_TAG
+          else
+            mapfile -t tags < <(git tag --points-at "$HEAD_SHA" --list 'v*-rc.*')
+
+            if [[ "${#tags[@]}" -ne 1 ]]; then
+              echo "expected one rc tag at $HEAD_SHA, found ${#tags[@]}" >&2
+              exit 1
+            fi
+
+            tag=${tags[0]}
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+            echo "$tag is not a release candidate tag" >&2
+            exit 1
+          fi
+
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
       # Reads .prototools and installs moon 2.6.5, as gates.yml does.
       - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.100.0
-          targets: x86_64-unknown-linux-musl
           components: rustfmt,clippy
       - name: Install the recording tools
         run: |
@@ -62,38 +99,9 @@ jobs:
 
           cargo install --locked terminal-control --version 1.2.1
           termctrl --version
-      - name: Look for the release asset
-        id: asset
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          names=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --json assets --jq '.assets[].name' 2>/dev/null || true)
-
-          if grep -Eq '^atelier-.+-linux-x64\.tar\.gz$' <<< "$names"; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-      # Only when the release has no linux-x64 asset yet. record.sh still
-      # retries the download and uses this build only if that never succeeds.
-      - name: Build the reporter (no release asset)
-        if: steps.asset.outputs.found != 'true'
-        run: |
-          set -euo pipefail
-
-          sudo apt-get install --yes --no-install-recommends musl-tools
-          cargo build --release --locked -p atelier-reporter \
-            --target x86_64-unknown-linux-musl
       - name: Record the released gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FALLBACK_REPORTER: >-
-            ${{ steps.asset.outputs.found != 'true'
-            && format('{0}/target/x86_64-unknown-linux-musl/release/atelier-reporter', github.workspace)
-            || '' }}
         run: bash scripts/record.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
