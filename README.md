@@ -4,9 +4,11 @@ A CI engine for monorepos: gate presets on moon, one GitHub check per gate.
 
 ## Status
 
-The presets, reporter and wiring are planned, not shipped. This repository
+The presets, reporter and wiring are in progress, not shipped. This repository
 holds the approved design and its slice plans. Install and usage instructions
-arrive with the first slice. The CI workflow here builds these docs.
+arrive with the first release candidate. The CI workflow here builds these docs.
+Slice 1, the Rust gate presets on moon, is in progress
+([#87](https://github.com/wrkhse/atelier/issues/87)).
 
 ## Design
 
@@ -14,20 +16,21 @@ arrive with the first slice. The CI workflow here builds these docs.
 flowchart LR
     Presets[".moon/tasks/rust.yml"] --> Moon["moon ci"]
     Moon --> Reporter["atelier reporter"]
-    Reporter --> Checks["one GitHub check per gate"]
+    Reporter --> Job["gate job passes or fails"]
+    Job --> Checks["one GitHub check per gate"]
 ```
 
-The approved design has three parts, each a separate slice.
+The approved design has three parts, built together in slice 1.
 
-**Presets (planned).** A Rust preset names fmt, clippy, test, Kani, miri,
+**Presets (in progress).** A Rust preset names fmt, clippy, test, Kani, miri,
 cargo-mutants and MSRV as moon tasks. Presets stay plain task files, so moving
 to another runner later stays cheap.
 
-**Reporter (planned).** The reporter reads moon's results and posts one GitHub
-check per gate. A missing or failed result fails its gate. How task names map
-to check names is an open question in the approved design.
+**Reporter (in progress).** The reporter judges moon's results; each gate's CI
+job is the check. A missing or failed result fails its gate. The reporter maps a
+result by the moon target's task id.
 
-**Runner (planned).** Project wiring runs `moon ci` and the reporter in CI.
+**Runner (in progress).** Project wiring runs `moon ci` and the reporter in CI.
 The same command runs locally in a container; no gate runs on the host.
 
 ## Roadmap
@@ -46,5 +49,6 @@ The same command runs locally in a container; no gate runs on the host.
 
 - [The approved design](https://github.com/wrkhse/atelier/issues/85) and
   [the plan](https://github.com/wrkhse/atelier/issues/1).
-- [Slice plans](docs/plans/README.md).
+- [Slice plans](docs/plans/README.md) and
+  [Slice 1](docs/plans/slices/slice-1.md).
 - [Working on atelier](AGENTS.md).

@@ -1,0 +1,60 @@
+# atelier's gates as moon tasks, each run by moon ci inside a bounded,
+# non-root container. See .github/ci/README.md.
+name: gates
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  # Each gate is its own job, and the job's status is the GitHub check, so
+  # no job holds a token that can write checks.
+  gate:
+    name: "rust/${{ matrix.gate }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GATE: rust/${{ matrix.gate }}
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [fmt, clippy, test, kani, miri, mutants, msrv]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Reads .prototools and installs moon 2.6.5.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+          components: rustfmt,clippy,rust-src
+      # Kani, Miri, nextest and cargo-mutants live in the gate image; only
+      # the reporter is built on the runner. It is static musl, so it runs in
+      # the bookworm gate image whatever glibc the runner has.
+      - name: Build reporter
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-reporter \
+            --target x86_64-unknown-linux-musl
+      - name: Run the gate in the container
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          GATES: rust/${{ matrix.gate }}
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: bash "$CI_SUPPORT/run.sh" gate
+      # Writes the gate's line to GITHUB_STEP_SUMMARY, after a failed gate
+      # too. The offline container above remains the validator of record.
+      - name: Summarize the gate result
+        if: ${{ !cancelled() }}
+        env:
+          REPORT: ${{ runner.temp }}/atelier-reports/container/ci-report.json
+        run: >-
+          ./target/x86_64-unknown-linux-musl/release/atelier-reporter
+          --report "$REPORT" --gate "$GATE"

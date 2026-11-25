@@ -1,0 +1,20 @@
+# atelier runs its own gates: the gates workflow, .github/ci and the reporter
+# all come from this commit, so review keeps a change from loosening them.
+name: atelier
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    # A called workflow gets no more than its caller grants: each gate's job
+    # status is its check, so read access is all it needs.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/gates.yml
