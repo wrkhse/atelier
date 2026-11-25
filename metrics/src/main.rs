@@ -86,6 +86,8 @@ enum Reason {
     /// The path is not a regular file: absent, a directory or a symlink.
     MissingFile,
     NoFiles,
+    /// The head reports hold no function in total, so nothing was compared.
+    NoFunctions,
     TooManyFiles,
     TooManyFolders,
     /// A folder lies more than `MAX_DEPTH` folders below the report.
@@ -102,6 +104,7 @@ impl fmt::Display for Reason {
             Self::MissingDirectory => f.write_str("missing directory"),
             Self::MissingFile => f.write_str("missing regular file"),
             Self::NoFiles => f.write_str("no json files"),
+            Self::NoFunctions => f.write_str("no functions to compare"),
             Self::TooManyFiles => f.write_str("too many json files"),
             Self::TooManyFolders => f.write_str("too many folders"),
             Self::TooDeep => f.write_str("folder nested too deep"),
@@ -154,9 +157,17 @@ fn main() -> ExitCode {
 
 /// Prints a row for each head function; true when none regressed. A new
 /// function is listed as new and passes.
+///
+/// A head whose reports hold no function in total is refused, as an empty
+/// comparison would pass having checked nothing.
 fn complexity(base: &Path, head: &Path) -> Result<bool, Refusal> {
     let before = functions(base)?;
     let after = functions(head)?;
+
+    if after.is_empty() {
+        return Err(Refusal::new(head, Reason::NoFunctions));
+    }
+
     let comparisons = compare(&before, &after);
 
     println!("{TABLE_HEAD}");

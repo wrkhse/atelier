@@ -113,9 +113,11 @@ pub struct Comparison {
     pub state: State,
 }
 
-/// Compares the worst case of each head key with the worst case of the same
-/// key in the base, in head order of first appearance. A function only in
-/// the base is not listed: removing one is never a regression.
+/// Compares each head function with the same function in the base.
+///
+/// Each side is the worst case of its key, listed in head order of first
+/// appearance. A function only in the base is not listed: removing one is
+/// never a regression.
 #[must_use]
 pub fn compare(base: &[FunctionMetric], head: &[FunctionMetric]) -> Vec<Comparison> {
     let mut before: BTreeMap<String, FunctionMetric> = worst_cases(base).into_iter().collect();
