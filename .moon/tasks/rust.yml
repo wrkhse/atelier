@@ -18,8 +18,7 @@ tasks:
     env:
       MIRIFLAGS: "-Zmiri-disable-isolation"
   mutants:
-    command: >-
-      cargo mutants --in-diff "${ATELIER_MUTANTS_DIFF:-target/mutants.diff}" --timeout 120 --jobs 3
+    command: bash ../.moon/scripts/mutants.sh
   # Checks with the rust-version every workspace member declares, read and
   # validated from cargo metadata.
   msrv:

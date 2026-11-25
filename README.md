@@ -21,7 +21,19 @@ tar -xzf atelier-v0.2.0-rc.1-linux-x64.tar.gz
 export PATH="$PWD/bin:$PATH"
 ```
 
-The archive also carries the moon task presets.
+Copy the released moon configuration and tool versions into the consumer
+repository root, then run its gates in a container:
+
+```sh
+cp -R .moon /path/to/consumer/
+cp .prototools /path/to/consumer/
+cd /path/to/consumer
+moon ci
+```
+
+The consumer defines its project mappings in `.moon/workspace.yml`. In CI,
+each gate job appears as its own GitHub check. The reporter binary runs from
+the archive's `bin/` directory.
 
 ## Design
 

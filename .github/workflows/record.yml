@@ -54,25 +54,35 @@ jobs:
             tag=$INPUT_TAG
           else
             tag=$HEAD_REF
-          fi
 
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
-            if [[ "$EVENT" == workflow_dispatch ]]; then
-              echo "$tag is not a release candidate tag" >&2
+            if ! tag_sha=$(
+              git rev-parse --verify --quiet "refs/tags/$tag^{commit}"
+            ); then
+              echo "cannot resolve workflow run tag '$tag'" >&2
               exit 1
             fi
-
-            echo "$tag is not a release candidate tag; skipping recording"
-            exit 0
-          fi
-
-          if [[ "$EVENT" == workflow_run ]]; then
-            tag_sha=$(git rev-parse --verify "refs/tags/$tag^{commit}")
 
             if [[ "$tag_sha" != "$HEAD_SHA" ]]; then
-              echo "release candidate tag $tag does not point at $HEAD_SHA" >&2
+              echo "release tag $tag does not point at $HEAD_SHA" >&2
               exit 1
             fi
+          fi
+
+          version='^v[0-9]+\.[0-9]+\.[0-9]+'
+
+          if [[ ! "$tag" =~ $version-rc\.[0-9]+$ ]]; then
+            suffix='[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*'
+
+            # The publish job treats any "-rc." tag as a candidate.
+            if [[ "$EVENT" == workflow_run && "$tag" != *-rc.* \
+              && ! "$tag" =~ $version-rc([+-]|$) \
+              && "$tag" =~ $version(-$suffix)?([+]$suffix)?$ ]]; then
+              echo "$tag is not a release candidate tag; skipping recording"
+              exit 0
+            fi
+
+            echo "cannot parse '$tag' as a release candidate tag" >&2
+            exit 1
           fi
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"

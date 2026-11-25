@@ -91,6 +91,7 @@ jobs:
           cp .moon/tasks/rust.yml "$stage/.moon/tasks/rust.yml"
           cp .moon/toolchains.yml "$stage/.moon/toolchains.yml"
           cp .moon/scripts/msrv.sh "$stage/.moon/scripts/msrv.sh"
+          cp .moon/scripts/mutants.sh "$stage/.moon/scripts/mutants.sh"
           cp .prototools "$stage/.prototools"
           cp "target/$TARGET/release/atelier-reporter" "$stage/bin/atelier-reporter"
           cp README.md "$stage/README.md"
@@ -101,6 +102,7 @@ jobs:
             .moon/tasks/rust.yml \
             .moon/toolchains.yml \
             .moon/scripts/msrv.sh \
+            .moon/scripts/mutants.sh \
             .prototools \
             bin/atelier-reporter \
             README.md \
@@ -126,6 +128,7 @@ jobs:
             .moon/tasks/rust.yml \
             .moon/toolchains.yml \
             .moon/scripts/msrv.sh \
+            .moon/scripts/mutants.sh \
             .prototools \
             bin/atelier-reporter \
             README.md \
@@ -189,7 +192,7 @@ jobs:
             mkdir -p "$reporter_dir"
             cp "$unpacked/bin/atelier-reporter" "$reporter_dir/"
 
-            SOURCE="$consumer" GATE=rust/fmt GATES=rust/fmt BASE= \
+            SOURCE="$consumer" GATE=rust/fmt GATES=rust/fmt BASE="" \
               bash "$CI_SUPPORT/run.sh" gate
 
             report="$RUNNER_TEMP/atelier-reports/container/ci-report.json"
