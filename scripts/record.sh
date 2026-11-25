@@ -451,15 +451,59 @@ check_screens() {
 
 check_released_reporter() {
   local source_reporter=target/x86_64-unknown-linux-musl/release/atelier-reporter
-  local status=0
+  local reporter="'$REPORTER_PATH'"
+  local status=0 markers timestamp marker frame
+  local seen_version=0 seen_report=0
 
   check_released_reporter_binary
 
-  if ! rg -qF -- "'$REPORTER_PATH' --version" "$SCREENS/ready-command.txt"; then
+  if ! markers=$(termctrl markers "$RECORDING"); then
+    echo "released reporter: termctrl markers failed for $RECORDING" >&2
+    return 1
+  fi
+  if [[ -z "$markers" ]]; then
+    echo "released reporter: no markers in $RECORDING" >&2
+    return 1
+  fi
+
+  # termctrl markers lists each timestamp and marker name separated by a tab.
+  while IFS=$'\t' read -r timestamp marker; do
+    if [[ ! "$timestamp" =~ ^[0-9]+$ || -z "$marker" ]]; then
+      echo "released reporter: malformed termctrl markers output" >&2
+      return 1
+    fi
+    if ! frame=$(termctrl show --recording "$RECORDING" --at-marker "$marker"); then
+      echo "released reporter: termctrl show failed at marker $marker" >&2
+      return 1
+    fi
+    if [[ "$frame" == *"$source_reporter"* ]]; then
+      echo "released reporter: source-built path at marker $marker" >&2
+      return 1
+    fi
+
+    if [[ "$frame" =~ (^|[[:space:]])"$reporter --version"([[:space:]]|$) ]]; then
+      seen_version=1
+    fi
+
+    if [[ "$frame" =~ (^|[[:space:]])"$reporter --report"([[:space:]]|$) ]]; then
+      seen_report=1
+    fi
+  done <<< "$markers"
+
+  if ((seen_version == 0)); then
+    echo "released reporter: recording lacks the release --version command" >&2
+    return 1
+  fi
+  if ((seen_report == 0)); then
+    echo "released reporter: recording lacks the release --report command" >&2
+    return 1
+  fi
+
+  if ! rg -qF -- "$reporter --version" "$SCREENS/ready-command.txt"; then
     echo "released reporter: saved intro lacks the release --version command" >&2
     return 1
   fi
-  if ! rg -qF -- "'$REPORTER_PATH' --report" "$SCREENS/summary-command.txt"; then
+  if ! rg -qF -- "$reporter --report" "$SCREENS/summary-command.txt"; then
     echo "released reporter: saved summary lacks the release --report command" >&2
     return 1
   fi
