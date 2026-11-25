@@ -382,7 +382,7 @@ fn text<'a>(space: &'a Value, field: &'static str) -> Result<&'a str, Reason> {
         .ok_or(Reason::MissingField(field))
 }
 
-fn spaces<'a>(space: &'a Value) -> Result<&'a [Value], Reason> {
+fn spaces(space: &Value) -> Result<&[Value], Reason> {
     space
         .get("spaces")
         .and_then(Value::as_array)
