@@ -1,0 +1,28 @@
+# Temporary: regenerates only the local package's version in Cargo.lock on
+# a hosted runner, without bumping any dependency, so no developer runs
+# Cargo to make it; download the artifact, commit it, and remove this job.
+name: rc-lock
+
+on:
+  push:
+    branches: [chore/release-candidate]
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - run: cargo update -p atelier-reporter --offline
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Cargo.lock-minimal
+          path: Cargo.lock
+          if-no-files-found: error
