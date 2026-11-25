@@ -21,19 +21,17 @@ tar -xzf atelier-v0.2.0-rc.1-linux-x64.tar.gz
 export PATH="$PWD/bin:$PATH"
 ```
 
-Copy the released moon configuration and tool versions into the consumer
-repository root, then run its gates locally with `moon ci`:
+Copy the released `.moon` configuration and `.prototools` into the consumer
+repository root:
 
 ```sh
 cp -R .moon /path/to/consumer/
 cp .prototools /path/to/consumer/
-cd /path/to/consumer
-moon ci
 ```
 
-The consumer defines its project mappings in `.moon/workspace.yml`. In CI,
-the project's workflow runs each gate in a bounded container as its own GitHub
-check. The reporter binary runs from the archive's `bin/` directory.
+The consumer defines its project mappings in `.moon/workspace.yml` and wires
+the presets into its own CI workflow; each gate then appears as its own
+GitHub check. The reporter binary runs from the archive's `bin/` directory.
 
 ## Design
 
