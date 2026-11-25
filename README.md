@@ -61,7 +61,8 @@ The same command runs locally in a container; no gate runs on the host.
       ([#87](https://github.com/wrkhse/atelier/issues/87),
       [v0.2.0-rc.1](https://github.com/wrkhse/atelier/releases/tag/v0.2.0-rc.1))
 - [ ] Metrics against the previous version
-      ([#88](https://github.com/wrkhse/atelier/issues/88))
+      ([#88](https://github.com/wrkhse/atelier/issues/88),
+      [Slice 2](docs/plans/slices/slice-2.md))
 - [ ] Builder plugin on tack, driven by sourcefed events
       ([#85](https://github.com/wrkhse/atelier/issues/85))
 - [ ] TypeScript and TLA+ presets — later, no issue yet

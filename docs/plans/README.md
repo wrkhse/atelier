@@ -10,7 +10,7 @@ Slices:
 - [Slice 1: Rust gate presets on moon](slices/slice-1.md), implemented in
   [v0.2.0-rc.1](https://github.com/wrkhse/atelier/releases/tag/v0.2.0-rc.1)
   ([#87](https://github.com/wrkhse/atelier/issues/87)).
-- Slice 2: Metrics against previous version, planned
+- [Slice 2: Metrics against previous version](slices/slice-2.md), planned
   ([#88](https://github.com/wrkhse/atelier/issues/88)).
 - Slice 3: Agent review as a check, planned
   ([#89](https://github.com/wrkhse/atelier/issues/89)).
