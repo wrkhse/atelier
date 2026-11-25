@@ -29,22 +29,22 @@ const TABLE_HEAD: [&str; 2] = [
     "| --- | --- | --- | --- | --- | --- |",
 ];
 
-const NEW_SAME: &str = "| src/lib.rs:Config::new | same | 1.00 -> 1.00 | 0.00 -> 0.00 \
+const NEW_SAME: &str = "| src/lib.rs:Config::new#0 | same | 1.00 -> 1.00 | 0.00 -> 0.00 \
     | 18.00 -> 18.00 | 140.50 -> 140.50 |";
 
-const VALIDATE_SAME: &str = "| src/lib.rs:Config::validate | same | 4.00 -> 4.00 \
+const VALIDATE_SAME: &str = "| src/lib.rs:Config::validate#0 | same | 4.00 -> 4.00 \
     | 5.00 -> 5.00 | 200.75 -> 200.75 | 95.50 -> 95.50 |";
 
-const VALIDATE_IMPROVED: &str = "| src/lib.rs:Config::validate | improved | 4.00 -> 3.00 \
+const VALIDATE_IMPROVED: &str = "| src/lib.rs:Config::validate#0 | improved | 4.00 -> 3.00 \
     | 5.00 -> 3.00 | 200.75 -> 180.25 | 95.50 -> 101.50 |";
 
-const RESET_NEW: &str = "| src/lib.rs:Config::reset | new | - -> 1.00 | - -> 0.00 \
+const RESET_NEW: &str = "| src/lib.rs:Config::reset#0 | new | - -> 1.00 | - -> 0.00 \
     | - -> 12.00 | - -> 150.75 |";
 
-const PARSE_SAME: &str = "| src/lib.rs:parse | same | 3.00 -> 3.00 | 2.00 -> 2.00 \
+const PARSE_SAME: &str = "| src/lib.rs:parse#0 | same | 3.00 -> 3.00 | 2.00 -> 2.00 \
     | 120.50 -> 120.50 | 110.25 -> 110.25 |";
 
-const PARSE_REGRESSED: &str = "| src/lib.rs:parse | regressed | 3.00 -> 4.00 \
+const PARSE_REGRESSED: &str = "| src/lib.rs:parse#0 | regressed | 3.00 -> 4.00 \
     | 2.00 -> 4.00 | 120.50 -> 150.50 | 110.25 -> 101.25 |";
 
 /// A fresh folder under Cargo's temporary folder for integration tests.
@@ -105,11 +105,10 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// `row` with its function's key numbered as occurrence `index`, such as
-/// `src/lib.rs:parse#1`. A row opens with `| `, so its first ` | ` follows
-/// the key.
-fn numbered(row: &str, index: usize) -> String {
-    row.replacen(" | ", &format!("#{index} | "), 1)
+/// `row` with its function's key numbered as the second occurrence, such
+/// as `src/lib.rs:parse#1`. A row's key is its first `#0 | `.
+fn second(row: &str) -> String {
+    row.replacen("#0 | ", "#1 | ", 1)
 }
 
 /// The table of a comparison: its heading, `rows`, then `verdict`.
@@ -166,10 +165,11 @@ fn complexity_passes_with_new_functions_and_skips_other_files() {
     let output = complexity(&fixture("complexity/base"), &head).expect("run the metrics binary");
 
     let rows = [
-        "| src/extra.rs:Config::new | new | - -> 1.00 | - -> 0.00 | - -> 18.00 | - -> 140.50 |",
-        "| src/extra.rs:Config::validate | new | - -> 4.00 | - -> 5.00 | - -> 200.75 \
+        "| src/extra.rs:Config::new#0 | new | - -> 1.00 | - -> 0.00 | - -> 18.00 \
+         | - -> 140.50 |",
+        "| src/extra.rs:Config::validate#0 | new | - -> 4.00 | - -> 5.00 | - -> 200.75 \
          | - -> 95.50 |",
-        "| src/extra.rs:parse | new | - -> 3.00 | - -> 2.00 | - -> 120.50 | - -> 110.25 |",
+        "| src/extra.rs:parse#0 | new | - -> 3.00 | - -> 2.00 | - -> 120.50 | - -> 110.25 |",
         NEW_SAME,
         VALIDATE_IMPROVED,
         PARSE_SAME,
@@ -369,10 +369,9 @@ fn complexity_compares_each_occurrence_of_a_repeated_name() {
     let output = complexity(&fixture("complexity/base"), &head).expect("run the metrics binary");
 
     let rows = [
-        "| src/lib.rs:Config::new#0 | new | - -> 1.00 | - -> 0.00 | - -> 18.00 | - -> 140.50 |",
-        "| src/lib.rs:Config::validate#0 | new | - -> 4.00 | - -> 5.00 | - -> 200.75 \
-         | - -> 95.50 |",
-        "| src/lib.rs:parse#0 | new | - -> 3.00 | - -> 2.00 | - -> 120.50 | - -> 110.25 |",
+        NEW_SAME,
+        VALIDATE_SAME,
+        PARSE_SAME,
         "| src/lib.rs:Config::new#1 | new | - -> 1.00 | - -> 0.00 | - -> 18.00 | - -> 140.50 |",
         "| src/lib.rs:Config::validate#1 | new | - -> 4.00 | - -> 5.00 | - -> 200.75 \
          | - -> 95.50 |",
@@ -411,13 +410,13 @@ fn complexity_fails_when_one_occurrence_of_a_repeated_name_regressed() {
     let output = complexity(&base, &head).expect("run the metrics binary");
 
     let rows = [
-        numbered(NEW_SAME, 0),
-        numbered(VALIDATE_SAME, 0),
-        numbered(PARSE_SAME, 0),
-        numbered(NEW_SAME, 1),
-        numbered(VALIDATE_IMPROVED, 1),
+        NEW_SAME.to_owned(),
+        VALIDATE_SAME.to_owned(),
+        PARSE_SAME.to_owned(),
+        second(NEW_SAME),
+        second(VALIDATE_IMPROVED),
         RESET_NEW.to_owned(),
-        numbered(PARSE_REGRESSED, 1),
+        second(PARSE_REGRESSED),
     ];
     let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
     assert_eq!(stderr(&output), "");
@@ -483,27 +482,25 @@ fn complexity_refuses_too_many_files() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn complexity_refuses_reports_without_functions() {
-    let dir = scratch("empty").expect("scratch folder");
-    let base = dir.join("base");
-    let head = dir.join("head");
-    let empty = r#"{"name":"src/lib.rs","kind":"unit","spaces":[]}"#;
+fn complexity_refuses_a_report_without_functions() {
+    let head = scratch("empty").expect("scratch folder");
+    let empty = head.join("empty.json");
+    let improved = fixture("complexity/improved/lib.json");
+    let unparsed = r#"{"name":"src/unparsed.rs","kind":"unit","spaces":[]}"#;
 
-    for folder in [&base, &head] {
-        fs::create_dir(folder).expect("make a report folder");
-        fs::write(folder.join("lib.json"), empty).expect("write lib.json");
-    }
+    fs::copy(improved, head.join("lib.json")).expect("copy lib.json");
+    fs::write(&empty, unparsed).expect("write empty.json");
 
-    let output = complexity(&base, &head).expect("run the metrics binary");
+    let output = complexity(&fixture("complexity/base"), &head).expect("run the metrics binary");
 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stdout_lines(&output), Vec::<String>::new());
     assert_eq!(
         stderr(&output),
-        format!("{}: no functions to compare\n", head.display())
+        format!("{}: no functions\n", empty.display())
     );
 
-    fs::remove_dir_all(&dir).expect("remove the scratch folder");
+    fs::remove_dir_all(&head).expect("remove the scratch folder");
 }
 
 #[cfg(unix)]

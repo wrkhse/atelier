@@ -86,7 +86,9 @@ enum Reason {
     /// The path is not a regular file: absent, a directory or a symlink.
     MissingFile,
     NoFiles,
-    /// The head report holds no function, so nothing was compared.
+    /// A report file holds no function. A source file rust-code-analysis
+    /// could not parse is reported without functions, which would otherwise
+    /// drop them from the comparison.
     NoFunctions,
     TooManyFiles,
     TooManyFolders,
@@ -104,7 +106,7 @@ impl fmt::Display for Reason {
             Self::MissingDirectory => f.write_str("missing directory"),
             Self::MissingFile => f.write_str("missing regular file"),
             Self::NoFiles => f.write_str("no json files"),
-            Self::NoFunctions => f.write_str("no functions to compare"),
+            Self::NoFunctions => f.write_str("no functions"),
             Self::TooManyFiles => f.write_str("too many json files"),
             Self::TooManyFolders => f.write_str("too many folders"),
             Self::TooDeep => f.write_str("folder nested too deep"),
@@ -156,16 +158,13 @@ fn main() -> ExitCode {
 }
 
 /// Prints a row for each head function; true when none regressed. A new
-/// function is listed as new and passes.
-/// An empty comparison is refused, as it would pass having checked nothing.
+/// function is listed as new and passes. The comparison is never empty:
+/// `functions` refuses a report directory without files and a file without
+/// functions.
 fn complexity(base: &Path, head: &Path) -> Result<bool, Refusal> {
     let before = functions(base)?;
     let after = functions(head)?;
     let comparisons = compare(&before, &after);
-
-    if comparisons.is_empty() {
-        return Err(Refusal::new(head, Reason::NoFunctions));
-    }
 
     println!("{TABLE_HEAD}");
 
@@ -232,12 +231,21 @@ fn count(path: &Path) -> Result<f64, Refusal> {
 /// Every function in the JSON files under `dir` and its folders, in path
 /// order. A name listed more than once, such as a nested anonymous item,
 /// keeps one entry per occurrence, which `keys` numbers for comparison.
+/// A file without functions is refused, so a source file the analysis could
+/// not parse cannot make its functions disappear from the comparison.
 fn functions(dir: &Path) -> Result<Vec<FunctionMetric>, Refusal> {
     let mut found = Vec::new();
 
     for file in json_files(dir)? {
         let output = read_json(&file, MAX_FILE_BYTES)?;
-        flatten_file(&output, &mut found).map_err(|reason| Refusal::new(&file, reason))?;
+        let refused = |reason: Reason| Refusal::new(&file, reason);
+        let before = found.len();
+
+        flatten_file(&output, &mut found).map_err(refused)?;
+
+        if found.len() == before {
+            return Err(refused(Reason::NoFunctions));
+        }
     }
 
     Ok(found)

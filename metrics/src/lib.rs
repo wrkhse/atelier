@@ -25,30 +25,21 @@ impl FunctionMetric {
     }
 }
 
-/// The keys that match `metrics` across versions, in order, such as
-/// `src/lib.rs:Config::new`. A name listed more than once in a file, as
-/// nested anonymous items are, is numbered by its zero-based occurrence in
-/// list order, such as `src/lib.rs:<anonymous>::f#1`, so each occurrence is
-/// compared on its own.
+/// The keys that match `metrics` across versions, in order.
+///
+/// Each key is the file and name, numbered by its zero-based occurrence in
+/// list order, such as `src/lib.rs:Config::new#0`. Every occurrence is
+/// numbered, a single one included, so a name listed once in one version
+/// and twice in the other, as nested anonymous items can be, still matches
+/// its first occurrence, and each occurrence is compared on its own.
 #[must_use]
 pub fn keys(metrics: &[FunctionMetric]) -> Vec<String> {
     let names: Vec<String> = metrics.iter().map(FunctionMetric::name_key).collect();
-    let mut totals: BTreeMap<&str, usize> = BTreeMap::new();
-
-    for name in &names {
-        let total = totals.entry(name.as_str()).or_default();
-        *total = total.saturating_add(1);
-    }
-
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
 
     names
         .iter()
         .map(|name| {
-            if totals.get(name.as_str()) == Some(&1) {
-                return name.clone();
-            }
-
             let index = seen.entry(name.as_str()).or_default();
             let key = format!("{name}#{index}");
             *index = index.saturating_add(1);
@@ -253,13 +244,13 @@ mod tests {
 
         let expected = vec![
             Comparison {
-                key: "src/lib.rs:parse".to_owned(),
+                key: "src/lib.rs:parse#0".to_owned(),
                 base: Some(metric("parse", BASE)),
                 head: metric("parse", BASE),
                 state: State::Same,
             },
             Comparison {
-                key: "src/lib.rs:render".to_owned(),
+                key: "src/lib.rs:render#0".to_owned(),
                 base: None,
                 head: metric("render", BASE),
                 state: State::New,
@@ -279,11 +270,11 @@ mod tests {
             .iter()
             .map(|comparison| (comparison.key.as_str(), comparison.state))
             .collect();
-        assert_eq!(keys, [("src/main.rs:parse", State::New)]);
+        assert_eq!(keys, [("src/main.rs:parse#0", State::New)]);
     }
 
     #[test]
-    fn a_repeated_name_is_numbered_in_order_within_its_file() {
+    fn every_name_is_numbered_in_order_within_its_file() {
         let mut moved = metric("parse", BASE);
         moved.file = "src/main.rs".to_owned();
         let metrics = [
@@ -299,9 +290,29 @@ mod tests {
             keyed,
             [
                 "src/lib.rs:parse#0",
-                "src/lib.rs:render",
-                "src/main.rs:parse",
+                "src/lib.rs:render#0",
+                "src/main.rs:parse#0",
                 "src/lib.rs:parse#1",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_listed_once_in_base_matches_its_first_occurrence_in_head() {
+        let base = [metric("parse", BASE)];
+        let head = [metric("parse", BASE), metric("parse", BASE)];
+
+        let compared = compare(&base, &head);
+
+        let keyed: Vec<(&str, State)> = compared
+            .iter()
+            .map(|comparison| (comparison.key.as_str(), comparison.state))
+            .collect();
+        assert_eq!(
+            keyed,
+            [
+                ("src/lib.rs:parse#0", State::Same),
+                ("src/lib.rs:parse#1", State::New),
             ]
         );
     }
