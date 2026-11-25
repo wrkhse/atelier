@@ -4,9 +4,8 @@ A CI engine for monorepos: gate presets on moon, one GitHub check per gate.
 
 ## Status
 
-The Rust gate presets and reporter are in the 0.2.0-rc.1 release candidate,
-with one GitHub check per gate. Install instructions are in this README and
-the release.
+The Rust gate presets and reporter shipped in v0.2.0-rc.1, with one GitHub
+check per gate. Install instructions are in this README and the release.
 
 ## Install
 
@@ -45,21 +44,22 @@ flowchart LR
 
 The approved design has three parts, built together in slice 1.
 
-**Presets (in progress).** A Rust preset names fmt, clippy, test, Kani, miri,
+**Presets.** A Rust preset names fmt, clippy, test, Kani, miri,
 cargo-mutants and MSRV as moon tasks. Presets stay plain task files, so moving
 to another runner later stays cheap.
 
-**Reporter (in progress).** The reporter judges moon's results; each gate's CI
+**Reporter.** The reporter judges moon's results; each gate's CI
 job is the check. A missing or failed result fails its gate. The reporter maps a
 result by the moon target's task id.
 
-**Runner (in progress).** Project wiring runs `moon ci` and the reporter in CI.
+**Runner.** Project wiring runs `moon ci` and the reporter in CI.
 The same command runs locally in a container; no gate runs on the host.
 
 ## Roadmap
 
-- [ ] Rust gate presets on moon
-      ([#87](https://github.com/wrkhse/atelier/issues/87))
+- [x] Rust gate presets on moon
+      ([#87](https://github.com/wrkhse/atelier/issues/87),
+      [v0.2.0-rc.1](https://github.com/wrkhse/atelier/releases/tag/v0.2.0-rc.1))
 - [ ] Metrics against the previous version
       ([#88](https://github.com/wrkhse/atelier/issues/88))
 - [ ] Builder plugin on tack, driven by sourcefed events

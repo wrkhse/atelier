@@ -7,7 +7,8 @@ slice before the next one starts. The
 
 Slices:
 
-- [Slice 1: Rust gate presets on moon](slices/slice-1.md), in progress
+- [Slice 1: Rust gate presets on moon](slices/slice-1.md), implemented in
+  [v0.2.0-rc.1](https://github.com/wrkhse/atelier/releases/tag/v0.2.0-rc.1)
   ([#87](https://github.com/wrkhse/atelier/issues/87)).
 - Slice 2: Metrics against previous version, planned
   ([#88](https://github.com/wrkhse/atelier/issues/88)).

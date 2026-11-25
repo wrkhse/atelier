@@ -1,10 +1,10 @@
 # Slice 1: Rust gate presets on moon
 
-Status: In progress. The approved plan is
+Status: Implemented
+([v0.2.0-rc.1](https://github.com/wrkhse/atelier/releases/tag/v0.2.0-rc.1)).
+The approved plan is
 [#87](https://github.com/wrkhse/atelier/issues/87), slice 1 of
-[#1](https://github.com/wrkhse/atelier/issues/1). The presets, reporter and
-wiring are built in this slice; install and usage instructions follow the first
-release candidate.
+[#1](https://github.com/wrkhse/atelier/issues/1).
 
 ## You can
 
@@ -25,6 +25,12 @@ flowchart LR
     Reporter --> Job["gate job passes or fails"]
     Job --> Checks["one GitHub check per gate"]
 ```
+
+## Recording
+
+The released candidate runs the Rust gates with one check per gate.
+
+![The released candidate runs the Rust gates with one check per gate](https://github.com/wrkhse/atelier/releases/download/v0.2.0-rc.1/slice-1-recording.gif)
 
 ## What it builds
 
@@ -74,5 +80,5 @@ deliberate violation fails its gate, and restoring the code passes it.
 
 The fixture pull request runs all seven gates in CI, each gate's job reports its
 own check, a deliberate violation fails only its gate, and restoring the code
-passes it. The end-to-end check is recorded from the released candidate,
-before the slice closes.
+passes it. The recording is attached to the release as an asset, and the slice
+is closed.
