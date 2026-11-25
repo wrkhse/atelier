@@ -86,10 +86,6 @@ enum Reason {
     /// The path is not a regular file: absent, a directory or a symlink.
     MissingFile,
     NoFiles,
-    /// A report file holds no function. A source file rust-code-analysis
-    /// could not parse is reported without functions, which would otherwise
-    /// drop them from the comparison.
-    NoFunctions,
     TooManyFiles,
     TooManyFolders,
     /// A folder lies more than `MAX_DEPTH` folders below the report.
@@ -106,7 +102,6 @@ impl fmt::Display for Reason {
             Self::MissingDirectory => f.write_str("missing directory"),
             Self::MissingFile => f.write_str("missing regular file"),
             Self::NoFiles => f.write_str("no json files"),
-            Self::NoFunctions => f.write_str("no functions"),
             Self::TooManyFiles => f.write_str("too many json files"),
             Self::TooManyFolders => f.write_str("too many folders"),
             Self::TooDeep => f.write_str("folder nested too deep"),
@@ -158,9 +153,7 @@ fn main() -> ExitCode {
 }
 
 /// Prints a row for each head function; true when none regressed. A new
-/// function is listed as new and passes. The comparison is never empty:
-/// `functions` refuses a report directory without files and a file without
-/// functions.
+/// function is listed as new and passes.
 fn complexity(base: &Path, head: &Path) -> Result<bool, Refusal> {
     let before = functions(base)?;
     let after = functions(head)?;
@@ -230,22 +223,17 @@ fn count(path: &Path) -> Result<f64, Refusal> {
 
 /// Every function in the JSON files under `dir` and its folders, in path
 /// order. A name listed more than once, such as a nested anonymous item,
-/// keeps one entry per occurrence, which `keys` numbers for comparison.
-/// A file without functions is refused, so a source file the analysis could
-/// not parse cannot make its functions disappear from the comparison.
+/// keeps one entry per occurrence, which `compare` folds into its worst case.
+///
+/// A valid report without functions, such as a file of only types, adds
+/// nothing; a file that is not JSON or lacks a field is refused.
 fn functions(dir: &Path) -> Result<Vec<FunctionMetric>, Refusal> {
     let mut found = Vec::new();
 
     for file in json_files(dir)? {
         let output = read_json(&file, MAX_FILE_BYTES)?;
-        let refused = |reason: Reason| Refusal::new(&file, reason);
-        let before = found.len();
 
-        flatten_file(&output, &mut found).map_err(refused)?;
-
-        if found.len() == before {
-            return Err(refused(Reason::NoFunctions));
-        }
+        flatten_file(&output, &mut found).map_err(|reason| Refusal::new(&file, reason))?;
     }
 
     Ok(found)

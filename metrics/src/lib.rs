@@ -3,6 +3,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fmt;
 
 use serde::Deserialize;
@@ -19,33 +20,65 @@ pub struct FunctionMetric {
 }
 
 impl FunctionMetric {
-    /// The file and qualified name, such as `src/lib.rs:Config::new`.
-    fn name_key(&self) -> String {
+    /// The file and qualified name, such as `src/lib.rs:Config::new`, which
+    /// matches a function across versions.
+    fn key(&self) -> String {
         format!("{}:{}", self.file, self.name)
+    }
+
+    /// Folds `other`, a function of the same key, into this one, keeping the
+    /// worse value of each measure.
+    fn absorb(&mut self, other: &Self) {
+        self.cyclomatic = highest(self.cyclomatic, other.cyclomatic);
+        self.cognitive = highest(self.cognitive, other.cognitive);
+        self.halstead_volume = highest(self.halstead_volume, other.halstead_volume);
+        self.maintainability = lowest(self.maintainability, other.maintainability);
     }
 }
 
-/// The keys that match `metrics` across versions, in order.
+/// The larger of two values, or `NaN` when either cannot be compared, so a
+/// measure that is not a number survives aggregation and the ratchet fails
+/// closed. `f64::max` would drop it.
+fn highest(one: f64, other: f64) -> f64 {
+    match other.partial_cmp(&one) {
+        Some(Ordering::Greater) => other,
+        Some(Ordering::Less | Ordering::Equal) => one,
+        None => f64::NAN,
+    }
+}
+
+/// The smaller of two values, or `NaN` when either cannot be compared.
+fn lowest(one: f64, other: f64) -> f64 {
+    match other.partial_cmp(&one) {
+        Some(Ordering::Less) => other,
+        Some(Ordering::Greater | Ordering::Equal) => one,
+        None => f64::NAN,
+    }
+}
+
+/// One entry per key, in order of first appearance.
 ///
-/// Each key is the file and name, numbered by its zero-based occurrence in
-/// list order, such as `src/lib.rs:Config::new#0`. Every occurrence is
-/// numbered, a single one included, so a name listed once in one version
-/// and twice in the other, as nested anonymous items can be, still matches
-/// its first occurrence, and each occurrence is compared on its own.
-#[must_use]
-pub fn keys(metrics: &[FunctionMetric]) -> Vec<String> {
-    let names: Vec<String> = metrics.iter().map(FunctionMetric::name_key).collect();
-    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+/// A name listed more than once in a version, as nested anonymous items can
+/// be, is folded into one entry holding its worst case: the highest
+/// cyclomatic, cognitive and Halstead volume, and the lowest
+/// maintainability. List order never decides which entries match.
+fn worst_cases(metrics: &[FunctionMetric]) -> Vec<(String, FunctionMetric)> {
+    let mut order = Vec::new();
+    let mut merged: BTreeMap<String, FunctionMetric> = BTreeMap::new();
 
-    names
-        .iter()
-        .map(|name| {
-            let index = seen.entry(name.as_str()).or_default();
-            let key = format!("{name}#{index}");
-            *index = index.saturating_add(1);
+    for metric in metrics {
+        match merged.entry(metric.key()) {
+            Entry::Occupied(mut entry) => entry.get_mut().absorb(metric),
+            Entry::Vacant(entry) => {
+                order.push(entry.key().clone());
+                entry.insert(metric.clone());
+            }
+        }
+    }
 
-            key
-        })
+    order
+        .into_iter()
+        .filter_map(|key| merged.remove(&key).map(|metric| (key, metric)))
         .collect()
 }
 
@@ -80,24 +113,25 @@ pub struct Comparison {
     pub state: State,
 }
 
-/// Compares each head function with the base function of the same key, as
-/// `keys` gives them, in head order. A function only in the base is not
-/// listed: removing one is never a regression.
+/// Compares the worst case of each head key with the worst case of the same
+/// key in the base, in head order of first appearance. A function only in
+/// the base is not listed: removing one is never a regression.
 #[must_use]
 pub fn compare(base: &[FunctionMetric], head: &[FunctionMetric]) -> Vec<Comparison> {
-    let before: BTreeMap<String, &FunctionMetric> = keys(base).into_iter().zip(base).collect();
+    let mut before: BTreeMap<String, FunctionMetric> = worst_cases(base).into_iter().collect();
 
-    keys(head)
+    worst_cases(head)
         .into_iter()
-        .zip(head)
         .map(|(key, metric)| {
-            let previous = before.get(&key).copied();
-            let state = previous.map_or(State::New, |base| judge(base, metric));
+            let previous = before.remove(&key);
+            let state = previous
+                .as_ref()
+                .map_or(State::New, |base| judge(base, &metric));
 
             Comparison {
                 key,
-                base: previous.cloned(),
-                head: metric.clone(),
+                base: previous,
+                head: metric,
                 state,
             }
         })
@@ -174,7 +208,7 @@ pub const fn budget(base: f64, head: f64, limit_percent: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Comparison, FunctionMetric, State, budget, compare, keys, passed};
+    use super::{Comparison, FunctionMetric, State, budget, compare, passed};
 
     const BASE: [f64; 4] = [3.0, 2.0, 120.5, 110.25];
 
@@ -244,13 +278,13 @@ mod tests {
 
         let expected = vec![
             Comparison {
-                key: "src/lib.rs:parse#0".to_owned(),
+                key: "src/lib.rs:parse".to_owned(),
                 base: Some(metric("parse", BASE)),
                 head: metric("parse", BASE),
                 state: State::Same,
             },
             Comparison {
-                key: "src/lib.rs:render#0".to_owned(),
+                key: "src/lib.rs:render".to_owned(),
                 base: None,
                 head: metric("render", BASE),
                 state: State::New,
@@ -270,75 +304,77 @@ mod tests {
             .iter()
             .map(|comparison| (comparison.key.as_str(), comparison.state))
             .collect();
-        assert_eq!(keys, [("src/main.rs:parse#0", State::New)]);
+        assert_eq!(keys, [("src/main.rs:parse", State::New)]);
     }
 
     #[test]
-    fn every_name_is_numbered_in_order_within_its_file() {
-        let mut moved = metric("parse", BASE);
-        moved.file = "src/main.rs".to_owned();
-        let metrics = [
-            metric("parse", BASE),
-            metric("render", BASE),
-            moved,
-            metric("parse", BASE),
-        ];
-
-        let keyed = keys(&metrics);
-
-        assert_eq!(
-            keyed,
-            [
-                "src/lib.rs:parse#0",
-                "src/lib.rs:render#0",
-                "src/main.rs:parse#0",
-                "src/lib.rs:parse#1",
-            ]
-        );
-    }
-
-    #[test]
-    fn a_name_listed_once_in_base_matches_its_first_occurrence_in_head() {
-        let base = [metric("parse", BASE)];
-        let head = [metric("parse", BASE), metric("parse", BASE)];
-
-        let compared = compare(&base, &head);
-
-        let keyed: Vec<(&str, State)> = compared
-            .iter()
-            .map(|comparison| (comparison.key.as_str(), comparison.state))
-            .collect();
-        assert_eq!(
-            keyed,
-            [
-                ("src/lib.rs:parse#0", State::Same),
-                ("src/lib.rs:parse#1", State::New),
-            ]
-        );
-    }
-
-    #[test]
-    fn one_regressed_occurrence_of_a_repeated_name_fails() {
-        let base = [metric("parse", BASE), metric("parse", BASE)];
+    fn a_repeated_name_is_compared_by_its_worst_case() {
+        let base = [metric("parse", BASE), metric("render", BASE)];
         let head = [
-            metric("parse", BASE),
-            metric("parse", [4.0, 2.0, 120.5, 110.25]),
+            metric("parse", [2.0, 4.0, 100.0, 120.0]),
+            metric("render", BASE),
+            metric("parse", [3.5, 1.0, 130.0, 109.0]),
         ];
 
         let compared = compare(&base, &head);
 
-        let keyed: Vec<(&str, State)> = compared
-            .iter()
-            .map(|comparison| (comparison.key.as_str(), comparison.state))
-            .collect();
-        assert_eq!(
-            keyed,
-            [
-                ("src/lib.rs:parse#0", State::Same),
-                ("src/lib.rs:parse#1", State::Regressed),
-            ]
-        );
+        let expected = vec![
+            Comparison {
+                key: "src/lib.rs:parse".to_owned(),
+                base: Some(metric("parse", BASE)),
+                head: metric("parse", [3.5, 4.0, 130.0, 109.0]),
+                state: State::Regressed,
+            },
+            Comparison {
+                key: "src/lib.rs:render".to_owned(),
+                base: Some(metric("render", BASE)),
+                head: metric("render", BASE),
+                state: State::Same,
+            },
+        ];
+        assert_eq!(compared, expected);
         assert!(!passed(&compared));
+    }
+
+    #[test]
+    fn a_repeated_name_matches_whatever_its_order_or_count() {
+        let better = metric("parse", [2.0, 1.0, 100.0, 111.0]);
+        let base = [better.clone(), metric("parse", BASE)];
+        let head = [metric("parse", BASE)];
+        let reordered = [metric("parse", BASE), better.clone(), better];
+
+        let once = compare(&base, &head);
+        let thrice = compare(&base, &reordered);
+
+        let expected = vec![Comparison {
+            key: "src/lib.rs:parse".to_owned(),
+            base: Some(metric("parse", BASE)),
+            head: metric("parse", BASE),
+            state: State::Same,
+        }];
+        assert_eq!(once, expected);
+        assert_eq!(thrice, expected);
+    }
+
+    #[test]
+    fn an_occurrence_that_is_not_a_number_regresses_its_name() {
+        let cyclomatic = metric("parse", [f64::NAN, 2.0, 120.5, 110.25]);
+        let maintainability = metric("parse", [3.0, 2.0, 120.5, f64::NAN]);
+        let base = [metric("parse", BASE)];
+        let heads = [
+            [cyclomatic.clone(), metric("parse", BASE)],
+            [metric("parse", BASE), cyclomatic],
+            [maintainability.clone(), metric("parse", BASE)],
+            [metric("parse", BASE), maintainability],
+        ];
+
+        let states: Vec<State> = heads
+            .iter()
+            .flat_map(|head| compare(&base, head))
+            .map(|comparison| comparison.state)
+            .collect();
+
+        assert_eq!(states, [State::Regressed; 4]);
     }
 
     #[test]
