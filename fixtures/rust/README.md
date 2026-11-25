@@ -45,7 +45,7 @@ The workflow's `msrv-validation` job proves `.moon/scripts/msrv.sh`, the
 script behind `rust/msrv`, refuses a `rust-version` it cannot trust before
 it installs anything. It runs the script with `MSRV_CHECK_ONLY=1` on three
 small workspaces and requires each to fail with its reason: a
-`rust-version` of `2.0` (`invalid rust-version`), a member that
+`rust-version` of `1.1000` (`invalid rust-version`), a member that
 declares none (`has no rust-version`), and two members that declare 1.100
 and 1.99 (`declares`). Atelier's own workspace must pass and print
 `msrv: 1.100`.
