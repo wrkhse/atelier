@@ -3,12 +3,12 @@
 `fixtures/rust` is the gate fixture: a one-crate Rust workspace, `app`, with
 one function and one test, no dependencies, that passes every gate.
 
-The `fixture` workflow, `.github/workflows/fixture.yml`, proves each gate
-fails closed. For each of `rust/fmt`, `rust/clippy`, `rust/test` and
-`rust/mutants` it applies one deliberate violation to the reporter crate,
-commits it in the job's checkout only, runs that one gate in the contained
-gate container and requires it to fail. It then restores the reporter and
-requires the same gate to pass.
+The `fixture` workflow, `.github/workflows/fixture.yml`, proves each of the
+seven gates fails closed: `rust/fmt`, `rust/clippy`, `rust/test`,
+`rust/mutants`, `rust/kani`, `rust/miri` and `rust/msrv`. For each it
+applies one deliberate violation, commits it in the job's checkout only, runs
+that one gate in the contained gate container and requires it to fail. It
+then restores the checkout and requires the same gate to pass.
 
 ```mermaid
 flowchart LR
@@ -20,17 +20,23 @@ flowchart LR
 Each script in `fixtures/violations` takes no arguments and runs from the
 repository root.
 
-| Script       | Violation                                                        | Fails          |
-| ------------ | ---------------------------------------------------------------- | -------------- |
-| `fmt.sh`     | Appends an unformatted function to `reporter/src/lib.rs`         | `rust/fmt`     |
-| `clippy.sh`  | Appends a formatted function with a needless `return`            | `rust/clippy`  |
-| `test.sh`    | Creates `reporter/tests/violation.rs`, one test that panics      | `rust/test`    |
-| `mutants.sh` | Adds `reporter/src/violation.rs`, a pure function no test covers | `rust/mutants` |
+| Script       | Violation                                                             | Fails          |
+| ------------ | --------------------------------------------------------------------- | -------------- |
+| `fmt.sh`     | Appends an unformatted function to `reporter/src/lib.rs`              | `rust/fmt`     |
+| `clippy.sh`  | Appends a formatted function with a needless `return`                 | `rust/clippy`  |
+| `test.sh`    | Creates `reporter/tests/violation.rs`, one test that panics           | `rust/test`    |
+| `mutants.sh` | Adds `reporter/src/violation.rs`, a pure function no test covers      | `rust/mutants` |
+| `kani.sh`    | Adds `reporter/src/kani_violation.rs`, a proof asserting `1 + 1 == 3` | `rust/kani`    |
+| `miri.sh`    | Adds `reporter/src/miri_violation.rs`, a Miri-only test that leaks    | `rust/miri`    |
+| `msrv.sh`    | Lowers `rust-version` to 1.99 and calls `bool::toggle`, a 1.100 API   | `rust/msrv`    |
 
 The mutants gate tests only the lines in `git diff BASE...HEAD`, so the
 workflow commits each violation in its own checkout; nothing is pushed, and
 the job holds no credential.
 
-Kani, Miri and MSRV get native violations in the next pull request of this
-slice. Until then the reporter's tests cover how their failures map to a
-failed check, fail-closed.
+The Kani and Miri violations sit behind `cfg(kani)` and `cfg(miri)`, so no
+other gate compiles them. The workspace forbids unsafe code, so the Miri
+violation is a safe leak, which Miri reports. The msrv gate checks with the
+`rust-version` that `Cargo.toml` declares, so lowering it below the APIs the
+code uses fails it, while the gates that build with 1.100 still compile the
+code.

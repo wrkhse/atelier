@@ -9,9 +9,6 @@ permissions:
   contents: read
 
 jobs:
-  # Kani, Miri and MSRV get native violations in the next pull request of
-  # this slice; until then the reporter's tests cover how their failures map
-  # to a failed check, fail-closed.
   violation:
     name: "violation rust/${{ matrix.gate }}"
     runs-on: ubuntu-latest
@@ -21,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        gate: [fmt, clippy, test, mutants]
+        gate: [fmt, clippy, test, mutants, kani, miri, msrv]
     defaults:
       run:
         shell: bash
@@ -53,12 +50,15 @@ jobs:
           cargo build --release --locked -p atelier-reporter \
             --target x86_64-unknown-linux-musl
       # The mutants gate diffs BASE...HEAD, so the violation is committed in
-      # this checkout. Nothing is pushed, and the job holds no credential.
+      # this checkout; the msrv violation edits the root Cargo.toml, so the
+      # whole checkout is staged. target/ is not ignored, and holds the
+      # reporter built above, so it is never staged or cleaned. Nothing is
+      # pushed, and the job holds no credential.
       - name: Apply the violation
         run: |
           echo "CLEAN_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           bash fixtures/violations/${{ matrix.gate }}.sh
-          git add -A reporter
+          git add -A -- . ':(exclude)target'
           git -c user.name=fixture -c user.email=fixture@invalid \
             commit --quiet --message "test: $GATE violation"
       # A non-empty report shows moon ran the task, so a failure before the
@@ -79,9 +79,9 @@ jobs:
       - name: Restore and expect the gate to pass
         run: |
           git reset --hard --quiet "$CLEAN_HEAD"
-          git clean -fd reporter
-          if [[ -n "$(git status --porcelain -- reporter)" ]]; then
-            echo "::error::reporter/ is not restored to $CLEAN_HEAD"
+          git clean -fd --exclude=/target/
+          if [[ -n "$(git status --porcelain -- . ':(exclude)target')" ]]; then
+            echo "::error::the checkout is not restored to $CLEAN_HEAD"
             exit 1
           fi
           # A fresh report and reporter copy, so nothing from the failed run
