@@ -18,8 +18,12 @@ tasks:
     env:
       MIRIFLAGS: "-Zmiri-disable-isolation"
   mutants:
-    command: bash ../.moon/scripts/mutants.sh
+    script: |
+      root=$(dirname "$(cargo locate-project --workspace --message-format plain)")
+      bash "$root/.moon/scripts/mutants.sh"
   # Checks with the rust-version every workspace member declares, read and
   # validated from cargo metadata.
   msrv:
-    command: bash ../.moon/scripts/msrv.sh
+    script: |
+      root=$(dirname "$(cargo locate-project --workspace --message-format plain)")
+      bash "$root/.moon/scripts/msrv.sh"

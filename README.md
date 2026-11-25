@@ -22,7 +22,7 @@ export PATH="$PWD/bin:$PATH"
 ```
 
 Copy the released moon configuration and tool versions into the consumer
-repository root, then run its gates in a container:
+repository root, then run its gates locally with `moon ci`:
 
 ```sh
 cp -R .moon /path/to/consumer/
@@ -32,8 +32,8 @@ moon ci
 ```
 
 The consumer defines its project mappings in `.moon/workspace.yml`. In CI,
-each gate job appears as its own GitHub check. The reporter binary runs from
-the archive's `bin/` directory.
+the project's workflow runs each gate in a bounded container as its own GitHub
+check. The reporter binary runs from the archive's `bin/` directory.
 
 ## Design
 

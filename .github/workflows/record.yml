@@ -50,6 +50,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          number='(0|[1-9][0-9]*)'
+          version="^v$number\.$number\.$number"
+
           if [[ "$EVENT" == workflow_dispatch ]]; then
             tag=$INPUT_TAG
           else
@@ -66,21 +69,14 @@ jobs:
               echo "release tag $tag does not point at $HEAD_SHA" >&2
               exit 1
             fi
-          fi
 
-          version='^v[0-9]+\.[0-9]+\.[0-9]+'
-
-          if [[ ! "$tag" =~ $version-rc\.[0-9]+$ ]]; then
-            suffix='[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*'
-
-            # The publish job treats any "-rc." tag as a candidate.
-            if [[ "$EVENT" == workflow_run && "$tag" != *-rc.* \
-              && ! "$tag" =~ $version-rc([+-]|$) \
-              && "$tag" =~ $version(-$suffix)?([+]$suffix)?$ ]]; then
+            if [[ "$tag" =~ $version$ ]]; then
               echo "$tag is not a release candidate tag; skipping recording"
               exit 0
             fi
+          fi
 
+          if [[ ! "$tag" =~ $version-rc\.$number$ ]]; then
             echo "cannot parse '$tag' as a release candidate tag" >&2
             exit 1
           fi
