@@ -1,6 +1,4 @@
-# atelier's own gates, seeded from .atelier/config.toml at f687307 (#87).
-# moon ci runs each one; the reporter judges each moon result, and the gate
-# job's status is the GitHub check.
+# CI gates inherited by Rust projects.
 taskOptions:
   runInCI: always
   cache: false
@@ -13,16 +11,19 @@ tasks:
   test:
     command: cargo test --workspace --all-features --locked
   kani:
-    command: cargo kani -p atelier-reporter
+    command: cargo kani --workspace
   miri:
-    command: cargo +nightly-2026-08-21 miri test -p atelier-reporter
+    command: cargo +nightly-2026-08-21 miri test --workspace
     # The gate container is the boundary; the tests read the copied checkout.
     env:
       MIRIFLAGS: "-Zmiri-disable-isolation"
   mutants:
-    command: cargo mutants --in-diff target/mutants.diff --timeout 120 --jobs 3
+    script: |
+      root=$(dirname "$(cargo locate-project --workspace --message-format plain)")
+      bash "$root/.moon/scripts/mutants.sh"
   # Checks with the rust-version every workspace member declares, read and
-  # validated from cargo metadata. moon runs the task from reporter/, so the
-  # script is ../.moon/scripts/msrv.sh and the workspace root is ..
+  # validated from cargo metadata.
   msrv:
-    command: bash ../.moon/scripts/msrv.sh
+    script: |
+      root=$(dirname "$(cargo locate-project --workspace --message-format plain)")
+      bash "$root/.moon/scripts/msrv.sh"

@@ -74,5 +74,5 @@ deliberate violation fails its gate, and restoring the code passes it.
 
 The fixture pull request runs all seven gates in CI, each gate's job reports its
 own check, a deliberate violation fails only its gate, and restoring the code
-passes it. The released candidate is recorded working end to end before
-review.
+passes it. The end-to-end check is recorded from the released candidate,
+before the slice closes.

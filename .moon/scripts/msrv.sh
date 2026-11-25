@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The rust/msrv gate: checks the workspace with the rust-version every member
 # declares. cargo metadata reports each member's resolved rust-version, so a
-# version inherited from [workspace.package] counts as declared. MSRV_ROOT is
-# the workspace root, .. by default since moon runs the task from reporter/.
+# version inherited from [workspace.package] counts as declared. MSRV_ROOT
+# overrides the starting directory for workspace discovery.
 # MSRV_CHECK_ONLY=1 validates and prints the version without installing it.
 set -euo pipefail
 
@@ -11,10 +11,14 @@ fail() {
   exit 1
 }
 
-root=${MSRV_ROOT:-..}
-cd "$root"
+if [[ -n "${MSRV_ROOT:-}" ]]; then
+  cd "$MSRV_ROOT"
+fi
 
-metadata=$(cargo metadata --no-deps --format-version 1)
+manifest=$(cargo locate-project --workspace --message-format plain)
+cd "${manifest%/*}"
+
+metadata=$(cargo metadata --manifest-path "$manifest" --no-deps --format-version 1)
 member_list=$(jq -r '.workspace_members[]' <<<"$metadata")
 
 if [[ -z "$member_list" ]]; then

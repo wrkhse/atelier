@@ -4,11 +4,34 @@ A CI engine for monorepos: gate presets on moon, one GitHub check per gate.
 
 ## Status
 
-The presets, reporter and wiring are in progress, not shipped. This repository
-holds the approved design and its slice plans. Install and usage instructions
-arrive with the first release candidate. The CI workflow here builds these docs.
-Slice 1, the Rust gate presets on moon, is in progress
-([#87](https://github.com/wrkhse/atelier/issues/87)).
+The Rust gate presets and reporter are in the 0.2.0-rc.1 release candidate,
+with one GitHub check per gate. Install instructions are in this README and
+the release.
+
+## Install
+
+Download and verify the Linux x64 release archive, then extract it:
+
+```sh
+gh release download v0.2.0-rc.1 --repo wrkhse/atelier \
+  --pattern 'atelier-v0.2.0-rc.1-linux-x64.tar.gz' --pattern SHA256SUMS
+rg -F "  atelier-v0.2.0-rc.1-linux-x64.tar.gz" SHA256SUMS > archive.sha256
+sha256sum --check archive.sha256
+tar -xzf atelier-v0.2.0-rc.1-linux-x64.tar.gz
+export PATH="$PWD/bin:$PATH"
+```
+
+Copy the released `.moon` configuration and `.prototools` into the consumer
+repository root:
+
+```sh
+cp -R .moon /path/to/consumer/
+cp .prototools /path/to/consumer/
+```
+
+The consumer defines its project mappings in `.moon/workspace.yml` and wires
+the presets into its own CI workflow; each gate then appears as its own
+GitHub check. The reporter binary runs from the archive's `bin/` directory.
 
 ## Design
 
@@ -39,11 +62,15 @@ The same command runs locally in a container; no gate runs on the host.
       ([#87](https://github.com/wrkhse/atelier/issues/87))
 - [ ] Metrics against the previous version
       ([#88](https://github.com/wrkhse/atelier/issues/88))
-- [ ] Agent review as a check
-      ([#89](https://github.com/wrkhse/atelier/issues/89))
 - [ ] Builder plugin on tack, driven by sourcefed events
       ([#85](https://github.com/wrkhse/atelier/issues/85))
 - [ ] TypeScript and TLA+ presets — later, no issue yet
+
+### Separate add-ons (after the core)
+
+- [ ] Agent review as a check
+      ([#89](https://github.com/wrkhse/atelier/issues/89))
+- [ ] Docs gate ([#98](https://github.com/wrkhse/atelier/issues/98))
 
 ## More
 
