@@ -38,7 +38,8 @@ RUN chmod 0555 /opt/ci/entrypoint.sh
 ENV HOME=/home/ci \
     PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
 USER 10001:10001
-# Miri's sysroot and Kani's bundle live in the gate user's home.
-RUN cargo +nightly-2026-08-21 miri setup && cargo kani setup
+# Only Kani's bundle is prebuilt, in the gate user's home. Miri's sysroot is
+# built by the gate task with its MIRIFLAGS.
+RUN cargo kani setup
 WORKDIR /work
 ENTRYPOINT ["/opt/ci/entrypoint.sh"]
