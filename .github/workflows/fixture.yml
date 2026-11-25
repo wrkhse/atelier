@@ -4,8 +4,6 @@ name: fixture
 
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/rust-moon-presets]
 
 permissions:
   contents: read
