@@ -4,7 +4,6 @@
 //! a regression and on input it cannot trust. It writes no files; the job
 //! appends its output to the summary.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -97,7 +96,6 @@ enum Reason {
     Unreadable(io::ErrorKind),
     Malformed,
     MissingField(&'static str),
-    Duplicate(String),
 }
 
 impl fmt::Display for Reason {
@@ -114,7 +112,6 @@ impl fmt::Display for Reason {
             Self::Unreadable(kind) => write!(f, "unreadable input: {kind}"),
             Self::Malformed => f.write_str("malformed json"),
             Self::MissingField(field) => write!(f, "missing metric field {field}"),
-            Self::Duplicate(key) => write!(f, "duplicate function {key}"),
         }
     }
 }
@@ -233,8 +230,8 @@ fn count(path: &Path) -> Result<f64, Refusal> {
 }
 
 /// Every function in the JSON files under `dir` and its folders, in path
-/// order. Two functions with the same key are refused, as neither could be
-/// compared.
+/// order. A name listed more than once, such as a nested anonymous item,
+/// keeps one entry per occurrence, which `keys` numbers for comparison.
 fn functions(dir: &Path) -> Result<Vec<FunctionMetric>, Refusal> {
     let mut found = Vec::new();
 
@@ -243,7 +240,6 @@ fn functions(dir: &Path) -> Result<Vec<FunctionMetric>, Refusal> {
         flatten_file(&output, &mut found).map_err(|reason| Refusal::new(&file, reason))?;
     }
 
-    unique(&found).map_err(|reason| Refusal::new(dir, reason))?;
     Ok(found)
 }
 
@@ -480,19 +476,4 @@ fn spaces(space: &Value) -> Result<&[Value], Reason> {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .ok_or(Reason::MissingField("spaces"))
-}
-
-/// Refuses the first key that appears twice.
-fn unique(found: &[FunctionMetric]) -> Result<(), Reason> {
-    let mut seen = BTreeSet::new();
-
-    for key in found.iter().map(FunctionMetric::key) {
-        if seen.contains(&key) {
-            return Err(Reason::Duplicate(key));
-        }
-
-        seen.insert(key);
-    }
-
-    Ok(())
 }

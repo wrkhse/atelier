@@ -105,6 +105,13 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// `row` with its function's key numbered as occurrence `index`, such as
+/// `src/lib.rs:parse#1`. A row opens with `| `, so its first ` | ` follows
+/// the key.
+fn numbered(row: &str, index: usize) -> String {
+    row.replacen(" | ", &format!("#{index} | "), 1)
+}
+
 /// The table of a comparison: its heading, `rows`, then `verdict`.
 fn table(rows: &[&str], verdict: &str) -> Vec<String> {
     TABLE_HEAD
@@ -352,8 +359,8 @@ fn complexity_refuses_a_missing_metric_field() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn complexity_refuses_a_function_listed_twice() {
-    let head = scratch("duplicate").expect("scratch folder");
+fn complexity_compares_each_occurrence_of_a_repeated_name() {
+    let head = scratch("repeated").expect("scratch folder");
     let base = fixture("complexity/base/lib.json");
 
     fs::copy(&base, head.join("a.json")).expect("copy a.json");
@@ -361,15 +368,63 @@ fn complexity_refuses_a_function_listed_twice() {
 
     let output = complexity(&fixture("complexity/base"), &head).expect("run the metrics binary");
 
-    let expected = format!(
-        "{}: duplicate function src/lib.rs:Config::new\n",
-        head.display()
-    );
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(stdout_lines(&output), Vec::<String>::new());
-    assert_eq!(stderr(&output), expected);
+    let rows = [
+        "| src/lib.rs:Config::new#0 | new | - -> 1.00 | - -> 0.00 | - -> 18.00 | - -> 140.50 |",
+        "| src/lib.rs:Config::validate#0 | new | - -> 4.00 | - -> 5.00 | - -> 200.75 \
+         | - -> 95.50 |",
+        "| src/lib.rs:parse#0 | new | - -> 3.00 | - -> 2.00 | - -> 120.50 | - -> 110.25 |",
+        "| src/lib.rs:Config::new#1 | new | - -> 1.00 | - -> 0.00 | - -> 18.00 | - -> 140.50 |",
+        "| src/lib.rs:Config::validate#1 | new | - -> 4.00 | - -> 5.00 | - -> 200.75 \
+         | - -> 95.50 |",
+        "| src/lib.rs:parse#1 | new | - -> 3.00 | - -> 2.00 | - -> 120.50 | - -> 110.25 |",
+    ];
+    assert_eq!(stderr(&output), "");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout_lines(&output), table(&rows, "complexity: passed"));
 
     fs::remove_dir_all(&head).expect("remove the scratch folder");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn complexity_fails_when_one_occurrence_of_a_repeated_name_regressed() {
+    let dir = scratch("repeated-regressed").expect("scratch folder");
+    let base = dir.join("base");
+    let head = dir.join("head");
+    let unchanged = fixture("complexity/base/lib.json");
+    let changed = fixture("complexity/head/lib.json");
+    let copies = [
+        (&base, "a.json", &unchanged),
+        (&base, "b.json", &unchanged),
+        (&head, "a.json", &unchanged),
+        (&head, "b.json", &changed),
+    ];
+
+    for folder in [&base, &head] {
+        fs::create_dir(folder).expect("make a report folder");
+    }
+
+    for (folder, name, source) in copies {
+        fs::copy(source, folder.join(name)).expect("copy a report");
+    }
+
+    let output = complexity(&base, &head).expect("run the metrics binary");
+
+    let rows = [
+        numbered(NEW_SAME, 0),
+        numbered(VALIDATE_SAME, 0),
+        numbered(PARSE_SAME, 0),
+        numbered(NEW_SAME, 1),
+        numbered(VALIDATE_IMPROVED, 1),
+        RESET_NEW.to_owned(),
+        numbered(PARSE_REGRESSED, 1),
+    ];
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    assert_eq!(stderr(&output), "");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout_lines(&output), table(&rows, "complexity: failed"));
+
+    fs::remove_dir_all(&dir).expect("remove the scratch folder");
 }
 
 #[test]

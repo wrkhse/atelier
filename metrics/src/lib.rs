@@ -19,12 +19,43 @@ pub struct FunctionMetric {
 }
 
 impl FunctionMetric {
-    /// The name that matches a function across versions, such as
-    /// `src/lib.rs:Config::new`.
-    #[must_use]
-    pub fn key(&self) -> String {
+    /// The file and qualified name, such as `src/lib.rs:Config::new`.
+    fn name_key(&self) -> String {
         format!("{}:{}", self.file, self.name)
     }
+}
+
+/// The keys that match `metrics` across versions, in order, such as
+/// `src/lib.rs:Config::new`. A name listed more than once in a file, as
+/// nested anonymous items are, is numbered by its zero-based occurrence in
+/// list order, such as `src/lib.rs:<anonymous>::f#1`, so each occurrence is
+/// compared on its own.
+#[must_use]
+pub fn keys(metrics: &[FunctionMetric]) -> Vec<String> {
+    let names: Vec<String> = metrics.iter().map(FunctionMetric::name_key).collect();
+    let mut totals: BTreeMap<&str, usize> = BTreeMap::new();
+
+    for name in &names {
+        let total = totals.entry(name.as_str()).or_default();
+        *total = total.saturating_add(1);
+    }
+
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+
+    names
+        .iter()
+        .map(|name| {
+            if totals.get(name.as_str()) == Some(&1) {
+                return name.clone();
+            }
+
+            let index = seen.entry(name.as_str()).or_default();
+            let key = format!("{name}#{index}");
+            *index = index.saturating_add(1);
+
+            key
+        })
+        .collect()
 }
 
 /// How a head function compares with the same function in the base.
@@ -58,17 +89,17 @@ pub struct Comparison {
     pub state: State,
 }
 
-/// Compares each head function with the base function of the same key, in
-/// head order. A function only in the base is not listed: removing one is
-/// never a regression.
+/// Compares each head function with the base function of the same key, as
+/// `keys` gives them, in head order. A function only in the base is not
+/// listed: removing one is never a regression.
 #[must_use]
 pub fn compare(base: &[FunctionMetric], head: &[FunctionMetric]) -> Vec<Comparison> {
-    let before: BTreeMap<String, &FunctionMetric> =
-        base.iter().map(|metric| (metric.key(), metric)).collect();
+    let before: BTreeMap<String, &FunctionMetric> = keys(base).into_iter().zip(base).collect();
 
-    head.iter()
-        .map(|metric| {
-            let key = metric.key();
+    keys(head)
+        .into_iter()
+        .zip(head)
+        .map(|(key, metric)| {
             let previous = before.get(&key).copied();
             let state = previous.map_or(State::New, |base| judge(base, metric));
 
@@ -152,7 +183,7 @@ pub const fn budget(base: f64, head: f64, limit_percent: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Comparison, FunctionMetric, State, budget, compare, passed};
+    use super::{Comparison, FunctionMetric, State, budget, compare, keys, passed};
 
     const BASE: [f64; 4] = [3.0, 2.0, 120.5, 110.25];
 
@@ -249,6 +280,54 @@ mod tests {
             .map(|comparison| (comparison.key.as_str(), comparison.state))
             .collect();
         assert_eq!(keys, [("src/main.rs:parse", State::New)]);
+    }
+
+    #[test]
+    fn a_repeated_name_is_numbered_in_order_within_its_file() {
+        let mut moved = metric("parse", BASE);
+        moved.file = "src/main.rs".to_owned();
+        let metrics = [
+            metric("parse", BASE),
+            metric("render", BASE),
+            moved,
+            metric("parse", BASE),
+        ];
+
+        let keyed = keys(&metrics);
+
+        assert_eq!(
+            keyed,
+            [
+                "src/lib.rs:parse#0",
+                "src/lib.rs:render",
+                "src/main.rs:parse",
+                "src/lib.rs:parse#1",
+            ]
+        );
+    }
+
+    #[test]
+    fn one_regressed_occurrence_of_a_repeated_name_fails() {
+        let base = [metric("parse", BASE), metric("parse", BASE)];
+        let head = [
+            metric("parse", BASE),
+            metric("parse", [4.0, 2.0, 120.5, 110.25]),
+        ];
+
+        let compared = compare(&base, &head);
+
+        let keyed: Vec<(&str, State)> = compared
+            .iter()
+            .map(|comparison| (comparison.key.as_str(), comparison.state))
+            .collect();
+        assert_eq!(
+            keyed,
+            [
+                ("src/lib.rs:parse#0", State::Same),
+                ("src/lib.rs:parse#1", State::Regressed),
+            ]
+        );
+        assert!(!passed(&compared));
     }
 
     #[test]
