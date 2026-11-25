@@ -8,7 +8,7 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux \
 fi
 
 # run.sh MODE, with GATE, GATES and BASE from the environment.
-export MODE=${1:?mode}
+MODE=${1:?mode}
 export GATE=${GATE:-}
 export ROOT=${ROOT:-.}
 export BASE=${BASE:-}
@@ -23,19 +23,33 @@ binary="$RUNNER_TEMP/atelier"
 mkdir -p "$output" "$binary"
 
 # Each job stays inside its 90 minutes: a gate is gate + validate.
+container_mode=$MODE
 case "$MODE" in
   selftest | validate) limit=10m ;;
-  gate) limit=75m ;;
+  gate | record-gate) limit=75m; container_mode=gate ;;
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
-# The reporter the workflow built must be a plain file, never a link.
-reporter="$source/target/x86_64-unknown-linux-musl/release/atelier-reporter"
+# Only recordings select a released reporter; other modes use the checkout's.
+if [[ "$MODE" == record-gate ]]; then
+  reporter=${REPORTER:?record-gate requires REPORTER}
+  if [[ "$reporter" == *[[:cntrl:]]* ]]; then
+    echo "record-gate: REPORTER must not contain control characters" >&2
+    exit 1
+  fi
+else
+  reporter="$source/target/x86_64-unknown-linux-musl/release/atelier-reporter"
+fi
+
 if [[ ! -f "$reporter" || -L "$reporter" ]]; then
   echo "the reporter is not a plain file at $reporter" >&2
   exit 1
 fi
-install -m 0555 "$reporter" "$binary/atelier-reporter"
+install -m 0555 -- "$reporter" "$binary/atelier-reporter"
+
+if [[ "$MODE" == record-gate ]]; then
+  printf 'reporter: %s\n' "$reporter" >&2
+fi
 
 docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
 names=()
@@ -62,11 +76,15 @@ create() {
     --pids-limit 4096 --memory "$memory" --memory-swap "$memory" --cpus "$cpus" \
     --network "$network" --ipc private --stop-timeout 10 \
     "${mounts[@]}" \
-    --env MODE --env GATE --env ROOT --env BASE --env GATES atelier-gates >/dev/null
+    --env "MODE=$container_mode" --env GATE --env ROOT --env BASE --env GATES \
+    atelier-gates >/dev/null
   names+=("$name")
   local sources=()
   for mount in "$@"; do
-    sources+=("$(sed -E 's/.*type=([^,]*),source=([^,]*),target=([^,]*).*/\1:\2:\3/' <<< "$mount")")
+    sources+=("$(
+      sed -E 's/.*type=([^,]*),source=([^,]*),target=([^,]*).*/\1:\2:\3/' \
+        <<< "$mount"
+    )")
   done
   contained "$name" "$network" "${sources[@]}"
 }
@@ -92,7 +110,7 @@ start() {
 # validate: a fresh, offline container judges the copied report with the
 # reporter, both read-only; the gate cannot change either.
 validate() {
-  MODE=validate
+  container_mode=validate
   limit=10m
   create "atelier-validate-$id" none \
     "type=bind,source=$output,target=/reports,readonly" \
@@ -103,7 +121,7 @@ validate() {
 id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RANDOM"
 status=0
 
-if [[ "$MODE" == validate ]]; then
+if [[ "$container_mode" == validate ]]; then
   validate || status=1
   exit "$status"
 fi
@@ -111,22 +129,22 @@ fi
 # The gate fetches crates over Docker's bridge, never the host's network; the
 # self-test needs no network.
 network=bridge
-if [[ "$MODE" == selftest ]]; then
+if [[ "$container_mode" == selftest ]]; then
   network=none
 fi
 
-create "atelier-$MODE-$id" "$network" \
+create "atelier-$container_mode-$id" "$network" \
   "type=bind,source=$source,target=/source,readonly" \
   "type=bind,source=$binary,target=/binary,readonly"
 
-start "atelier-$MODE-$id" || status=$?
+start "atelier-$container_mode-$id" || status=$?
 
 # Evidence collection cannot turn a failed, timed-out or killed run green.
 # docker cp keeps links, so only plain files and folders cross to the host.
-docker cp "atelier-$MODE-$id:/reports/." "$output/" >&2 || true
+docker cp "atelier-$container_mode-$id:/reports/." "$output/" >&2 || true
 find "$output" -mindepth 1 ! -type f ! -type d -delete
 
-if [[ "$MODE" == gate ]]; then
+if [[ "$container_mode" == gate ]]; then
   validate || status=1
 fi
 exit "$status"
