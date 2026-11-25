@@ -501,8 +501,8 @@ export_video() {
 make_gif() {
   local filter bytes width
 
-  filter="fps=10,scale='min($GIF_MAX_WIDTH,iw)':-1:flags=lanczos,"
-  filter+="split[s0][s1];[s0]palettegen=max_colors=64:stats_mode=diff[p];"
+  filter="fps=8,scale='min($GIF_MAX_WIDTH,iw)':-1:flags=lanczos,"
+  filter+="split[s0][s1];[s0]palettegen=max_colors=32:stats_mode=diff[p];"
   filter+="[s1][p]paletteuse=dither=none"
   ffmpeg -y -loglevel error -i "$VIDEO" -vf "$filter" -loop 0 "$GIF"
 
