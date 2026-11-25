@@ -11,7 +11,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use atelier_metrics::{Comparison, FunctionMetric, State, budget, compare};
+use atelier_metrics::{Comparison, FunctionMetric, budget, compare, passed};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
@@ -52,7 +52,7 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Compare function complexity; fails when a function regressed or is new.
+    /// Compare function complexity; fails only when a function regressed.
     Complexity {
         /// Directory of rust-code-analysis JSON for the base version.
         #[arg(long, value_name = "DIR")]
@@ -158,7 +158,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Prints a row for each head function; true when none regressed or is new.
+/// Prints a row for each head function; true when none regressed. A new
+/// function is listed as new and passes.
 /// An empty comparison is refused, as it would pass having checked nothing.
 fn complexity(base: &Path, head: &Path) -> Result<bool, Refusal> {
     let before = functions(base)?;
@@ -175,12 +176,10 @@ fn complexity(base: &Path, head: &Path) -> Result<bool, Refusal> {
         println!("{}", row(comparison));
     }
 
-    let passed = comparisons
-        .iter()
-        .all(|comparison| matches!(comparison.state, State::Same | State::Improved));
+    let passing = passed(&comparisons);
 
-    println!("complexity: {}", verdict(passed));
-    Ok(passed)
+    println!("complexity: {}", verdict(passing));
+    Ok(passing)
 }
 
 /// One table row: each measure as base -> head, with `-` for a new function.

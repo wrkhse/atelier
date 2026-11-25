@@ -50,7 +50,6 @@ jobs:
       # reports: a missing summary fails this step, not the job.
       - name: Summarize complexity
         if: ${{ !cancelled() }}
-        continue-on-error: true
         env:
           SUMMARY: ${{ runner.temp }}/atelier-reports/container/summary.txt
         run: |

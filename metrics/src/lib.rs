@@ -82,6 +82,16 @@ pub fn compare(base: &[FunctionMetric], head: &[FunctionMetric]) -> Vec<Comparis
         .collect()
 }
 
+/// True unless a function regressed. A new function passes: the ratchet
+/// keeps existing functions from getting worse and does not stop code being
+/// added.
+#[must_use]
+pub fn passed(comparisons: &[Comparison]) -> bool {
+    comparisons
+        .iter()
+        .all(|comparison| comparison.state != State::Regressed)
+}
+
 /// Regressed when any measure got worse, improved when one got better and
 /// none worse, and the same otherwise. Values are compared exactly.
 fn judge(base: &FunctionMetric, head: &FunctionMetric) -> State {
@@ -142,7 +152,7 @@ pub const fn budget(base: f64, head: f64, limit_percent: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Comparison, FunctionMetric, State, budget, compare};
+    use super::{Comparison, FunctionMetric, State, budget, compare, passed};
 
     const BASE: [f64; 4] = [3.0, 2.0, 120.5, 110.25];
 
@@ -239,6 +249,18 @@ mod tests {
             .map(|comparison| (comparison.key.as_str(), comparison.state))
             .collect();
         assert_eq!(keys, [("src/main.rs:parse", State::New)]);
+    }
+
+    #[test]
+    fn a_new_function_passes_and_a_regressed_one_fails() {
+        let same = metric("parse", BASE);
+        let worse = metric("parse", [4.0, 2.0, 120.5, 110.25]);
+        let added = metric("render", BASE);
+
+        let grown = compare(&[same.clone()], &[same.clone(), added.clone()]);
+        let regressed = compare(&[same], &[worse, added]);
+
+        assert_eq!([passed(&grown), passed(&regressed)], [true, false]);
     }
 
     #[test]

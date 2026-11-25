@@ -131,7 +131,7 @@ fn complexity_passes_when_nothing_regressed() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn complexity_fails_on_a_regressed_or_new_function() {
+fn complexity_fails_on_a_regressed_function() {
     let base = fixture("complexity/base");
     let head = fixture("complexity/head");
 
@@ -145,7 +145,7 @@ fn complexity_fails_on_a_regressed_or_new_function() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn complexity_fails_on_new_functions_alone_and_skips_other_files() {
+fn complexity_passes_with_new_functions_and_skips_other_files() {
     let head = scratch("new").expect("scratch folder");
     let extra = base_output()
         .expect("read the base fixture")
@@ -168,8 +168,8 @@ fn complexity_fails_on_new_functions_alone_and_skips_other_files() {
         PARSE_SAME,
     ];
     assert_eq!(stderr(&output), "");
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(stdout_lines(&output), table(&rows, "complexity: failed"));
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout_lines(&output), table(&rows, "complexity: passed"));
 
     fs::remove_dir_all(&head).expect("remove the scratch folder");
 }

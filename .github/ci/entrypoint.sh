@@ -64,9 +64,7 @@ export ATELIER_MUTANTS_DIFF="$diff"
 analyze() {
   local tree=$1 side=$2
   mkdir -p "/reports/$side"
-  (cd "$tree" && rust-code-analysis-cli --metrics --output-format json \
-    --output "/reports/$side" --include '**/*.rs' \
-    --exclude './target/**' './.git/**' --paths .)
+  (cd "$tree" && rust-code-analysis-cli -m -O json --pr -o "/reports/$side" -p .)
   if [[ -z "$(find "/reports/$side" -type f -name '*.json' -print -quit)" ]]; then
     echo "metrics/complexity: rust-code-analysis wrote no json for $side" >&2
     exit 1
