@@ -91,3 +91,113 @@ jobs:
             echo "::error::$GATE failed on the restored code; it must pass"
             exit 1
           fi
+
+  # The msrv script refuses a rust-version it cannot trust before installing
+  # anything: three small workspaces each fail it with their named reason,
+  # and atelier's own workspace passes it.
+  msrv-validation:
+    name: msrv-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Expect each invalid rust-version to fail
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
+          script="$GITHUB_WORKSPACE/.moon/scripts/msrv.sh"
+
+          # A workspace under $RUNNER_TEMP with the app crate; the root
+          # src/lib.rs serves a root that is also a package.
+          fixture() {
+            local dir="$RUNNER_TEMP/msrv-$1"
+            mkdir -p "$dir/src" "$dir/app/src"
+            : > "$dir/src/lib.rs"
+            : > "$dir/app/src/lib.rs"
+            echo "$dir"
+          }
+
+          expect_failure() {
+            local dir=$1 reason=$2 status=0 output
+            output=$(MSRV_ROOT="$dir" MSRV_CHECK_ONLY=1 bash "$script" 2>&1) \
+              || status=$?
+            echo "$output"
+            if [[ "$status" -eq 0 ]]; then
+              echo "::error::msrv passed $dir; it must fail with $reason"
+              exit 1
+            fi
+            if ! rg -q --fixed-strings -- "$reason" <<<"$output"; then
+              echo "::error::msrv failed $dir (exit $status) without $reason"
+              exit 1
+            fi
+          }
+
+          bad=$(fixture bad)
+          cat > "$bad/Cargo.toml" <<'EOF'
+          [workspace]
+          members = ["app"]
+          resolver = "3"
+
+          [workspace.package]
+          rust-version = "2.0"
+          EOF
+          cat > "$bad/app/Cargo.toml" <<'EOF'
+          [package]
+          name = "app"
+          version = "0.1.0"
+          edition = "2024"
+          rust-version.workspace = true
+          EOF
+          expect_failure "$bad" "invalid rust-version"
+
+          missing=$(fixture missing)
+          cat > "$missing/Cargo.toml" <<'EOF'
+          [workspace]
+          members = ["app"]
+          resolver = "3"
+
+          [workspace.package]
+          rust-version = "1.100"
+          EOF
+          cat > "$missing/app/Cargo.toml" <<'EOF'
+          [package]
+          name = "app"
+          version = "0.1.0"
+          edition = "2024"
+          EOF
+          expect_failure "$missing" "has no rust-version"
+
+          # The root is a package too, so the workspace has two members.
+          mismatch=$(fixture mismatch)
+          cat > "$mismatch/Cargo.toml" <<'EOF'
+          [package]
+          name = "root"
+          version = "0.1.0"
+          edition = "2024"
+          rust-version = "1.100"
+
+          [workspace]
+          members = ["app"]
+          EOF
+          cat > "$mismatch/app/Cargo.toml" <<'EOF'
+          [package]
+          name = "app"
+          version = "0.1.0"
+          edition = "2024"
+          rust-version = "1.99"
+          EOF
+          expect_failure "$mismatch" "declares"
+
+          output=$(MSRV_ROOT="$GITHUB_WORKSPACE" MSRV_CHECK_ONLY=1 bash "$script")
+          if [[ "$output" != "msrv: 1.100" ]]; then
+            echo "::error::msrv printed '$output' for atelier, not 'msrv: 1.100'"
+            exit 1
+          fi
+          echo "$output"

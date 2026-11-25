@@ -21,18 +21,8 @@ tasks:
       MIRIFLAGS: "-Zmiri-disable-isolation"
   mutants:
     command: cargo mutants --in-diff target/mutants.diff --timeout 120 --jobs 3
-  # Checks with the rust-version Cargo.toml declares. moon runs the task from
-  # reporter/, so the workspace manifest is ../Cargo.toml.
+  # Checks with the rust-version every workspace member declares, read and
+  # validated from cargo metadata. moon runs the task from reporter/, so the
+  # script is ../.moon/scripts/msrv.sh and the workspace root is ..
   msrv:
-    script: |
-      set -euo pipefail
-      msrv=$(awk -F '"' '/^rust-version = "/ { print $2; exit }' ../Cargo.toml)
-      if [[ -z "$msrv" ]]; then
-        echo "../Cargo.toml declares no rust-version" >&2
-        exit 1
-      fi
-      rustup toolchain install "$msrv" --profile minimal
-      RUSTUP_AUTO_INSTALL=0 cargo +"$msrv" check --workspace --all-targets --all-features --locked
-    # The script uses bash: [[ ]] and pipefail.
-    options:
-      unixShell: bash
+    command: bash ../.moon/scripts/msrv.sh
