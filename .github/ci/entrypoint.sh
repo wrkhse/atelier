@@ -56,6 +56,29 @@ else
 fi
 export ATELIER_MUTANTS_DIFF="$diff"
 
+# metrics/complexity measures the base and head trees with the same pinned
+# rust-code-analysis, one json file per source file with every function in
+# it; atelier-metrics compares them on the runner. Run from inside each tree,
+# the files are named by relative path, so both sides line up.
+analyze() {
+  local tree=$1 side=$2
+  mkdir -p "/reports/$side"
+  (cd "$tree" && rust-code-analysis-cli --metrics --output-format json \
+    --output "/reports/$side" --include '*.rs' \
+    --exclude './target/**' './.git/**' --paths .)
+}
+
+if [[ "$gate" == metrics/complexity ]]; then
+  if [[ -z "${BASE:-}" ]]; then
+    echo "metrics/complexity needs BASE" >&2
+    exit 1
+  fi
+  git worktree add --detach /work-base "$BASE"
+  analyze /work-base base
+  analyze /work head
+  exit
+fi
+
 # moon's own status; its report is judged in a separate container.
 status=0
 if [[ "$gate" == all ]]; then

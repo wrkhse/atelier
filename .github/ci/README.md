@@ -32,6 +32,14 @@ The runner builds the reporter as a static musl binary for the container,
 but Kani, Miri, the tests and the mutants execute only inside the gate
 container, never on the runner or a developer machine.
 
+`metrics.yml` runs one more check, `metrics/complexity`, through
+`run.sh metrics`. The same bounded container checks out the base commit as a
+worktree and runs the pinned `rust-code-analysis-cli` on both trees, writing
+`base/` and `head/` json reports; `run.sh` fails if either comes back empty.
+There is no moon report, so no reporter or offline validation. The comparison
+binary, `atelier-metrics complexity`, then runs on the runner after the
+container, and its exit status is the check.
+
 ## The container
 
 ```sh

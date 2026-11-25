@@ -22,30 +22,41 @@ output="$reports/container"
 binary="$RUNNER_TEMP/atelier"
 mkdir -p "$output" "$binary"
 
-# Each job stays inside its 90 minutes: a gate is gate + validate.
+# Each job stays inside its 90 minutes: a gate is gate + validate. The
+# metrics mode runs the gate container for metrics/complexity alone, with no
+# moon report to validate.
 container_mode=$MODE
 case "$MODE" in
   selftest | validate) limit=10m ;;
   gate | record-gate) limit=75m; container_mode=gate ;;
+  metrics) limit=75m; container_mode=gate ;;
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
+if [[ "$MODE" == metrics && "$GATE" != metrics/complexity ]]; then
+  echo "metrics: GATE must be metrics/complexity, not '$GATE'" >&2
+  exit 2
+fi
+
 # Only recordings select a released reporter; other modes use the checkout's.
+# The metrics mode validates no moon report, so /binary stays empty.
 if [[ "$MODE" == record-gate ]]; then
   reporter=${REPORTER:?record-gate requires REPORTER}
   if [[ "$reporter" == *[[:cntrl:]]* ]]; then
     echo "record-gate: REPORTER must not contain control characters" >&2
     exit 1
   fi
-else
+elif [[ "$MODE" != metrics ]]; then
   reporter="$source/target/x86_64-unknown-linux-musl/release/atelier-reporter"
 fi
 
-if [[ ! -f "$reporter" || -L "$reporter" ]]; then
-  echo "the reporter is not a plain file at $reporter" >&2
-  exit 1
+if [[ "$MODE" != metrics ]]; then
+  if [[ ! -f "$reporter" || -L "$reporter" ]]; then
+    echo "the reporter is not a plain file at $reporter" >&2
+    exit 1
+  fi
+  install -m 0555 -- "$reporter" "$binary/atelier-reporter"
 fi
-install -m 0555 -- "$reporter" "$binary/atelier-reporter"
 
 if [[ "$MODE" == record-gate ]]; then
   printf 'reporter: %s\n' "$reporter" >&2
@@ -143,6 +154,22 @@ start "atelier-$container_mode-$id" || status=$?
 # docker cp keeps links, so only plain files and folders cross to the host.
 docker cp "atelier-$container_mode-$id:/reports/." "$output/" >&2 || true
 find "$output" -mindepth 1 ! -type f ! -type d -delete
+
+# The comparison runs on the runner afterwards; here each side must have come
+# back as a folder holding at least one non-empty report.
+if [[ "$MODE" == metrics ]]; then
+  for side in base head; do
+    folder="$output/$side"
+    if [[ ! -d "$folder" ]]; then
+      echo "metrics: no $side report folder at $folder" >&2
+      status=1
+    elif [[ -z "$(find "$folder" -type f -size +0c -print -quit)" ]]; then
+      echo "metrics: the $side report folder $folder is empty" >&2
+      status=1
+    fi
+  done
+  exit "$status"
+fi
 
 if [[ "$container_mode" == gate ]]; then
   validate || status=1

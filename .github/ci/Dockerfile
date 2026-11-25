@@ -27,11 +27,14 @@ RUN rustup component add clippy rustfmt rust-src \
        --component miri,rust-src \
     && cargo install --locked cargo-nextest@0.9.152 cargo-mutants@27.1.0 \
     && cargo install --locked kani-verifier --version 0.68.0 \
+    && cargo install --locked rust-code-analysis-cli --version 0.0.25 \
     && rm -rf "$CARGO_HOME/registry" "$CARGO_HOME/git" \
     && chmod -R a+w "$CARGO_HOME" "$RUSTUP_HOME"
 
 # /reports is outside the copied checkout, so no committed file can sit there.
-RUN useradd --uid 10001 --create-home ci && install -d -o ci -g ci /work /reports
+# /work-base holds metrics/complexity's worktree of the base commit.
+RUN useradd --uid 10001 --create-home ci \
+    && install -d -o ci -g ci /work /work-base /reports
 COPY entrypoint.sh /opt/ci/entrypoint.sh
 RUN chmod 0555 /opt/ci/entrypoint.sh
 
