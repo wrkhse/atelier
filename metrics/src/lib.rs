@@ -257,7 +257,7 @@ mod tests {
         let worse = metric("parse", [4.0, 2.0, 120.5, 110.25]);
         let added = metric("render", BASE);
 
-        let grown = compare(&[same.clone()], &[same.clone(), added.clone()]);
+        let grown = compare(std::slice::from_ref(&same), &[same.clone(), added.clone()]);
         let regressed = compare(&[same], &[worse, added]);
 
         assert_eq!([passed(&grown), passed(&regressed)], [true, false]);

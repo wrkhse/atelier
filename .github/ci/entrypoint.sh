@@ -60,11 +60,28 @@ export ATELIER_MUTANTS_DIFF="$diff"
 # rust-code-analysis, one json file per source file with every function in
 # it; atelier-metrics then compares them here, in the container. Run from
 # inside each tree, the files are named by relative path, so both sides line
-# up. A side with no json fails, as it would compare nothing.
+# up. A side with no json fails, as it would compare nothing. The files are
+# listed one by one, since the tool skips a hidden path such as "." and so
+# walks nothing when given the tree itself; the list is bounded.
 analyze() {
-  local tree=$1 side=$2
+  local tree=$1 side=$2 listing file
+  local -a files=() args=()
+  local -r max_files=4096
   mkdir -p "/reports/$side"
-  (cd "$tree" && rust-code-analysis-cli -m -O json --pr -o "/reports/$side" -p .)
+  listing=$(cd "$tree" && find . -type f -name '*.rs' -not -path './target/*' \
+    -not -path './.git/*' -print | LC_ALL=C sort)
+  if [[ -n "$listing" ]]; then
+    mapfile -t files <<< "$listing"
+  fi
+  if (( ${#files[@]} > max_files )); then
+    echo "metrics/complexity: $side has ${#files[@]} Rust files, over $max_files" >&2
+    exit 1
+  fi
+  for file in "${files[@]}"; do
+    args+=(-p "$file")
+  done
+  (cd "$tree" && rust-code-analysis-cli -m -O json --pr -o "/reports/$side" \
+    "${args[@]}")
   if [[ -z "$(find "/reports/$side" -type f -name '*.json' -print -quit)" ]]; then
     echo "metrics/complexity: rust-code-analysis wrote no json for $side" >&2
     exit 1
