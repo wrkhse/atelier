@@ -32,7 +32,7 @@ jobs:
       github.event_name == 'workflow_dispatch'
       || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       # Full history brings every tag, so the release's tag can be found.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,6 +57,11 @@ jobs:
           fi
 
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+            if [[ "$EVENT" == workflow_dispatch ]]; then
+              echo "$tag is not a release candidate tag" >&2
+              exit 1
+            fi
+
             echo "$tag is not a release candidate tag; skipping recording"
             exit 0
           fi

@@ -15,7 +15,8 @@ Download and verify the Linux x64 release archive, then extract it:
 ```sh
 gh release download v0.2.0-rc.1 --repo wrkhse/atelier \
   --pattern 'atelier-v0.2.0-rc.1-linux-x64.tar.gz' --pattern SHA256SUMS
-sha256sum --check --ignore-missing SHA256SUMS
+rg -F "  atelier-v0.2.0-rc.1-linux-x64.tar.gz" SHA256SUMS > archive.sha256
+sha256sum --check archive.sha256
 tar -xzf atelier-v0.2.0-rc.1-linux-x64.tar.gz
 export PATH="$PWD/bin:$PATH"
 ```
@@ -51,11 +52,15 @@ The same command runs locally in a container; no gate runs on the host.
       ([#87](https://github.com/wrkhse/atelier/issues/87))
 - [ ] Metrics against the previous version
       ([#88](https://github.com/wrkhse/atelier/issues/88))
-- [ ] Agent review as a check
-      ([#89](https://github.com/wrkhse/atelier/issues/89))
 - [ ] Builder plugin on tack, driven by sourcefed events
       ([#85](https://github.com/wrkhse/atelier/issues/85))
 - [ ] TypeScript and TLA+ presets — later, no issue yet
+
+### Separate add-ons (after the core)
+
+- [ ] Agent review as a check
+      ([#89](https://github.com/wrkhse/atelier/issues/89))
+- [ ] Docs gate ([#98](https://github.com/wrkhse/atelier/issues/98))
 
 ## More
 

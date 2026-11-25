@@ -112,11 +112,14 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           ARCHIVE: ${{ matrix.archive }}
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
         run: |
           set -euo pipefail
 
-          unpacked=$(mktemp -d)
-          trap 'rm -rf "$unpacked"' EXIT
+          smoke=$(mktemp -d)
+          trap 'rm -rf "$smoke"' EXIT
+          unpacked="$smoke/unpacked"
+          mkdir "$unpacked"
           tar -xzf "dist/atelier-$TAG-$ARCHIVE.tar.gz" -C "$unpacked"
 
           for path in \
@@ -135,19 +138,75 @@ jobs:
 
           "$unpacked/bin/atelier-reporter" --help
 
-          # Give the extracted preset a consumer workspace with one Rust project.
-          cd "$unpacked"
-          git init -q
-          mkdir smoke
-          printf 'projects:\n  smoke: smoke\n' > .moon/workspace.yml
-          printf 'language: rust\n' > smoke/moon.yml
+          # Give the packaged preset a consumer workspace with one Rust crate.
+          consumer="$smoke/consumer"
+          mkdir -p "$consumer/.moon" "$consumer/app/src"
+          cd "$consumer"
+          git init -q -b main
+          cp -R "$unpacked/.moon/tasks" "$unpacked/.moon/scripts" .moon/
+          cp "$unpacked/.moon/toolchains.yml" .moon/
+          cp "$unpacked/.prototools" .
+
+          cat > Cargo.toml <<'EOF'
+          [workspace]
+          members = ["app"]
+          resolver = "3"
+
+          [workspace.package]
+          rust-version = "1.100"
+          EOF
+          cat > app/Cargo.toml <<'EOF'
+          [package]
+          name = "app"
+          version = "0.1.0"
+          edition = "2024"
+          rust-version.workspace = true
+          EOF
+          cat > .moon/workspace.yml <<'EOF'
+          projects:
+            app: "app"
+
+          vcs:
+            defaultBranch: "main"
+          EOF
+          printf 'language: rust\n' > app/moon.yml
+          cat > app/src/lib.rs <<'EOF'
+          pub fn answer() -> u32 {
+              42
+          }
+          EOF
+
+          # The contained runner only supports GitHub-hosted Linux.
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            # Give moon ci a base commit and a change to format-check.
+            git -c user.name=smoke -c user.email=smoke@invalid \
+              commit -qm 'Seed smoke history' --allow-empty
+            git add .moon .prototools Cargo.toml app
+            git -c user.name=smoke -c user.email=smoke@invalid \
+              commit -qm 'Add smoke app'
+
+            reporter_dir=target/x86_64-unknown-linux-musl/release
+            mkdir -p "$reporter_dir"
+            cp "$unpacked/bin/atelier-reporter" "$reporter_dir/"
+
+            SOURCE="$consumer" GATE=rust/fmt GATES=rust/fmt BASE= \
+              bash "$CI_SUPPORT/run.sh" gate
+
+            report="$RUNNER_TEMP/atelier-reports/container/ci-report.json"
+            if [[ ! -s "$report" ]]; then
+              echo "smoke gate wrote no report at $report" >&2
+              exit 1
+            fi
+
+            "$unpacked/bin/atelier-reporter" --report "$report" --gate rust/fmt
+          fi
 
           moon --version
           moon query tasks | python3 -c '
           import json
           import sys
 
-          tasks = json.load(sys.stdin)["tasks"].get("smoke", {})
+          tasks = json.load(sys.stdin)["tasks"].get("app", {})
           expected = {"fmt", "clippy", "test", "kani", "miri", "mutants", "msrv"}
           missing = expected - tasks.keys()
 

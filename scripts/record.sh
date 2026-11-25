@@ -100,7 +100,7 @@ write_crate() {
 
   cat > "$SCRATCH/Cargo.toml" <<'TOML'
 [workspace]
-members = ["reporter"]
+members = ["app"]
 resolver = "3"
 
 [workspace.package]
@@ -108,19 +108,18 @@ edition = "2024"
 rust-version = "1.100"
 TOML
 
-  # The Kani and Miri preset tasks select this package by name.
-  cat > "$SCRATCH/reporter/Cargo.toml" <<'TOML'
+  cat > "$SCRATCH/app/Cargo.toml" <<'TOML'
 [package]
-name = "atelier-reporter"
+name = "app"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 TOML
 
-  printf 'layer: library\nlanguage: rust\n' > "$SCRATCH/reporter/moon.yml"
+  printf 'layer: library\nlanguage: rust\n' > "$SCRATCH/app/moon.yml"
 
-  cat > "$SCRATCH/reporter/src/lib.rs" <<'RUST'
+  cat > "$SCRATCH/app/src/lib.rs" <<'RUST'
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }
@@ -148,20 +147,20 @@ commit_scratch() {
   "${git[@]}" commit --quiet -m "chore: moon workspace"
   "${git[@]}" update-ref refs/remotes/origin/main HEAD
   "${git[@]}" switch --quiet --create demo
-  "${git[@]}" add Cargo.toml Cargo.lock reporter
-  "${git[@]}" commit --quiet -m "feat: add the reporter crate"
+  "${git[@]}" add Cargo.toml Cargo.lock app
+  "${git[@]}" commit --quiet -m "feat: add the app crate"
 }
 
 make_scratch() {
   rm -rf "$SCRATCH" "$SUPPORT"
-  mkdir -p "$SCRATCH/reporter/src"
+  mkdir -p "$SCRATCH/app/src"
   cp -R "$REL/.moon" "$SCRATCH/.moon"
   cp "$REL/.prototools" "$SCRATCH/.prototools"
   cp -R "$GITHUB_WORKSPACE/.github/ci" "$SUPPORT"
 
   cat > "$SCRATCH/.moon/workspace.yml" <<'YAML'
 projects:
-  reporter: "reporter"
+  app: "app"
 vcs:
   defaultBranch: "main"
 YAML
@@ -293,8 +292,8 @@ expect_diff() {
 
   seen="$(tmux capture-pane -p -J -S - -t "$LEFT")$(cat "$GATE_LOG")"
 
-  if ! rg -q 'Diff in .*reporter/src/lib\.rs' <<< "$seen"; then
-    echo "the failed run shows no rustfmt diff for reporter/src/lib.rs" >&2
+  if ! rg -q 'Diff in .*app/src/lib\.rs' <<< "$seen"; then
+    echo "the failed run shows no rustfmt diff for app/src/lib.rs" >&2
     return 1
   fi
 }
@@ -309,7 +308,8 @@ all_gates_step() {
 
   typed="GATE=all GATES=\"$*\" bash \"\$CI_SUPPORT/run.sh\" gate 2>>\"\$GATE_LOG\""
   type_line "$typed; gate_status=\$?; echo \"gate exit \$gate_status\""
-  wait_until 5100 pane_has "$LEFT" '^gate exit [0-9]+$'
+  # The gate and validation have 85 minutes combined, plus runner overhead.
+  wait_until 5400 pane_has "$LEFT" '^gate exit [0-9]+$'
 }
 
 # summary_step: the released reporter judges the container's results for all
@@ -344,7 +344,7 @@ summary_step() {
 }
 
 restored() {
-  ! rg -qF 'ugly( )' "$SCRATCH/reporter/src/lib.rs"
+  ! rg -qF 'ugly( )' "$SCRATCH/app/src/lib.rs"
 }
 
 drive() {
@@ -357,14 +357,14 @@ drive() {
   caption caption-clean-result "1. Result: rust/fmt: passed"
 
   caption caption-violation "2. Append an unformatted line, run again"
-  type_line "echo 'pub fn  ugly( )->u64{ 1 }' >> reporter/src/lib.rs"
-  wait_until 10 rg -qF 'ugly( )' "$SCRATCH/reporter/src/lib.rs"
+  type_line "echo 'pub fn  ugly( )->u64{ 1 }' >> app/src/lib.rs"
+  wait_until 10 rg -qF 'ugly( )' "$SCRATCH/app/src/lib.rs"
   gate_step violation-fail failed 1
   expect_diff
   caption caption-violation-result "2. Result: rust/fmt: failed"
 
   caption caption-final "3. Restore the file, run again"
-  type_line "git checkout -- reporter/src/lib.rs"
+  type_line "git checkout -- app/src/lib.rs"
   wait_until 10 restored
   gate_step final-pass passed 0
   caption caption-final-result "3. Result: rust/fmt: passed"
@@ -552,6 +552,8 @@ main() {
   : > "$GATE_LOG"
 
   fetch_release
+  unset GH_TOKEN GITHUB_TOKEN
+
   verify_release
   stage_release
   make_scratch

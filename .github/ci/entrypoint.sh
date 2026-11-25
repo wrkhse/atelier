@@ -42,10 +42,10 @@ cp -R /source/. /work/
 git config --global --add safe.directory /work
 cd /work
 
-# The mutants task runs from the reporter project and reads this diff there.
+# The mutants task reads this absolute path from any project directory.
 # An unreachable base fails the gate; it never passes as an empty diff.
-diff=reporter/target/mutants.diff
-mkdir -p reporter/target
+diff="$PWD/target/mutants.diff"
+mkdir -p target
 if [[ -z "${BASE:-}" ]]; then
   : > "$diff"
 elif git cat-file -e "$BASE^{commit}" 2>/dev/null; then
@@ -54,6 +54,7 @@ else
   echo "base $BASE is unavailable" >&2
   exit 1
 fi
+export ATELIER_MUTANTS_DIFF="$diff"
 
 # moon's own status; its report is judged in a separate container.
 status=0
