@@ -129,12 +129,12 @@ fn score(before: f64, after: f64) -> Change {
 /// product too large to represent.
 #[must_use]
 pub const fn budget(base: f64, head: f64, limit_percent: f64) -> bool {
-    let finite = base.is_finite() && head.is_finite() && limit_percent.is_finite();
-
-    if !finite || base < 0.0 || head < 0.0 {
+    if base < 0.0 || head < 0.0 {
         return false;
     }
 
+    // A NaN or infinite base or limit leaves `allowed` non-finite, and a NaN
+    // or infinite head fails the comparison, so neither needs its own guard.
     let allowed = base * (100.0 + limit_percent);
 
     allowed.is_finite() && head * 100.0 <= allowed

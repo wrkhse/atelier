@@ -39,7 +39,8 @@ if [[ "$MODE" == metrics && "$GATE" != metrics/complexity ]]; then
 fi
 
 # Only recordings select a released reporter; other modes use the checkout's.
-# The metrics mode validates no moon report, so /binary stays empty.
+# The metrics mode validates no moon report; /binary holds only the
+# checkout's atelier-metrics, which compares the trees in the container.
 if [[ "$MODE" == record-gate ]]; then
   reporter=${REPORTER:?record-gate requires REPORTER}
   if [[ "$reporter" == *[[:cntrl:]]* ]]; then
@@ -56,6 +57,15 @@ if [[ "$MODE" != metrics ]]; then
     exit 1
   fi
   install -m 0555 -- "$reporter" "$binary/atelier-reporter"
+fi
+
+if [[ "$MODE" == metrics ]]; then
+  metrics="$source/target/x86_64-unknown-linux-musl/release/atelier-metrics"
+  if [[ ! -f "$metrics" || -L "$metrics" ]]; then
+    echo "metrics: atelier-metrics is not a plain file at $metrics" >&2
+    exit 1
+  fi
+  install -m 0555 -- "$metrics" "$binary/atelier-metrics"
 fi
 
 if [[ "$MODE" == record-gate ]]; then
@@ -155,8 +165,9 @@ start "atelier-$container_mode-$id" || status=$?
 docker cp "atelier-$container_mode-$id:/reports/." "$output/" >&2 || true
 find "$output" -mindepth 1 ! -type f ! -type d -delete
 
-# The comparison runs on the runner afterwards; here each side must have come
-# back as a folder holding at least one non-empty report.
+# The container's comparison decided the status. As a second fail-closed
+# check, each side must have come back as a folder holding at least one
+# non-empty report.
 if [[ "$MODE" == metrics ]]; then
   for side in base head; do
     folder="$output/$side"

@@ -58,14 +58,19 @@ export ATELIER_MUTANTS_DIFF="$diff"
 
 # metrics/complexity measures the base and head trees with the same pinned
 # rust-code-analysis, one json file per source file with every function in
-# it; atelier-metrics compares them on the runner. Run from inside each tree,
-# the files are named by relative path, so both sides line up.
+# it; atelier-metrics then compares them here, in the container. Run from
+# inside each tree, the files are named by relative path, so both sides line
+# up. A side with no json fails, as it would compare nothing.
 analyze() {
   local tree=$1 side=$2
   mkdir -p "/reports/$side"
   (cd "$tree" && rust-code-analysis-cli --metrics --output-format json \
-    --output "/reports/$side" --include '*.rs' \
+    --output "/reports/$side" --include '**/*.rs' \
     --exclude './target/**' './.git/**' --paths .)
+  if [[ -z "$(find "/reports/$side" -type f -name '*.json' -print -quit)" ]]; then
+    echo "metrics/complexity: rust-code-analysis wrote no json for $side" >&2
+    exit 1
+  fi
 }
 
 if [[ "$gate" == metrics/complexity ]]; then
@@ -76,7 +81,16 @@ if [[ "$gate" == metrics/complexity ]]; then
   git worktree add --detach /work-base "$BASE"
   analyze /work-base base
   analyze /work head
-  exit
+  if [[ ! -x /binary/atelier-metrics ]]; then
+    echo "/binary/atelier-metrics is not executable" >&2
+    exit 1
+  fi
+  # The comparison decides the check: with pipefail, its exit status is the
+  # container's. The runner only shows summary.txt.
+  status=0
+  /binary/atelier-metrics complexity --base /reports/base --head /reports/head \
+    | tee /reports/summary.txt || status=$?
+  exit "$status"
 fi
 
 # moon's own status; its report is judged in a separate container.
