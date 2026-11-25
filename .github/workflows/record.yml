@@ -1,0 +1,102 @@
+# Records the released atelier build running its rust/fmt gate end to end,
+# as a two-pane terminal GIF. CI only: scripts/record.sh refuses to run
+# anywhere but a GitHub-hosted Linux runner, and every gate run goes through
+# the contained runner in .github/ci. The recording shows the release asset
+# for RELEASE_TAG, not a build of this checkout. The supervisor reviews its
+# frames before attaching the GIF to the release.
+name: record
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: record-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.0-rc.1' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reads .prototools and installs moon 2.6.5, as gates.yml does.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+          targets: x86_64-unknown-linux-musl
+          components: rustfmt,clippy
+      - name: Install the recording tools
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            tmux ffmpeg ripgrep fonts-dejavu-core fontconfig
+          fc-cache -f
+      # terminal-control builds with Zig 0.15.2, checked before it is used.
+      - name: Install Zig
+        run: |
+          set -euo pipefail
+
+          cd "$RUNNER_TEMP"
+          curl -fsSLO \
+            https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          sha='02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239'
+          echo "$sha  zig-x86_64-linux-0.15.2.tar.xz" | sha256sum -c -
+          tar -xf zig-x86_64-linux-0.15.2.tar.xz
+          echo "$RUNNER_TEMP/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+      - name: Install terminal-control
+        run: |
+          set -euo pipefail
+
+          cargo install --locked terminal-control --version 1.2.1
+          termctrl --version
+      - name: Look for the release asset
+        id: asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          names=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' 2>/dev/null || true)
+
+          if grep -Eq '^atelier-.+-linux-x64\.tar\.gz$' <<< "$names"; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Only when the release has no linux-x64 asset yet. record.sh still
+      # retries the download and uses this build only if that never succeeds.
+      - name: Build the reporter (no release asset)
+        if: steps.asset.outputs.found != 'true'
+        run: |
+          set -euo pipefail
+
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          cargo build --release --locked -p atelier-reporter \
+            --target x86_64-unknown-linux-musl
+      - name: Record the released gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FALLBACK_REPORTER: >-
+            ${{ steps.asset.outputs.found != 'true'
+            && format('{0}/target/x86_64-unknown-linux-musl/release/atelier-reporter', github.workspace)
+            || '' }}
+        run: bash scripts/record.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: slice-1-recording
+          path: slice-1.gif
+          if-no-files-found: error

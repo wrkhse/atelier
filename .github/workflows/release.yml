@@ -1,0 +1,180 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: linux-x64
+          - target: aarch64-apple-darwin
+            os: macos-15
+            archive: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+          target: ${{ matrix.target }}
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          cargo build --release --locked \
+            -p atelier-reporter \
+            --target "$TARGET"
+      - name: Verify version matches tag
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          version=$(cargo metadata --locked --no-deps --format-version 1 | \
+            python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "atelier-reporter"))')
+
+          expected="${TAG#v}"
+          if [[ "$version" != "$expected" ]]; then
+            echo "workspace version $version does not match tag $TAG (expected $expected)" >&2
+            exit 1
+          fi
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+
+          stage="$RUNNER_TEMP/stage"
+          rm -rf "$stage"
+          mkdir -p "$stage/.moon/tasks" "$stage/.moon/scripts" "$stage/bin"
+
+          cp .moon/tasks/rust.yml "$stage/.moon/tasks/rust.yml"
+          cp .moon/workspace.yml "$stage/.moon/workspace.yml"
+          cp .moon/toolchains.yml "$stage/.moon/toolchains.yml"
+          cp .moon/scripts/msrv.sh "$stage/.moon/scripts/msrv.sh"
+          cp .prototools "$stage/.prototools"
+          cp "target/$TARGET/release/atelier-reporter" "$stage/bin/atelier-reporter"
+          cp README.md "$stage/README.md"
+          cp LICENSE "$stage/LICENSE"
+
+          mkdir -p dist
+          tar -czf "dist/atelier-$TAG-$ARCHIVE.tar.gz" -C "$stage" \
+            .moon/tasks/rust.yml \
+            .moon/workspace.yml \
+            .moon/toolchains.yml \
+            .moon/scripts/msrv.sh \
+            .prototools \
+            bin/atelier-reporter \
+            README.md \
+            LICENSE
+      - name: Smoke test the archive
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+
+          unpacked=$(mktemp -d)
+          tar -xzf "dist/atelier-$TAG-$ARCHIVE.tar.gz" -C "$unpacked"
+
+          for path in \
+            .moon/tasks/rust.yml \
+            .moon/workspace.yml \
+            .moon/toolchains.yml \
+            .moon/scripts/msrv.sh \
+            .prototools \
+            bin/atelier-reporter \
+            README.md \
+            LICENSE; do
+            if [[ ! -f "$unpacked/$path" || -L "$unpacked/$path" ]]; then
+              echo "archive is missing $path as a plain file" >&2
+              exit 1
+            fi
+          done
+
+          "$unpacked/bin/atelier-reporter" --help
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: atelier-${{ github.ref_name }}-${{ matrix.archive }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref_name, 'v') && contains(github.ref_name, '-rc.')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: atelier-*
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t tarballs < <(find dist -type f -name '*.tar.gz' | sort)
+
+          if [[ "${#tarballs[@]}" -ne 2 ]]; then
+            echo "expected 2 release tarballs, found ${#tarballs[@]}" >&2
+            exit 1
+          fi
+
+          (cd dist && sha256sum -- *.tar.gz > SHA256SUMS)
+
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --prerelease \
+            --verify-tag \
+            --title "atelier $TAG" \
+            --notes "Rust moon gates release candidate" \
+            "${tarballs[@]}" dist/SHA256SUMS
+
+  skip:
+    if: startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-rc.')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Explain skip
+        env:
+          TAG: ${{ github.ref_name }}
+        run: echo "Tag $TAG is not a release candidate (expected v*-rc.*); skipping publish."
