@@ -182,7 +182,9 @@ jobs:
           # The real PR base: the trusted container measures it in both runs.
           BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           # Three runs of two containers each fit inside the 90-minute job.
-          METRICS_CONTAINER_LIMIT: 12m
+          # The measured runs finish well under this; the cap keeps a runaway
+          # from consuming the proof job.
+          METRICS_CONTAINER_LIMIT: 8m
         run: |
           reports="$RUNNER_TEMP/atelier-reports/container"
           summary="$reports/summary.txt"

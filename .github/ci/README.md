@@ -98,9 +98,9 @@ real allocation into `results()` in head: head's DHAT `TotalBlocks` must
 exceed the control run's, and the table's `Allocations (blocks)` after cell
 must exceed the control run's after cell. The restored run checks
 `report.rs` out again, and head's `TotalBlocks` must return to the control
-run's count. In every run, the
-table's before and after cells must equal the `TotalBlocks` in that run's
-`resources.json` and `head-resources.json`.
+run's count. In every run, every rendered row is checked against the matching
+field in that run's `resources.json` and `head-resources.json`, with a
+tolerance for rounded decimal values.
 
 ## The container
 
