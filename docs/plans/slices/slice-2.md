@@ -49,14 +49,12 @@ loop and fails the instruction check; the unpatched code passes.
 
 ### Resources
 
-Resources appear in a before-and-after table and never fail a check. The
-core rows land in this part; the idle footprint, wake-ups, startup and build
-time, bytes written, open files and threads follow in the next part. Each row
+Resources appear in a before-and-after table and never fail a check. Each row
 names its method:
 
-- hyperfine 2.0.0 supplies CPU time (`time_user` plus `time_system`) and peak
-  memory (`memory_peak_resident`). Wall-time percentiles are planned; this
-  slice computes no p99.
+- hyperfine 2.0.0 supplies CPU time (`time_user` plus `time_system`), peak
+  memory (`memory_peak_resident`), `startup_seconds` and `build_seconds`.
+  Wall-time percentiles are planned; this slice computes no p99.
 - Gungraun 0.20.0's DHAT tool supplies allocation bytes and blocks
   (`TotalBytes` and `TotalBlocks`), under a pinned Valgrind of at least 3.20
   that the gate image installs from its official tarball with a verified
@@ -64,21 +62,15 @@ names its method:
 - cargo-bloat 0.12.1 with `--crates --message-format json` supplies file size
   and an estimated per-crate `.text` breakdown; `cargo metadata` supplies
   dependency facts.
+- Idle footprint (`idle_footprint_kib`) and `voluntary_ctxt_switches` come
+  from `/proc/<pid>/status` over a bounded idle window, and `wchar_bytes`
+  comes from `/proc/<pid>/io`.
+- Threads and open files come from `/proc` sampling at a fixed 100 ms
+  interval for a bounded duration: `sampled_peak_threads` and
+  `sampled_peak_fds`.
 
-The gate in this part samples no `/proc` counters. The next part adds them:
-
-- `/proc/<pid>/status` will give `voluntary_ctxt_switches` over a fixed idle
-  window, and `/proc/<pid>/io` will give `wchar`; the rows carry those names.
-- Threads and open files will come from `/proc` sampling at a fixed 100 ms
-  interval for a bounded duration, and their rows read "sampled peak, every
-  100 ms".
-
-Exact kernel counters could carry budgets in a later slice; none are enabled
-in this one. Sampled peaks are only reported, so they cannot flake.
-
-The work lands in two parts. The core table and the doubled-allocation proof
-come first; idle footprint, wake-ups, startup and build time, bytes written,
-open files and threads follow.
+Exact kernel counters carry no budgets; sampled peaks are only reported, so
+they cannot flake.
 
 Verification: doubled allocations appear in the table and do not fail.
 

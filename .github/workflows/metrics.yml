@@ -353,6 +353,13 @@ jobs:
             check_row "Packages" package_count whole
             check_row "Workspace members" workspace_members whole
             check_row "Duplicate versions" duplicate_versions whole
+            check_row "Startup time (s)" startup_seconds decimal
+            check_row "Build time (s)" build_seconds decimal
+            check_row "Idle footprint (KiB)" idle_footprint_kib whole
+            check_row "Voluntary context switches" voluntary_ctxt_switches whole
+            check_row "Bytes written (wchar)" wchar_bytes whole
+            check_row "Sampled peak threads, every 100 ms" sampled_peak_threads whole
+            check_row "Sampled peak FDs, every 100 ms" sampled_peak_fds whole
             check_crates
             head_blocks=$(jq -er '.total_blocks' "$head_json") \
               || fail "no total_blocks in head-resources.json"
@@ -368,6 +375,9 @@ jobs:
             text_section_size package_count workspace_members \
             duplicate_versions crates)
           tolerant_fields=(cpu_seconds peak_rss_bytes)
+          # Startup, build, idle footprint, context switches, bytes written
+          # and sampled peaks are timed or sampled and would flake across
+          # runs, so check_base does not compare them.
 
           # Requires every base-side field of this run's resources.json to
           # match the control run's, naming $run and the field on a mismatch.
