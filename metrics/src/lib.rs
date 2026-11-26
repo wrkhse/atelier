@@ -1,5 +1,6 @@
 //! Compares the measurements of a base and a head version: function
-//! complexity, which may not regress, and instruction counts against a budget.
+//! complexity against the base or an absolute budget, and instruction counts
+//! against a relative budget.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -7,6 +8,11 @@ use std::collections::btree_map::Entry;
 use std::fmt;
 
 use serde::Deserialize;
+
+const MAX_CYCLOMATIC: f64 = 20.0;
+const MAX_COGNITIVE: f64 = 30.0;
+const MAX_HALSTEAD_VOLUME: f64 = 2000.0;
+const MIN_MAINTAINABILITY: f64 = 50.0;
 
 /// The complexity of one function, as rust-code-analysis measures it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -140,14 +146,25 @@ pub fn compare(base: &[FunctionMetric], head: &[FunctionMetric]) -> Vec<Comparis
         .collect()
 }
 
-/// True unless a function regressed. A new function passes: the ratchet
-/// keeps existing functions from getting worse and does not stop code being
-/// added.
+/// True when all measures of a function without a base meet their absolute
+/// limits. A measure that is not a number fails its comparison.
+#[must_use]
+pub const fn within_absolute_budget(metric: &FunctionMetric) -> bool {
+    metric.cyclomatic <= MAX_CYCLOMATIC
+        && metric.cognitive <= MAX_COGNITIVE
+        && metric.halstead_volume <= MAX_HALSTEAD_VOLUME
+        && metric.maintainability >= MIN_MAINTAINABILITY
+}
+
+/// True when no function regressed and every new function meets the absolute
+/// budget.
 #[must_use]
 pub fn passed(comparisons: &[Comparison]) -> bool {
-    comparisons
-        .iter()
-        .all(|comparison| comparison.state != State::Regressed)
+    comparisons.iter().all(|comparison| match comparison.state {
+        State::Same | State::Improved => true,
+        State::Regressed => false,
+        State::New => within_absolute_budget(&comparison.head),
+    })
 }
 
 /// Regressed when any measure got worse, improved when one got better and
@@ -380,15 +397,60 @@ mod tests {
     }
 
     #[test]
-    fn a_new_function_passes_and_a_regressed_one_fails() {
+    fn a_new_function_at_the_budget_limits_passes_and_a_regressed_one_fails() {
         let same = metric("parse", BASE);
         let worse = metric("parse", [4.0, 2.0, 120.5, 110.25]);
-        let added = metric("render", BASE);
+        let added = metric("render", [20.0, 30.0, 2000.0, 50.0]);
 
         let grown = compare(std::slice::from_ref(&same), &[same.clone(), added.clone()]);
         let regressed = compare(&[same], &[worse, added]);
 
         assert_eq!([passed(&grown), passed(&regressed)], [true, false]);
+    }
+
+    #[test]
+    fn a_new_function_fails_when_any_measure_exceeds_its_budget() {
+        let over_budget = [
+            [21.0, 30.0, 2000.0, 50.0],
+            [20.0, 31.0, 2000.0, 50.0],
+            [20.0, 30.0, 2000.25, 50.0],
+            [20.0, 30.0, 2000.0, 49.75],
+        ];
+
+        let verdicts = over_budget.map(|measures| {
+            let compared = compare(&[], &[metric("parse", measures)]);
+            passed(&compared)
+        });
+
+        assert_eq!(verdicts, [false; 4]);
+    }
+
+    #[test]
+    fn a_new_function_fails_when_any_measure_is_not_a_number() {
+        let unmeasurable = [
+            [f64::NAN, 2.0, 120.5, 110.25],
+            [3.0, f64::NAN, 120.5, 110.25],
+            [3.0, 2.0, f64::NAN, 110.25],
+            [3.0, 2.0, 120.5, f64::NAN],
+        ];
+
+        let verdicts = unmeasurable.map(|measures| {
+            let compared = compare(&[], &[metric("parse", measures)]);
+            passed(&compared)
+        });
+
+        assert_eq!(verdicts, [false; 4]);
+    }
+
+    #[test]
+    fn an_existing_function_over_budget_still_passes_when_it_does_not_regress() {
+        let base = [metric("parse", [22.0, 32.0, 2002.0, 48.0])];
+        let better = [metric("parse", [21.0, 31.0, 2001.0, 49.0])];
+
+        let same = compare(&base, &base);
+        let improved = compare(&base, &better);
+
+        assert_eq!([passed(&same), passed(&improved)], [true, true]);
     }
 
     #[test]

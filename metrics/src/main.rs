@@ -1,8 +1,8 @@
 //! Compares the recorded measurements of a base and a head version and
 //! prints a before and after table: function complexity from
-//! rust-code-analysis, and instruction counts against a budget. It fails on
-//! a regression and on input it cannot trust. It writes no files; the job
-//! appends its output to the summary.
+//! rust-code-analysis, and instruction counts. It fails on a regression,
+//! a budget violation or input it cannot trust. It writes no files; the
+//! job appends its output to the summary.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -17,17 +17,8 @@ use serde_json::Value;
 /// The largest metrics file read, in bytes.
 const MAX_FILE_BYTES: u64 = 8_388_608;
 
-/// The most metrics files read under one report directory, its folders
-/// included.
+/// The most metrics files read under one report directory and its subfolders.
 const MAX_FILES: usize = 4096;
-
-/// The most folders read under one report directory, itself included.
-const MAX_FOLDERS: usize = 1024;
-
-/// The deepest folder read below a report directory, which is depth 0.
-/// rust-code-analysis mirrors the source tree, so `src/lib.rs` is reported
-/// at `src/lib.rs.json`.
-const MAX_DEPTH: usize = 8;
 
 /// The largest instruction count file read, in bytes.
 const MAX_COUNT_BYTES: u64 = 65_536;
@@ -51,7 +42,7 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Compare function complexity; fails only when a function regressed.
+    /// Compare function complexity; fail on regressions or over-budget additions.
     Complexity {
         /// Directory of rust-code-analysis JSON for the base version.
         #[arg(long, value_name = "DIR")]
@@ -86,12 +77,11 @@ enum Reason {
     /// The path is not a regular file: absent, a directory or a symlink.
     MissingFile,
     NoFiles,
+    /// An individual JSON report holds no functions.
+    NoFunctionsInFile,
     /// The head reports hold no function in total, so nothing was compared.
     NoFunctions,
     TooManyFiles,
-    TooManyFolders,
-    /// A folder lies more than `MAX_DEPTH` folders below the report.
-    TooDeep,
     Oversized,
     Unreadable(io::ErrorKind),
     Malformed,
@@ -104,10 +94,9 @@ impl fmt::Display for Reason {
             Self::MissingDirectory => f.write_str("missing directory"),
             Self::MissingFile => f.write_str("missing regular file"),
             Self::NoFiles => f.write_str("no json files"),
+            Self::NoFunctionsInFile => f.write_str("no functions"),
             Self::NoFunctions => f.write_str("no functions to compare"),
             Self::TooManyFiles => f.write_str("too many json files"),
-            Self::TooManyFolders => f.write_str("too many folders"),
-            Self::TooDeep => f.write_str("folder nested too deep"),
             Self::Oversized => f.write_str("oversized input"),
             Self::Unreadable(kind) => write!(f, "unreadable input: {kind}"),
             Self::Malformed => f.write_str("malformed json"),
@@ -155,8 +144,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Prints a row for each head function; true when none regressed. A new
-/// function is listed as new and passes.
+/// Prints a row for each head function. New functions are listed as new
+/// and must meet the absolute budget; existing functions must not regress.
 ///
 /// A head whose reports hold no function in total is refused, as an empty
 /// comparison would pass having checked nothing.
@@ -236,15 +225,21 @@ fn count(path: &Path) -> Result<f64, Refusal> {
 /// order. A name listed more than once, such as a nested anonymous item,
 /// keeps one entry per occurrence, which `compare` folds into its worst case.
 ///
-/// A valid report without functions, such as a file of only types, adds
-/// nothing; a file that is not JSON or lacks a field is refused.
+/// A file without functions is refused, so a source file the analysis could
+/// not parse cannot make its functions disappear from the comparison.
 fn functions(dir: &Path) -> Result<Vec<FunctionMetric>, Refusal> {
     let mut found = Vec::new();
 
     for file in json_files(dir)? {
         let output = read_json(&file, MAX_FILE_BYTES)?;
+        let refused = |reason| Refusal::new(&file, reason);
+        let before = found.len();
 
-        flatten_file(&output, &mut found).map_err(|reason| Refusal::new(&file, reason))?;
+        flatten_file(&output, &mut found).map_err(refused)?;
+
+        if found.len() == before {
+            return Err(refused(Reason::NoFunctionsInFile));
+        }
     }
 
     Ok(found)
@@ -277,44 +272,28 @@ fn json_files(dir: &Path) -> Result<Vec<PathBuf>, Refusal> {
     Ok(files)
 }
 
-/// A folder waiting to be read, and how many folders below the report it is.
-struct Folder {
-    path: PathBuf,
-    depth: usize,
-}
-
-/// A depth-first walk of a report directory. It queues at most
-/// `MAX_FOLDERS` folders, none deeper than `MAX_DEPTH`, and keeps at most
-/// `MAX_FILES` json files, refusing the report past any of them.
+/// A depth-first walk of a report directory. It keeps at most `MAX_FILES`
+/// JSON files, refusing the report past that limit.
 struct Walk<'a> {
     root: &'a Path,
-    pending: Vec<Folder>,
-    folders_left: usize,
+    pending: Vec<PathBuf>,
     files: Vec<PathBuf>,
 }
 
 impl<'a> Walk<'a> {
-    /// A walk that starts at `root`, which counts as the first folder.
     fn new(root: &'a Path) -> Self {
-        let start = Folder {
-            path: root.to_owned(),
-            depth: 0,
-        };
-
         Self {
             root,
-            pending: vec![start],
-            folders_left: MAX_FOLDERS.saturating_sub(1),
+            pending: vec![root.to_owned()],
             files: Vec::new(),
         }
     }
 
     /// Queues the folders in `folder` and keeps its regular `.json` files.
-    fn read(&mut self, folder: &Folder) -> Result<(), Refusal> {
-        let unreadable =
-            |error: io::Error| Refusal::new(&folder.path, Reason::Unreadable(error.kind()));
+    fn read(&mut self, folder: &Path) -> Result<(), Refusal> {
+        let unreadable = |err: io::Error| Refusal::new(folder, Reason::Unreadable(err.kind()));
 
-        for entry in fs::read_dir(&folder.path).map_err(unreadable)? {
+        for entry in fs::read_dir(folder).map_err(unreadable)? {
             let entry = entry.map_err(unreadable)?;
             let kind = entry.file_type().map_err(unreadable)?;
             let path = entry.path();
@@ -323,29 +302,12 @@ impl<'a> Walk<'a> {
                 .is_some_and(|extension| extension == "json");
 
             if kind.is_dir() {
-                self.queue(path, folder.depth)?;
+                self.pending.push(path);
             } else if kind.is_file() && json {
                 self.keep(path)?;
             }
         }
 
-        Ok(())
-    }
-
-    /// Queues a folder found in a folder at depth `parent`.
-    fn queue(&mut self, path: PathBuf, parent: usize) -> Result<(), Refusal> {
-        let depth = parent.saturating_add(1);
-
-        if depth > MAX_DEPTH {
-            return Err(Refusal::new(&path, Reason::TooDeep));
-        }
-
-        self.folders_left = self
-            .folders_left
-            .checked_sub(1)
-            .ok_or_else(|| Refusal::new(self.root, Reason::TooManyFolders))?;
-
-        self.pending.push(Folder { path, depth });
         Ok(())
     }
 

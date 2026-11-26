@@ -17,13 +17,6 @@ const MAX_FILE_BYTES: usize = 8_388_608;
 /// The most metrics files the binary reads under one report directory.
 const MAX_FILES: usize = 4096;
 
-/// The most folders the binary reads under one report directory, itself
-/// included.
-const MAX_FOLDERS: usize = 1024;
-
-/// The deepest folder the binary reads below a report directory.
-const MAX_DEPTH: usize = 8;
-
 const TABLE_HEAD: [&str; 2] = [
     "| function | state | cyclomatic | cognitive | halstead volume | maintainability |",
     "| --- | --- | --- | --- | --- | --- |",
@@ -145,7 +138,7 @@ fn complexity_fails_on_a_regressed_function() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn complexity_passes_with_new_functions_and_skips_other_files() {
+fn complexity_passes_with_new_functions_within_budget_and_skips_other_files() {
     let head = scratch("new").expect("scratch folder");
     let extra = base_output()
         .expect("read the base fixture")
@@ -171,6 +164,45 @@ fn complexity_passes_with_new_functions_and_skips_other_files() {
     assert_eq!(stderr(&output), "");
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(stdout_lines(&output), table(&rows, "complexity: passed"));
+
+    fs::remove_dir_all(&head).expect("remove the scratch folder");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn complexity_fails_with_a_new_function_over_budget() {
+    let base = fixture("complexity/base");
+    let head = scratch("over-budget").expect("scratch folder");
+    let extra = serde_json::json!({
+        "name": "src/extra.rs",
+        "spaces": [{
+            "name": "parse",
+            "kind": "function",
+            "metrics": {
+                "cyclomatic": {"sum": 21},
+                "cognitive": {"sum": 30},
+                "halstead": {"volume": 2000},
+                "mi": {"mi_original": 50}
+            },
+            "spaces": []
+        }]
+    });
+
+    fs::write(head.join("extra.json"), extra.to_string()).expect("write extra.json");
+    fs::copy(base.join("lib.json"), head.join("lib.json")).expect("copy lib.json");
+
+    let output = complexity(&base, &head).expect("run the metrics binary");
+
+    let rows = [
+        "| src/extra.rs:parse | new | - -> 21.00 | - -> 30.00 \
+         | - -> 2000.00 | - -> 50.00 |",
+        NEW_SAME,
+        VALIDATE_SAME,
+        PARSE_SAME,
+    ];
+    assert_eq!(stderr(&output), "");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout_lines(&output), table(&rows, "complexity: failed"));
 
     fs::remove_dir_all(&head).expect("remove the scratch folder");
 }
@@ -226,69 +258,45 @@ fn complexity_reads_reports_in_nested_folders() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn complexity_reads_a_folder_at_the_depth_limit_and_refuses_one_past_it() {
-    let dir = scratch("deep").expect("scratch folder");
-    let chain: PathBuf = (1..=MAX_DEPTH).map(|depth| depth.to_string()).collect();
-    let at_limit = dir.join("at");
-    let past_limit = dir.join("past");
-    let deepest = past_limit.join(&chain).join("deeper");
-    let report = base_output().expect("read the base fixture");
+fn complexity_reads_a_report_nine_folders_deep() {
+    let base = fixture("complexity/base");
+    let head = scratch("deep").expect("scratch folder");
+    let chain: PathBuf = (1..=9).map(|depth| depth.to_string()).collect();
+    let deepest = head.join(chain);
 
-    fs::create_dir_all(at_limit.join(&chain)).expect("make the at-limit folders");
-    fs::write(at_limit.join(&chain).join("lib.json"), report).expect("write the at-limit report");
-    fs::create_dir_all(&deepest).expect("make the past-limit folders");
+    fs::create_dir_all(&deepest).expect("make the nested folders");
+    fs::copy(base.join("lib.json"), deepest.join("lib.json")).expect("copy the report");
 
-    let read = complexity(&fixture("complexity/base"), &at_limit).expect("run at the limit");
-    let refused = complexity(&fixture("complexity/base"), &past_limit).expect("run past it");
+    let output = complexity(&base, &head).expect("run the metrics binary");
 
     let rows = [NEW_SAME, VALIDATE_SAME, PARSE_SAME];
-    assert_eq!(stderr(&read), "");
-    assert_eq!(read.status.code(), Some(0));
-    assert_eq!(stdout_lines(&read), table(&rows, "complexity: passed"));
-    assert_eq!(refused.status.code(), Some(1));
-    assert_eq!(stdout_lines(&refused), Vec::<String>::new());
-    assert_eq!(
-        stderr(&refused),
-        format!("{}: folder nested too deep\n", deepest.display())
-    );
+    assert_eq!(stderr(&output), "");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout_lines(&output), table(&rows, "complexity: passed"));
 
-    fs::remove_dir_all(&dir).expect("remove the scratch folder");
+    fs::remove_dir_all(&head).expect("remove the scratch folder");
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn complexity_reads_folders_at_the_limit_and_refuses_one_past_it() {
-    let dir = scratch("folders").expect("scratch folder");
-    let at_limit = dir.join("at");
-    let past_limit = dir.join("past");
-    let report = base_output().expect("read the base fixture");
+fn complexity_reads_a_report_among_1024_subfolders() {
+    let base = fixture("complexity/base");
+    let head = scratch("folders").expect("scratch folder");
 
-    for folder in [&at_limit, &past_limit] {
-        fs::create_dir(folder).expect("make a report folder");
-        fs::write(folder.join("lib.json"), &report).expect("write lib.json");
-
-        for index in 1..MAX_FOLDERS {
-            fs::create_dir(folder.join(index.to_string())).expect("make a folder");
-        }
+    for index in 1..=1024 {
+        fs::create_dir(head.join(index.to_string())).expect("make a subfolder");
     }
 
-    fs::create_dir(past_limit.join("extra")).expect("make the folder past the limit");
+    fs::copy(base.join("lib.json"), head.join("1024/lib.json")).expect("copy the report");
 
-    let read = complexity(&fixture("complexity/base"), &at_limit).expect("run at the limit");
-    let refused = complexity(&fixture("complexity/base"), &past_limit).expect("run past it");
+    let output = complexity(&base, &head).expect("run the metrics binary");
 
     let rows = [NEW_SAME, VALIDATE_SAME, PARSE_SAME];
-    assert_eq!(stderr(&read), "");
-    assert_eq!(read.status.code(), Some(0));
-    assert_eq!(stdout_lines(&read), table(&rows, "complexity: passed"));
-    assert_eq!(refused.status.code(), Some(1));
-    assert_eq!(stdout_lines(&refused), Vec::<String>::new());
-    assert_eq!(
-        stderr(&refused),
-        format!("{}: too many folders\n", past_limit.display())
-    );
+    assert_eq!(stderr(&output), "");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout_lines(&output), table(&rows, "complexity: passed"));
 
-    fs::remove_dir_all(&dir).expect("remove the scratch folder");
+    fs::remove_dir_all(&head).expect("remove the scratch folder");
 }
 
 #[test]
@@ -459,20 +467,23 @@ fn complexity_refuses_too_many_files() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn complexity_passes_a_report_without_functions() {
+fn complexity_refuses_a_report_without_functions_beside_a_valid_report() {
     let head = scratch("empty").expect("scratch folder");
     let improved = fixture("complexity/improved/lib.json");
+    let file = head.join("types.json");
     let types_only = r#"{"name":"src/types.rs","kind":"unit","spaces":[]}"#;
 
     fs::copy(improved, head.join("lib.json")).expect("copy lib.json");
-    fs::write(head.join("types.json"), types_only).expect("write types.json");
+    fs::write(&file, types_only).expect("write types.json");
 
     let output = complexity(&fixture("complexity/base"), &head).expect("run the metrics binary");
 
-    let rows = [NEW_SAME, VALIDATE_IMPROVED, PARSE_SAME];
-    assert_eq!(stderr(&output), "");
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(stdout_lines(&output), table(&rows, "complexity: passed"));
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout_lines(&output), Vec::<String>::new());
+    assert_eq!(
+        stderr(&output),
+        format!("{}: no functions\n", file.display())
+    );
 
     fs::remove_dir_all(&head).expect("remove the scratch folder");
 }
