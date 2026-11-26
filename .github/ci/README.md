@@ -99,9 +99,13 @@ undeclared, short-lived command reports `not applicable: exits in N ms` in
 those five rows. As with the performance gate,
 head is measured in its own contained job, with the base's harness and its own
 manifests, and its evidence is mounted read-only into the job that measures
-base and writes the table. The gate only reports: it never gives a failing
-verdict. `metrics/resources-proof` measures head against the real PR base
-three times. The control run measures head as it is. The allocated run patches
+base and writes the table. The resources rows carry no budgets and cannot
+fail a budget. The gate fails closed on missing evidence or a failed
+measurement: a declared process that exits nonzero, fewer than ten valid
+`/proc` samples or an early exit, missing or nonnumeric GNU time fields,
+or a reporter timeout.
+`metrics/resources-proof` measures head against the real PR base three
+times. The control run measures head as it is. The allocated run patches
 a real allocation into `results()` in head: head's DHAT `TotalBlocks` must
 exceed the control run's, and the table's `Allocations (blocks)` after cell
 must exceed the control run's after cell. The restored run checks

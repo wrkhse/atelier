@@ -625,8 +625,8 @@ terminate_tree() {
 # Sample a declared long-running process: launch COMMAND from TREE as a direct
 # child, read the five /proc values every 100 ms for at most 20 samples, then
 # tear it down from the parent. Each field's largest sample goes to OUT's
-# idle.json; a child that exits nonzero mid-sample, or no valid sample, fails
-# named.
+# idle.json; a child that exits before the window ends, or fewer than 10 valid
+# samples, fails named.
 sample_idle() {
   local tree=$1 out=$2 name=$3 command=$4
   local pid child_status=0 rss threads switches wchar fds sample
@@ -653,8 +653,11 @@ sample_idle() {
       wchar=$(awk '/^wchar:/ { print $2 }' "/proc/$pid/io" || true)
     fi
     if [[ -d "/proc/$pid/fd" ]]; then
-      fds=$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 -print 2>/dev/null \
-        | wc -l || true)
+      if ! fds=$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 -print \
+        2>/dev/null | wc -l); then
+        echo "metrics/resources: could not count open fds for $name" >&2
+        return 1
+      fi
       fds=${fds//[[:space:]]/}
     fi
     sample="$rss $threads $switches $wchar $fds"
@@ -670,13 +673,17 @@ sample_idle() {
 
   terminate_tree "$pid" "$name" || return 1
   child_status=$REAP_STATUS
-  if (( exited_early && child_status != 0 )); then
-    echo "metrics/resources: $name exited with status $child_status" \
-      "before the idle sample finished" >&2
+  if (( exited_early )); then
+    if (( child_status != 0 )); then
+      echo "metrics/resources: $name exited with status $child_status" \
+        "before the idle sample finished" >&2
+    else
+      echo "metrics/resources: $name exited before the idle sample finished" >&2
+    fi
     return 1
   fi
-  if (( valid == 0 )); then
-    echo "metrics/resources: no valid /proc sample of $name" >&2
+  if (( valid < 10 )); then
+    echo "metrics/resources: too few valid /proc samples of $name" >&2
     return 1
   fi
 
