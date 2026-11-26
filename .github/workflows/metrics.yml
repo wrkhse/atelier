@@ -253,7 +253,7 @@ jobs:
 
           # Requires the summary row for metric $1 to show field $2 of
           # resources.json before and of head-resources.json after, as $3:
-          # whole or decimal.
+          # whole or decimal, and leaves its cells in row_before and row_after.
           check_row() {
             local metric=$1 field=$2 kind=$3 base head cells before after
             base=$(jq -er ".$field" "$json") \
@@ -274,6 +274,8 @@ jobs:
 
             check_cell "$metric before" "$before" "$base" "$kind"
             check_cell "$metric after" "$after" "$head" "$kind"
+            row_before=$before
+            row_after=$after
           }
 
           # Requires the crate rows, in the table's order, to name each crate
@@ -337,12 +339,15 @@ jobs:
 
           # Requires every row of the run's table to show the measured values
           # of resources.json before and head-resources.json after, and reads
-          # head's TotalBlocks for the runs to compare.
+          # head's TotalBlocks and the Allocations (blocks) cells for the runs
+          # to compare.
           verify_table() {
             check_row "CPU time (s)" cpu_seconds decimal
             check_row "Peak memory (bytes)" peak_rss_bytes decimal
             check_row "Allocations (bytes)" total_bytes whole
             check_row "Allocations (blocks)" total_blocks whole
+            table_before=$row_before
+            table_after=$row_after
             check_row "Binary size (file bytes)" binary_file_size whole
             check_row "Binary size (text bytes)" text_section_size whole
             check_row "Packages" package_count whole
@@ -400,6 +405,9 @@ jobs:
           (( allocated > control )) \
             || fail "expected allocated head TotalBlocks $allocated" \
               "above control $control"
+          (( 10#$table_after > 10#$table_before )) \
+            || fail "expected the allocated table's Allocations (blocks)" \
+              "after cell $table_after above its before cell $table_before"
           # Run 3 must write its own evidence, not inherit run 2's.
           rm -rf -- "$reports"
 
