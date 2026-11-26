@@ -83,6 +83,18 @@ contained runner and writes the ten Callgrind `Ir` values; the CI job requires
 their spread to stay under 0.5%. This is why the performance gate sets
 `GUNGRAUN_ALLOW_ASLR`: address layout randomisation does not move the count.
 
+`metrics/resources` reports a before-and-after table of CPU time, peak
+memory, allocations, binary size and dependency facts for the base and head
+trees: hyperfine 2.0.0 times the runs, Gungraun 0.20.0 counts allocations with
+DHAT under the pinned Valgrind 3.24.0, cargo-bloat 0.12.1 sizes the binary and
+`cargo metadata` lists the dependencies. As with the performance gate, head
+is measured in its own contained job, with the base's harness and its own
+manifests, and its evidence is mounted read-only into the job that measures
+base and writes the table. The gate only reports: it never gives a failing
+verdict. `metrics/resources-proof` patches a real allocation into
+`results()` in head, and head's DHAT `TotalBlocks` must exceed base's; with
+the code restored, the two counts are equal.
+
 ## The container
 
 ```sh

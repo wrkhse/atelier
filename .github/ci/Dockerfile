@@ -3,7 +3,7 @@
 FROM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
 
 RUN apt-get update && apt-get install --yes --no-install-recommends \
-    ca-certificates curl git jq python3 valgrind xz-utils \
+    ca-certificates curl git jq libc6-dbg python3 valgrind xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # moon 2.6.5, checked against its published SHA-256 before it is installed.
@@ -21,6 +21,28 @@ RUN set -eu; \
     rm -rf moon "$MOON_ARCHIVE" "$MOON_ARCHIVE.sha256"; \
     moon --version
 
+# Valgrind 3.24.0, built from the official tarball after its SHA-256 is checked.
+# It lives in /opt/valgrind, whose bin comes first on PATH, over bookworm's 3.19.0.
+ARG VALGRIND_VERSION=3.24.0
+ARG VALGRIND_SHA256=71aee202bdef1ae73898ccf7e9c315134fa7db6c246063afc503aef702ec03bd
+RUN set -eu; \
+    apt-get update; \
+    apt-get install --yes --no-install-recommends build-essential bzip2 curl; \
+    rm -rf /var/lib/apt/lists/*; \
+    cd /tmp; \
+    archive="valgrind-${VALGRIND_VERSION}.tar.bz2"; \
+    curl --fail --silent --show-error --location --remote-name \
+        "https://sourceware.org/pub/valgrind/$archive"; \
+    echo "$VALGRIND_SHA256  $archive" | sha256sum -c -; \
+    tar -xjf "$archive"; \
+    cd "valgrind-${VALGRIND_VERSION}"; \
+    ./configure --prefix=/opt/valgrind --enable-only64bit; \
+    make -j4; \
+    make install; \
+    cd /tmp; \
+    rm -rf "valgrind-${VALGRIND_VERSION}" "$archive"; \
+    /opt/valgrind/bin/valgrind --version
+
 # Miri runs only on nightly; the miri gate alone uses this pinned one.
 RUN rustup component add clippy rustfmt rust-src \
     && rustup toolchain install nightly-2026-08-21 --profile minimal \
@@ -29,6 +51,8 @@ RUN rustup component add clippy rustfmt rust-src \
     && cargo install --locked kani-verifier --version 0.68.0 \
     && cargo install --locked rust-code-analysis-cli --version 0.0.25 \
     && cargo install --locked gungraun-runner --version 0.20.0 \
+    && cargo install --locked hyperfine --version 2.0.0 \
+    && cargo install --locked cargo-bloat --version 0.12.1 \
     && rm -rf "$CARGO_HOME/registry" "$CARGO_HOME/git" \
     && chmod -R a+w "$CARGO_HOME" "$RUSTUP_HOME"
 
@@ -36,15 +60,16 @@ RUN rustup component add clippy rustfmt rust-src \
 # /work-base holds the metrics gates' worktree of the base commit. The
 # performance gate measures head in its own container, which writes only
 # /head-out and keeps Gungraun's files in /head-gungraun; the base container
-# reads that output, read-only, at /head-in.
+# reads that output, read-only, at /head-in. /res-gungraun is the head
+# container's Gungraun store for the resources gate.
 RUN useradd --uid 10001 --create-home ci \
     && install -d -o ci -g ci /work /work-base /reports /head-in /head-out \
-       /head-gungraun
+       /head-gungraun /res-gungraun
 COPY entrypoint.sh /opt/ci/entrypoint.sh
 RUN chmod 0555 /opt/ci/entrypoint.sh
 
 ENV HOME=/home/ci \
-    PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/opt/valgrind/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
 USER 10001:10001
 # Only Kani's bundle is prebuilt, in the gate user's home. Miri's sysroot is
 # built by the gate task with its MIRIFLAGS.

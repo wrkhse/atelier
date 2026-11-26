@@ -49,10 +49,31 @@ loop and fails the instruction check; the unpatched code passes.
 
 ### Resources
 
-CPU time, peak memory, allocations, binary size and dependency facts appear in
-a table and never fail a check. hyperfine 2.0.0 reports wall time and peak RSS,
-Gungraun's DHAT tool reports allocations, cargo-bloat 0.12.1 breaks down binary
-size, and GNU time and `/proc` report the rest.
+Resources appear in a before-and-after table and never fail a check. Every
+row from #88 is in it, and each row names its method:
+
+- hyperfine 2.0.0 supplies CPU time (`time_user` plus `time_system`) and peak
+  memory (`memory_peak_resident`). Wall-time percentiles come from its raw
+  measurements: p50 is the median, and p99 is computed from them.
+- Gungraun 0.20.0's DHAT tool supplies allocation bytes and blocks
+  (`TotalBytes` and `TotalBlocks`), under a pinned Valgrind of at least 3.20
+  that the gate image installs from its official tarball with a verified
+  SHA-256.
+- cargo-bloat 0.12.1 with `--crates --message-format json` supplies file size
+  and an estimated per-crate `.text` breakdown; `cargo metadata` supplies
+  dependency facts.
+- `/proc/<pid>/status` gives `voluntary_ctxt_switches` over a fixed idle
+  window, and `/proc/<pid>/io` gives `wchar`; the rows carry those names.
+- Threads and open files come from `/proc` sampling at a fixed 100 ms
+  interval for a bounded duration, and their rows read "sampled peak, every
+  100 ms".
+
+Exact kernel counters could carry budgets in a later slice; none are enabled
+in this one. Sampled peaks are only reported, so they cannot flake.
+
+The work lands in two parts. The core table and the doubled-allocation proof
+come first; idle footprint, wake-ups, startup and build time, bytes written,
+open files and threads follow.
 
 Verification: doubled allocations appear in the table and do not fail.
 
