@@ -145,8 +145,8 @@ jobs:
           cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
 
   # A controlled A/B of the allocation patch. The trusted container measures
-  # the local proof base in both runs; only the untrusted head container sees
-  # the patch. The patched head's DHAT TotalBlocks must exceed the unpatched
+  # the real PR base in both runs; only the untrusted head container sees the
+  # patch. The patched head's DHAT TotalBlocks must exceed the unpatched
   # head's, so a later PR that changes the reporter's allocations still
   # passes. Both runs must exit 0.
   resources-proof:
@@ -179,6 +179,7 @@ jobs:
           CI_SUPPORT: ${{ github.workspace }}/.github/ci
           SOURCE: ${{ github.workspace }}
           GATES: metrics/resources
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           # Three runs of two containers each fit inside the 90-minute job.
           # The measured runs finish well under this; the cap keeps a runaway
           # from consuming the proof job.
@@ -213,7 +214,7 @@ jobs:
           measure() {
             local log="$RUNNER_TEMP/resources-proof-$run.log"
             status=0
-            BASE=$proof_base bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 \
+            BASE=$BASE bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 \
               || status=$?
             cat -- "$log"
             [[ "$status" == 0 ]] || fail "expected exit 0"
@@ -278,15 +279,13 @@ jobs:
             row_after=$after
           }
 
-          # Requires the summary row for metric $1 to show the idle note in
-          # both cells: idle_note of resources.json before and of
-          # head-resources.json after. The row holds text, not a number.
-          check_text_row() {
-            local metric=$1 base head cells before after
-            base=$(jq -er '.idle_note' "$json") \
-              || fail "no idle_note in resources.json"
-            head=$(jq -er '.idle_note' "$head_json") \
-              || fail "no idle_note in head-resources.json"
+          # Requires the summary row named $1 to show field $2 of
+          # resources.json before and of head-resources.json after. When a
+          # report's idle_note is non-empty the cell must equal that note;
+          # otherwise it must be the whole number in that report's field.
+          check_idle_row() {
+            local metric=$1 field=$2 cells before after
+            local base_note head_note base_value head_value
 
             cells=$(awk -F'|' -v metric="$metric" '
               function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
@@ -299,10 +298,29 @@ jobs:
             ' "$summary") || fail "no $metric row in the summary"
             IFS=$'\t' read -r before after <<< "$cells"
 
-            [[ "$before" == "$base" ]] \
-              || fail "$metric before cell '$before' is not note '$base'"
-            [[ "$after" == "$head" ]] \
-              || fail "$metric after cell '$after' is not note '$head'"
+            base_note=$(jq -er '.idle_note' "$json") \
+              || fail "no idle_note in resources.json"
+            head_note=$(jq -er '.idle_note' "$head_json") \
+              || fail "no idle_note in head-resources.json"
+
+            if [[ -n "$base_note" ]]; then
+              [[ "$before" == "$base_note" ]] \
+                || fail "$metric before cell '$before' is not note" \
+                  "'$base_note'"
+            else
+              base_value=$(jq -er ".$field" "$json") \
+                || fail "no $field in resources.json"
+              check_cell "$metric before" "$before" "$base_value" whole
+            fi
+
+            if [[ -n "$head_note" ]]; then
+              [[ "$after" == "$head_note" ]] \
+                || fail "$metric after cell '$after' is not note '$head_note'"
+            else
+              head_value=$(jq -er ".$field" "$head_json") \
+                || fail "no $field in head-resources.json"
+              check_cell "$metric after" "$after" "$head_value" whole
+            fi
           }
 
           # Requires the crate rows, in the table's order, to name each crate
@@ -369,7 +387,6 @@ jobs:
           # head's TotalBlocks and the Allocations (blocks) after cell for the
           # runs to compare.
           verify_table() {
-            local idle_note
             check_row "CPU time (s)" cpu_seconds decimal
             check_row "Peak memory (bytes)" peak_rss_bytes decimal
             check_row "Allocations (bytes)" total_bytes whole
@@ -385,23 +402,13 @@ jobs:
             check_row "Voluntary context switches" gnu_voluntary_ctxt_switches whole
             check_row "Maximum resident set size (kbytes)" gnu_max_rss_kib whole
             check_row "File system outputs" gnu_fs_outputs whole
-            idle_note=$(jq -er '.idle_note' "$head_json") \
-              || fail "no idle_note in head-resources.json"
-            if [[ -z "$idle_note" ]]; then
-              check_row "Idle footprint (KiB)" idle_footprint_kib whole
-              check_row "Voluntary context switches over idle window" \
-                voluntary_ctxt_switches whole
-              check_row "Bytes written (wchar)" wchar_bytes whole
-              check_row "Sampled peak threads, every 100 ms" \
-                sampled_peak_threads whole
-              check_row "Sampled peak FDs, every 100 ms" sampled_peak_fds whole
-            else
-              check_text_row "Idle footprint (KiB)"
-              check_text_row "Voluntary context switches over idle window"
-              check_text_row "Bytes written (wchar)"
-              check_text_row "Sampled peak threads, every 100 ms"
-              check_text_row "Sampled peak FDs, every 100 ms"
-            fi
+            check_idle_row "Idle footprint (KiB)" idle_footprint_kib
+            check_idle_row "Voluntary context switches over idle window" \
+              voluntary_ctxt_switches
+            check_idle_row "Bytes written (wchar)" wchar_bytes
+            check_idle_row "Sampled peak threads, every 100 ms" \
+              sampled_peak_threads
+            check_idle_row "Sampled peak FDs, every 100 ms" sampled_peak_fds
             check_crates
             head_blocks=$(jq -er '.total_blocks' "$head_json") \
               || fail "no total_blocks in head-resources.json"
@@ -452,10 +459,10 @@ jobs:
             done
           }
 
-          # Run 1, control: the unpatched head against a local proof commit.
-          # The fixture config declares a long-running process; the base
-          # worktree created from that commit has the same declaration as
-          # head, so all three runs sample the five idle fields from /proc.
+          # Run 1, control: the unpatched head against the real PR base. The
+          # fixture config declares a long-running process for head, so the
+          # five idle fields hold sampled numbers after; the base has no
+          # declaration and renders the not-applicable note before.
           run=control
           fixture_dir="$SOURCE/tests/fixtures/metrics-idle"
           fixture_config="$fixture_dir/.moon/config/metrics.toml"
@@ -473,22 +480,6 @@ jobs:
           trap 'cp -- "$original_config" "$SOURCE/$config"' EXIT
           cp -- "$fixture_config" "$SOURCE/$config" \
             || fail "cannot copy the fixture config into $SOURCE"
-
-          # Commit the fixture config onto a local child of HEAD so the base
-          # worktree declares the same long-running process as head.
-          index="$RUNNER_TEMP/resources-proof.index"
-          rm -f -- "$index"
-          GIT_INDEX_FILE=$index git -C "$SOURCE" read-tree HEAD \
-            || fail "cannot read HEAD into the proof index"
-          GIT_INDEX_FILE=$index git -C "$SOURCE" update-index -- "$config" \
-            || fail "cannot stage $config in the proof index"
-          tree=$(GIT_INDEX_FILE=$index git -C "$SOURCE" write-tree) \
-            || fail "cannot write the proof tree"
-          proof_base=$(
-            git -C "$SOURCE" -c user.name=proof \
-              -c user.email=proof@example.invalid \
-              commit-tree "$tree" -p HEAD -m "proof: fixture idle config"
-          ) || fail "cannot create the proof base commit"
 
           measure
           show Control
@@ -564,7 +555,7 @@ jobs:
           path.write_text(text[: end + 1] + "\n".join(lines) + "\n" + text[end + 1 :])
           PY
 
-          # Run 2, allocated: the patched head against the same proof base.
+          # Run 2, allocated: the patched head against the same real base.
           measure
           show Allocated
           verify_table
@@ -582,7 +573,7 @@ jobs:
           rm -rf -- "$reports"
 
           # Run 3, restored: head's own report.rs again, against the same
-          # proof base; head's count must return to the control run's.
+          # real base; head's count must return to the control run's.
           run=restored
           git -C "$SOURCE" checkout -- reporter/src/report.rs \
             || fail "cannot restore reporter/src/report.rs"

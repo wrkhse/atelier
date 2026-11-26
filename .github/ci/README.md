@@ -100,14 +100,17 @@ those five rows. As with the performance gate,
 head is measured in its own contained job, with the base's harness and its own
 manifests, and its evidence is mounted read-only into the job that measures
 base and writes the table. The gate only reports: it never gives a failing
-verdict. `metrics/resources-proof` measures head against the PR base three
-times. The control run measures head as it is. The allocated run patches a
-real allocation into `results()` in head: head's DHAT `TotalBlocks` must
+verdict. `metrics/resources-proof` measures head against the real PR base
+three times. The control run measures head as it is. The allocated run patches
+a real allocation into `results()` in head: head's DHAT `TotalBlocks` must
 exceed the control run's, and the table's `Allocations (blocks)` after cell
 must exceed the control run's after cell. The restored run checks
 `report.rs` out again, and head's `TotalBlocks` must return to the control
-run's count. In every run, every rendered row is checked against the matching
-field in that run's `resources.json` and `head-resources.json`, with a
+run's count. The proof copies the idle fixture config into head's working tree
+and restores the original on exit, so a base without a `long_running`
+declaration renders the not-applicable note before while head supplies numeric
+sampled values after. In every run, every rendered row is checked against the
+matching field in that run's `resources.json` and `head-resources.json`, with a
 tolerance for rounded decimal values.
 
 ## The container

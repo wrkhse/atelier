@@ -756,7 +756,7 @@ JSON
     > "$out/reporter.out" &
   reporter_pid=$!
   reporter_running=1
-  for ((tick = 0; tick < 20; tick++)); do
+  for ((tick = 0; tick < 300; tick++)); do
     if ! kill -0 "$reporter_pid" 2>/dev/null; then
       reporter_running=0
       break

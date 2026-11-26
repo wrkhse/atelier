@@ -74,7 +74,10 @@ names its method:
   `tests/fixtures/metrics-idle/.moon/config/metrics.toml` declares a
   long-running process for the proof.
 
-No row carries a budget; all are reported only, so none can flake.
+No row carries a budget; all are reported only. The gate fails closed on
+missing evidence or a failed measurement; it never reports a wrong value. A
+broken measurement is an error, not a budget failure. The timed and sampled
+rows can vary, and no budget turns that variation into a verdict.
 
 Verification: doubled allocations appear in the table and do not fail.
 
