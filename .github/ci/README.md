@@ -94,8 +94,7 @@ base and writes the table. The gate only reports: it never gives a failing
 verdict. `metrics/resources-proof` measures head against the PR base three
 times. The control run measures head as it is. The allocated run patches a
 real allocation into `results()` in head: head's DHAT `TotalBlocks` must
-exceed the control run's, and the table's after cell must exceed its before
-cell. The restored run checks `report.rs` out again, and head's
+exceed the control run's. The restored run checks `report.rs` out again, and head's
 `TotalBlocks` must return to the control run's count. In every run, the
 table's before and after cells must equal the `TotalBlocks` in that run's
 `resources.json` and `head-resources.json`.
