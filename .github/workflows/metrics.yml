@@ -653,14 +653,14 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           PROOF_MODE: ${{ matrix.mode }}
         run: |
-          # sample_idle runs the declared command through `exec $2`, which
-          # word-splits it. Quoted words break apart, so the script the
-          # interpreter receives must be a single token.
+          # sample_idle runs the declared command through `exec bash -c "$2"`,
+          # so an inner shell parses it. Quote the Python expression so that
+          # shell passes it to Python as a single argument.
           if [[ "$PROOF_MODE" == nonzero ]]; then
-            command='python3 -c exit(7)'
+            command="python3 -c 'exit(7)'"
             expected='exited with status 7 before the idle sample finished'
           else
-            command='python3 -c exit(0)'
+            command="python3 -c 'exit(0)'"
             expected='exited before the idle sample finished'
           fi
 
