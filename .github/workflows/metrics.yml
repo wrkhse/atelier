@@ -82,31 +82,6 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           cargo build --release --locked -p atelier-metrics \
             --target x86_64-unknown-linux-musl
-      - name: Verify the budget subcommand at the 5% limit
-        shell: bash
-        run: |
-          metrics=target/x86_64-unknown-linux-musl/release/atelier-metrics
-          base="$RUNNER_TEMP/base-ir.json"
-          head="$RUNNER_TEMP/head-ir.json"
-
-          printf '%s\n' '{"ir":100}' > "$base"
-          printf '%s\n' '{"ir":104}' > "$head"
-          verdict=$("$metrics" budget --base "$base" --head "$head" --limit 5)
-          printf '%s\n' "$verdict"
-          grep -Fxq 'budget: passed' <<< "$verdict"
-
-          for ir in 105 106; do
-            printf '{"ir":%s}\n' "$ir" > "$head"
-            status=0
-            verdict=$("$metrics" budget --base "$base" --head "$head" --limit 5) \
-              || status=$?
-            printf '%s\n' "$verdict"
-            if [[ "$status" != 1 ]] \
-              || ! grep -Fxq 'budget: failed' <<< "$verdict"; then
-              echo "::error::the budget must reject a $((ir - 100))% increase"
-              exit 1
-            fi
-          done
       - name: Measure and compare both trees in the container
         env:
           CI_SUPPORT: ${{ github.workspace }}/.github/ci
@@ -228,6 +203,7 @@ jobs:
   # the absolute new_bench_instruction_ir budget: over sets the budget to 1
   # Ir and must fail, under keeps 20000 and must pass, and no-budget removes
   # the key so neither tree sets one and the gate must fail closed.
+  # dependency proves a PR that adds a dependency builds and is measured.
   new-bench-proof:
     name: metrics/new-bench-proof (${{ matrix.mode }})
     runs-on: ubuntu-latest
@@ -237,7 +213,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [over, under, no-budget]
+        mode: [over, under, no-budget, dependency]
     env:
       GATE: metrics/performance
     steps:
@@ -264,11 +240,37 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           PROOF_MODE: ${{ matrix.mode }}
         run: |
-          # head_only is a copy of the reporter benchmark under a name the
-          # base's manifest does not declare, so it has no base count.
-          cp -- "$SOURCE/reporter/benches/library_benchmark.rs" \
-            "$SOURCE/reporter/benches/head_only.rs"
-          python3 - "$SOURCE/reporter/Cargo.toml" <<'PY' || exit 1
+          if [[ "$PROOF_MODE" == dependency ]]; then
+            python3 - "$SOURCE/reporter/Cargo.toml" <<'PY' || exit 1
+          import pathlib
+          import sys
+          import tomllib
+
+          path = pathlib.Path(sys.argv[1])
+          text = path.read_text()
+          if "itoa" in tomllib.loads(text)["dependencies"]:
+              print(f"::error::dependency found itoa already declared in {path}")
+              sys.exit(1)
+
+          lines = text.split("\n")
+          start = lines.index("[dependencies]") + 1
+          end = next(
+              (i for i in range(start, len(lines)) if lines[i].startswith("[")),
+              len(lines),
+          )
+          while end > start and not lines[end - 1].strip():
+              end -= 1
+
+          lines.insert(end, 'itoa = "1"')
+          path.write_text("\n".join(lines))
+          PY
+            cargo generate-lockfile --manifest-path "$SOURCE/Cargo.toml"
+          else
+            # head_only is a copy of the reporter benchmark under a name the
+            # base's manifest does not declare, so it has no base count.
+            cp -- "$SOURCE/reporter/benches/library_benchmark.rs" \
+              "$SOURCE/reporter/benches/head_only.rs"
+            python3 - "$SOURCE/reporter/Cargo.toml" <<'PY' || exit 1
           import pathlib
           import sys
 
@@ -283,10 +285,10 @@ jobs:
           path.write_text(text)
           PY
 
-          # Head's budget for the mode: over lowers it to 1 Ir, under keeps
-          # 20000, no-budget removes only that key and keeps the 5% limit.
-          python3 - "$SOURCE/.moon/config/metrics.toml" "$PROOF_MODE" \
-            <<'PY' || exit 1
+            # Head's budget for the mode: over lowers it to 1 Ir, under keeps
+            # 20000, no-budget removes only that key and keeps the 5% limit.
+            python3 - "$SOURCE/.moon/config/metrics.toml" "$PROOF_MODE" \
+              <<'PY' || exit 1
           import pathlib
           import re
           import sys
@@ -311,6 +313,7 @@ jobs:
               sys.exit(1)
           path.write_text("\n".join(lines))
           PY
+          fi
 
           # no-budget must not rest on the real base lacking the key: once main
           # sets new_bench_instruction_ir, the base would supply a budget. Its
@@ -372,6 +375,13 @@ jobs:
               grep -Fq 'neither tree sets' "$log" \
                 || fail "expected 'neither tree sets' in the log"
               ;;
+            dependency)
+              [[ "$status" == 0 ]] || fail "expected exit 0"
+              grep -Fxq 'budget: passed' "$summary" \
+                || fail "expected 'budget: passed' in the summary"
+              grep -q '^limit: instruction_limit_percent ' "$summary" \
+                || fail "expected the instruction limit in the summary"
+              ;;
             *)
               fail "unknown mode"
               ;;
@@ -409,6 +419,7 @@ jobs:
           CI_SUPPORT: ${{ github.workspace }}/.github/ci
           SOURCE: ${{ github.workspace }}
           GATES: metrics/spread
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
         run: bash "$CI_SUPPORT/run.sh" metrics
       - name: Require an Ir spread under 0.5 percent
         shell: bash

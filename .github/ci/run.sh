@@ -182,6 +182,12 @@ if [[ "$MODE" == metrics && "$GATE" == metrics/performance ]]; then
   docker cp "atelier-perf-head-$id:/head-out/." "$headout/" >/dev/null 2>&1 \
     || true
   find "$headout" -mindepth 1 ! -type f ! -type d -delete
+  if ! find "$headout" -type f -printf '%s\n' \
+    | awk 'NR > 32 || $1 > 16777216 { exit 1 }'; then
+    echo "metrics/performance: head output must have at most 32 regular files" \
+      "of at most 16 MiB each" >&2
+    exit 1
+  fi
 
   GATE_OVERRIDE=metrics/performance create "atelier-perf-base-$id" \
     "$network" \

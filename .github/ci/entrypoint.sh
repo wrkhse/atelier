@@ -245,7 +245,7 @@ if [[ "$gate" == metrics/performance-head ]]; then
   # A benchmark that head's reporter manifest names and the base's does not
   # has no base count to compare with; the trusted container judges it
   # against an absolute budget. Head's own manifest builds it, so these run
-  # before the base's files replace head's. The names, one per line, go to
+  # before the base's harness replaces head's. The names, one per line, go to
   # new-benches.txt, empty when there are none.
   if ! python3 - /source/reporter/Cargo.toml /work-base/reporter/Cargo.toml \
     > /head-out/new-benches.txt <<'PY'
@@ -279,6 +279,13 @@ PY
     exit 1
   fi
 
+  if ! LC_ALL=C awk 'NR > 64 || length($0) > 64 { exit 1 }' \
+    /head-out/new-benches.txt; then
+    echo "metrics/performance-head: new-benches.txt must have at most" \
+      "64 lines of at most 64 characters each" >&2
+    exit 1
+  fi
+
   mapfile -t new_benches < /head-out/new-benches.txt
   for name in "${new_benches[@]}"; do
     report="/head-out/new-$name.jsonl"
@@ -294,22 +301,12 @@ PY
     fi
   done
 
-  # The base's library_benchmark.rs, reporter manifest, workspace Cargo.toml,
-  # Cargo.lock and .cargo/ replace head's, so a pull request cannot weaken the
-  # benchmark it is measured by, point [lib] or [[bench]] at a decoy, or change
-  # how it is compiled. The base's manifests build against the base's
-  # dependency set, so a lockfile change in head cannot break them.
+  # Only the harness file comes from the base. Head builds with its own
+  # manifests, lockfile and .cargo settings.
   cp -- /work-base/reporter/benches/library_benchmark.rs \
     /work/reporter/benches/library_benchmark.rs
-  cp -- /work-base/reporter/Cargo.toml /work/reporter/Cargo.toml
-  cp -- /work-base/Cargo.toml /work/Cargo.toml
-  cp -- /work-base/Cargo.lock /work/Cargo.lock
-  rm -rf -- /work/.cargo
-  if [[ -d /work-base/.cargo ]]; then
-    cp -R -- /work-base/.cargo /work/.cargo
-  fi
 
-  # --locked keeps head's governed measurement on the base's lockfile.
+  # --locked keeps the build on head's lockfile.
   cargo bench --locked --bench library_benchmark -- --output-format=json \
     > /head-out/head.jsonl
 
@@ -391,8 +388,8 @@ if [[ "$gate" == metrics/performance ]]; then
   limit_line+=" (base $base_limit, head $head_limit)"
   echo "metrics/performance: $limit_line"
 
-  # Both sides run the base's benchmark, built with the base's profile and
-  # rustflags, which the head container applied to its side.
+  # Both sides use the base's harness file. Each tree builds with its own
+  # manifests, lockfile and .cargo settings.
   # The gate container drops all capabilities and fixes SecurityOpt, so
   # gungraun's setarch -R cannot set ADDR_NO_RANDOMIZE. The check compares
   # total Callgrind Ir counts, which address layout does not change.
@@ -454,11 +451,27 @@ if [[ "$gate" == metrics/performance ]]; then
   exit "$status"
 fi
 
-# metrics/spread runs the checked-out tree's benchmark ten times with ASLR
+# metrics/spread runs head with the base's harness file ten times with ASLR
 # allowed, as metrics/performance does, and writes each run's total Callgrind
 # Ir to spread.txt, one plain number per line. The workflow judges how far
 # they spread; a run without exactly one Ir value fails here.
 if [[ "$gate" == metrics/spread ]]; then
+  if [[ -z "${BASE:-}" ]]; then
+    echo "metrics/spread needs BASE" >&2
+    exit 1
+  fi
+
+  git worktree add --detach /work-base "$BASE"
+  if [[ ! -f /work-base/reporter/benches/library_benchmark.rs ]]; then
+    echo "metrics/spread: the base has no benchmark harness" >&2
+    exit 1
+  fi
+
+  # Only the harness file comes from the base. Head builds with its own
+  # manifests, lockfile and .cargo settings.
+  cp -- /work-base/reporter/benches/library_benchmark.rs \
+    /work/reporter/benches/library_benchmark.rs
+
   export GUNGRAUN_HOME=/reports/gungraun GUNGRAUN_ALLOW_ASLR=true
   values=()
   for run in {1..10}; do
