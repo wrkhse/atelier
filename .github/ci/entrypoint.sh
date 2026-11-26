@@ -621,18 +621,17 @@ PY
 # Terminate a background process and the children the kernel lists for it:
 # TERM the children then the parent, poll up to 20 x 0.1 s, KILL any that
 # remain, and wait. REAP_STATUS holds wait's status. A PID that is no longer
-# a live job is signalled only when /proc still shows EXPECTED's command line,
-# since its number may have been reused. Every path polls and fails named when
-# the child cannot be reaped.
+# a live job of this shell is never signalled, since its number may have been
+# reused. Every path polls and fails named when the child cannot be reaped.
 terminate_tree() {
-  local pid=$1 label=$2 expected=$3 children child i running=1
+  local pid=$1 label=$2 children child i running=1
   local -a live_jobs=()
-  local live cmdline='' signal=0
+  local live signal=0
   local -i status=0
 
   # A PID that is no longer a live job of this shell may have been reaped and
-  # its number reused. Signal only a command line that identifies our child;
-  # leave a stranger with a reused PID alone.
+  # its number reused. Signal only a live job of this shell; leave a stranger
+  # with a reused PID alone.
   mapfile -t live_jobs < <(jobs -pr)
   for live in "${live_jobs[@]}"; do
     if [[ "$live" == "$pid" ]]; then
@@ -640,12 +639,6 @@ terminate_tree() {
       break
     fi
   done
-  if (( ! signal )) && [[ -r "/proc/$pid/cmdline" ]]; then
-    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline") || cmdline=''
-    if [[ "$cmdline" == *"$expected"* ]]; then
-      signal=1
-    fi
-  fi
 
   if (( signal )); then
     if [[ -r "/proc/$pid/task/$pid/children" ]]; then
@@ -740,7 +733,7 @@ sample_idle() {
 
   # The tree path is a positional parameter, so spaces and shell characters
   # in it stay literal; the command keeps its own arguments from config.
-  bash -c 'cd "$1" && exec $2' _ "$tree" "$command" > "$out/idle.out" &
+  bash -c 'cd "$1" && exec bash -c "$2"' _ "$tree" "$command" > "$out/idle.out" &
   pid=$!
 
   # The switch counter is cumulative from process start, so bracket the
@@ -752,7 +745,7 @@ sample_idle() {
   if [[ ! "$switches_start" =~ ^[0-9]+$ ]]; then
     echo "metrics/resources: could not read voluntary_ctxt_switches at the" \
       "start of the idle window for $name" >&2
-    terminate_tree "$pid" "$name" "$command" || return 1
+    terminate_tree "$pid" "$name" || return 1
     return 1
   fi
 
@@ -793,7 +786,7 @@ sample_idle() {
       "/proc/$pid/status" || true)
   fi
 
-  terminate_tree "$pid" "$name" "$command" || return 1
+  terminate_tree "$pid" "$name" || return 1
   child_status=$REAP_STATUS
   if (( exited_early )); then
     if (( child_status != 0 )); then
@@ -836,7 +829,7 @@ sample_idle() {
 run_bounded() {
   local ticks=$1 label=$2
   shift 2
-  local expected="$*" pid tick running=1
+  local pid tick running=1
 
   "$@" &
   pid=$!
@@ -848,7 +841,7 @@ run_bounded() {
     sleep 0.1
   done
   if (( running )); then
-    terminate_tree "$pid" "$label" "$expected" || return 1
+    terminate_tree "$pid" "$label" || return 1
     echo "metrics/resources: $label timed out in $PWD" >&2
     return 1
   fi

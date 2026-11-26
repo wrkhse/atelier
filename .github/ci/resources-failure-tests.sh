@@ -17,7 +17,7 @@ trap 'rm -rf -- "$tmp"' EXIT
 # function's own brace ends a block.
 awk '
   /^(gnu_time_field|switch_delta|terminate_tree)\(\) \{/ { inside = 1 }
-  /^(validate_samples|run_bounded)\(\) \{/ { inside = 1 }
+  /^(gnu_time_elapsed_ms|validate_samples|run_bounded)\(\) \{/ { inside = 1 }
   inside { print }
   inside && /^}/ { inside = 0 }
 ' "$entrypoint" > "$tmp/helpers.sh"
@@ -77,6 +77,22 @@ output=$(gnu_time_field 'Command being timed: "true"' \
   'Voluntary context switches' 2>&1) || status=$?
 expect_named_failure 'case B: missing GNU time field' \
   'metrics/resources: missing or nonnumeric Voluntary context switches in GNU time' \
+  "$status" "$output"
+
+# Case B2: GNU time's m:ss elapsed field is converted to whole milliseconds.
+printf 'Elapsed (wall clock) time (m:ss): 1:23.45\n' > "$tmp/gnu-time.txt"
+output=$(gnu_time_elapsed_ms "$tmp/gnu-time.txt") || fail "case B2: $output"
+if [[ "$output" != 83450 ]]; then
+  fail "case B2: expected 83450 ms, got $output"
+fi
+printf 'ok: case B2: GNU time elapsed m:ss to ms\n'
+
+# Case B3: GNU time output without an elapsed field fails, naming the field.
+printf 'Command being timed: "true"\n' > "$tmp/gnu-time.txt"
+status=0
+output=$(gnu_time_elapsed_ms "$tmp/gnu-time.txt" 2>&1) || status=$?
+expect_named_failure 'case B3: missing GNU time elapsed field' \
+  'metrics/resources: missing or malformed Elapsed (wall clock) time in GNU time' \
   "$status" "$output"
 
 # Case C: two ticks give the child no chance to finish; the parent must tear
