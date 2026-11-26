@@ -549,7 +549,7 @@ JSON
   fi
 
   if ! hyperfine --warmup 2 --runs 10 --export-json "$out/hyperfine.json" \
-    --metrics time_wall_clock,memory_peak_resident \
+    --metrics time_wall_clock,time_user,time_system,memory_peak_resident \
     "target/release/atelier-reporter --report $fixture --gate rust/fmt"; then
     echo "metrics/resources: hyperfine could not time the reporter in $tree" >&2
     exit 1

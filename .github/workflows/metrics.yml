@@ -181,12 +181,18 @@ jobs:
           CI_SUPPORT: ${{ github.workspace }}/.github/ci
           SOURCE: ${{ github.workspace }}
           GATES: metrics/resources
-          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           PROOF_MODE: ${{ matrix.mode }}
         run: |
+          # A controlled A/B of the patch, not a PR-versus-base resource
+          # comparison: both modes take the checkout's own commit as BASE, so
+          # the base tree is the pristine checkout. Only allocated's
+          # working-tree patch differs; restored compares the tree to itself.
+          proof_base=$(git -C "$SOURCE" rev-parse HEAD) \
+            || { echo "::error::$PROOF_MODE: cannot read HEAD"; exit 1; }
+
           if [[ "$PROOF_MODE" == allocated ]]; then
             # Patches head's working tree only; the base tree comes from git
-            # at BASE, unpatched.
+            # at the checkout's commit, unpatched.
             python3 - "$SOURCE/reporter/src/report.rs" <<'PY' || exit 1
           import pathlib
           import sys
@@ -217,7 +223,8 @@ jobs:
           reports="$RUNNER_TEMP/atelier-reports/container"
           summary="$reports/summary.txt"
           status=0
-          bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 || status=$?
+          BASE=$proof_base bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 \
+            || status=$?
           cat -- "$log"
 
           fail() {
@@ -234,6 +241,18 @@ jobs:
             || fail "no total_blocks in resources.json"
           head=$(jq -er '.total_blocks' "$reports/head-resources.json") \
             || fail "no total_blocks in head-resources.json"
+
+          # The rendered table must agree: its Allocations (blocks) row holds
+          # the before and after cells in fields 3 and 4.
+          row=$(grep -m1 '^| Allocations (blocks)' "$summary") \
+            || fail "no Allocations (blocks) row in the summary"
+          IFS='|' read -r _ _ table_base table_head _ <<< "$row"
+          table_base=$(xargs <<< "$table_base")
+          table_head=$(xargs <<< "$table_head")
+          [[ "$table_base" =~ ^[0-9]+$ ]] \
+            || fail "table before cell '$table_base' is not a whole number"
+          [[ "$table_head" =~ ^[0-9]+$ ]] \
+            || fail "table after cell '$table_head' is not a whole number"
           {
             echo "### metrics/resources-proof ($PROOF_MODE)"
             echo
@@ -246,10 +265,16 @@ jobs:
             allocated)
               (( head > base )) \
                 || fail "expected head TotalBlocks $head above base $base"
+              (( table_head > table_base )) \
+                || fail "expected table after $table_head" \
+                  "above before $table_base"
               ;;
             restored)
               (( head == base )) \
                 || fail "expected head TotalBlocks $head equal to base $base"
+              (( table_head == table_base )) \
+                || fail "expected table after $table_head" \
+                  "equal to before $table_base"
               ;;
             *)
               fail "unknown mode"

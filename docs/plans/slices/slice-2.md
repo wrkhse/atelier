@@ -49,12 +49,14 @@ loop and fails the instruction check; the unpatched code passes.
 
 ### Resources
 
-Resources appear in a before-and-after table and never fail a check. Every
-row from #88 is in it, and each row names its method:
+Resources appear in a before-and-after table and never fail a check. The
+core rows land in this part; the idle footprint, wake-ups, startup and build
+time, bytes written, open files and threads follow in the next part. Each row
+names its method:
 
 - hyperfine 2.0.0 supplies CPU time (`time_user` plus `time_system`) and peak
-  memory (`memory_peak_resident`). Wall-time percentiles come from its raw
-  measurements: p50 is the median, and p99 is computed from them.
+  memory (`memory_peak_resident`). Wall-time percentiles are planned; this
+  slice computes no p99.
 - Gungraun 0.20.0's DHAT tool supplies allocation bytes and blocks
   (`TotalBytes` and `TotalBlocks`), under a pinned Valgrind of at least 3.20
   that the gate image installs from its official tarball with a verified
