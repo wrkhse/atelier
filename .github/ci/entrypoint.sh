@@ -515,85 +515,26 @@ if [[ "$gate" == metrics/spread ]]; then
   exit
 fi
 
-# A /proc counter must be a nonnegative integer; otherwise fail, named. The
-# callers check that the process exists before reading it.
-require_proc_number() {
-  local name=$1 value=$2
+# A GNU time field must be a nonnegative integer; otherwise fail, named. The
+# label is matched as a literal string in GNU time's verbose output.
+gnu_time_value() {
+  local file=$1 label=$2 value
 
+  value=$(awk -v label="$label" '
+    {
+      pos = index($0, label ":")
+      if (pos == 0) next
+      value = substr($0, pos + length(label) + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      print value
+      exit
+    }
+  ' "$file") || value=
   if [[ ! "$value" =~ ^[0-9]+$ ]]; then
-    echo "metrics/resources: missing or nonnumeric $name in /proc" >&2
+    echo "metrics/resources: missing or nonnumeric $label in GNU time" >&2
     exit 1
   fi
-}
-
-# Sample the reporter worker's /proc entries over its idle window: peak VmRSS,
-# Threads and fd count, and the last exact voluntary_ctxt_switches and wchar.
-# The worker is a background child under a three-second hard timeout; the
-# sampler takes at most twenty samples at 100 ms, reading /proc only while the
-# worker exists. The five values go to $out/proc.json as JSON.
-sample_reporter_proc() {
-  local out=$1 fixture=$2
-  local proc_file=$out/proc.json
-  local worker='' samples=0
-  local status='' io='' rss='' threads='' vctxt='' wchar='' fds=''
-  local peak_rss=0 peak_threads=0 peak_fds=0
-
-  timeout 3 bash -c "
-    fixture=\$1
-    while :; do
-      target/release/atelier-reporter --report \"\$fixture\" --gate rust/fmt \\
-        > /dev/null 2>&1 || true
-    done
-  " reporter-worker "$fixture" &
-  worker=$!
-
-  while (( samples < 20 )); do
-    if [[ ! -d "/proc/$worker" ]]; then
-      break
-    fi
-    status=/proc/$worker/status
-    io=/proc/$worker/io
-    rss=$(awk '/^VmRSS:/ { print $2; exit }' "$status") || rss=
-    threads=$(awk '/^Threads:/ { print $2; exit }' "$status") || threads=
-    vctxt=$(awk '/^voluntary_ctxt_switches:/ { print $2; exit }' \
-      "$status") || vctxt=
-    wchar=$(awk '/^wchar:/ { print $2; exit }' "$io") || wchar=
-    fds=$(find "/proc/$worker/fd" -mindepth 1 -maxdepth 1 -printf . \
-      2>/dev/null | wc -c) || fds=
-
-    require_proc_number VmRSS "$rss"
-    require_proc_number Threads "$threads"
-    require_proc_number voluntary_ctxt_switches "$vctxt"
-    require_proc_number wchar "$wchar"
-    require_proc_number fd_count "$fds"
-
-    if (( rss > peak_rss )); then
-      peak_rss=$rss
-    fi
-    if (( threads > peak_threads )); then
-      peak_threads=$threads
-    fi
-    if (( fds > peak_fds )); then
-      peak_fds=$fds
-    fi
-
-    samples=$((samples + 1))
-    sleep 0.1
-  done
-
-  kill "$worker" 2>/dev/null || true
-  wait "$worker" 2>/dev/null || true
-
-  if (( samples == 0 )); then
-    echo "metrics/resources: no /proc samples of the reporter worker" >&2
-    exit 1
-  fi
-
-  printf '{"idle_footprint_kib":%s,"voluntary_ctxt_switches":%s,' \
-    "$peak_rss" "$vctxt" > "$proc_file"
-  printf '"wchar_bytes":%s,"sampled_peak_threads":%s,' \
-    "$wchar" "$peak_threads" >> "$proc_file"
-  printf '"sampled_peak_fds":%s}\n' "$peak_fds" >> "$proc_file"
+  printf '%s\n' "$value"
 }
 
 # The resources of one tree, measured from inside it with its own manifests,
@@ -641,6 +582,46 @@ JSON
     exit 1
   fi
 
+  # The reporter exits in milliseconds, so an idle-window sample does not
+  # apply to it. Time one direct run with GNU time instead: its accounting of
+  # the direct child gives the context switches, peak RSS and file outputs.
+  start_ns=$(date +%s%N)
+  status=0
+  /usr/bin/time -v -o "$out/gnu-time.txt" \
+    target/release/atelier-reporter --report "$fixture" --gate rust/fmt \
+    > "$out/reporter.out" || status=$?
+  end_ns=$(date +%s%N)
+  if (( status != 0 )); then
+    echo "metrics/resources: reporter exited with status $status in $tree" >&2
+    exit 1
+  fi
+  exit_ms=$(awk -v start="$start_ns" -v end="$end_ns" \
+    'BEGIN { printf "%.0f", (end - start) / 1000000 }')
+
+  gnu_voluntary_ctxt_switches=$(gnu_time_value "$out/gnu-time.txt" \
+    'Voluntary context switches')
+  gnu_max_rss_kib=$(gnu_time_value "$out/gnu-time.txt" \
+    'Maximum resident set size (kbytes)')
+  gnu_fs_outputs=$(gnu_time_value "$out/gnu-time.txt" \
+    'File system outputs')
+
+  if ! jq -n --argjson exit_ms "$exit_ms" \
+    --argjson gnu_voluntary_ctxt_switches "$gnu_voluntary_ctxt_switches" \
+    --argjson gnu_max_rss_kib "$gnu_max_rss_kib" \
+    --argjson gnu_fs_outputs "$gnu_fs_outputs" \
+    --arg idle_note "not applicable: exits in $exit_ms ms" '
+    {
+      exit_ms: $exit_ms,
+      gnu_voluntary_ctxt_switches: $gnu_voluntary_ctxt_switches,
+      gnu_max_rss_kib: $gnu_max_rss_kib,
+      gnu_fs_outputs: $gnu_fs_outputs,
+      idle_note: $idle_note
+    }
+  ' > "$out/timing.json"; then
+    echo "metrics/resources: could not write the timing report in $tree" >&2
+    exit 1
+  fi
+
   if ! cargo bench --locked --bench library_benchmark \
     -- --tools=dhat --output-format=json > "$out/dhat.jsonl"; then
     echo "metrics/resources: the DHAT benchmark failed in $tree" >&2
@@ -661,12 +642,10 @@ JSON
     exit 1
   fi
 
-  sample_reporter_proc "$out" "$fixture"
-
   if ! jq -n --slurpfile hyperfine "$out/hyperfine.json" \
     --slurpfile dhat "$out/dhat.jsonl" --slurpfile bloat "$out/bloat.json" \
     --slurpfile metadata "$out/metadata.json" \
-    --slurpfile proc "$out/proc.json" \
+    --slurpfile timing "$out/timing.json" \
     --argjson build_seconds "$build_seconds" '
     def need($name):
       if type == "number" then .
@@ -674,12 +653,16 @@ JSON
     def list($name):
       if type == "array" then .
       else error("metrics/resources: missing list \($name)") end;
+    def note($name):
+      if type == "string" and startswith("not applicable: exits in") then .
+      else error("metrics/resources: missing or malformed \($name)") end;
 
     ($hyperfine[0].results[0].summary) as $run
     | ([$dhat[] | .profiles[]? | select(.tool == "DHAT")
         | .data.total.metrics][0]) as $alloc
     | $bloat[0] as $size
     | ($metadata[0].packages | list("cargo metadata packages")) as $packages
+    | $timing[0] as $t
     | {
         cpu_seconds: (($run.time_user.mean | need("time_user.mean"))
           + ($run.time_system.mean | need("time_system.mean"))),
@@ -688,15 +671,12 @@ JSON
         startup_seconds: ($run.time_wall_clock.median
           | need("time_wall_clock.median")),
         build_seconds: ($build_seconds | need("build_seconds")),
-        idle_footprint_kib: ($proc[0].idle_footprint_kib
-          | need("idle_footprint_kib")),
-        voluntary_ctxt_switches: ($proc[0].voluntary_ctxt_switches
-          | need("voluntary_ctxt_switches")),
-        wchar_bytes: ($proc[0].wchar_bytes | need("wchar_bytes")),
-        sampled_peak_threads: ($proc[0].sampled_peak_threads
-          | need("sampled_peak_threads")),
-        sampled_peak_fds: ($proc[0].sampled_peak_fds
-          | need("sampled_peak_fds")),
+        gnu_voluntary_ctxt_switches: ($t.gnu_voluntary_ctxt_switches
+          | need("gnu_voluntary_ctxt_switches")),
+        gnu_max_rss_kib: ($t.gnu_max_rss_kib | need("gnu_max_rss_kib")),
+        gnu_fs_outputs: ($t.gnu_fs_outputs | need("gnu_fs_outputs")),
+        exit_ms: ($t.exit_ms | need("exit_ms")),
+        idle_note: ($t.idle_note | note("idle_note")),
         total_bytes: ($alloc.TotalBytes.values.new
           | need("DHAT TotalBytes")),
         total_blocks: ($alloc.TotalBlocks.values.new
@@ -723,23 +703,26 @@ JSON
 )
 
 # True when FILE is a resources.json of the shape measure_resources writes:
-# every value a number, and one to five crates with short names.
+# every measured value a number, idle_note a matching string, and one to five
+# crates with short names.
 resources_valid() {
   jq -e '
     def num: type == "number";
+    def note: type == "string" and startswith("not applicable: exits in");
 
     type == "object"
     and (keys == ["binary_file_size", "build_seconds", "cpu_seconds",
-      "crates", "duplicate_versions", "idle_footprint_kib",
-      "package_count", "peak_rss_bytes", "sampled_peak_fds",
-      "sampled_peak_threads", "startup_seconds", "text_section_size",
-      "total_blocks", "total_bytes", "voluntary_ctxt_switches",
-      "wchar_bytes", "workspace_members"])
+      "crates", "duplicate_versions", "exit_ms", "gnu_fs_outputs",
+      "gnu_max_rss_kib", "gnu_voluntary_ctxt_switches", "idle_note",
+      "package_count", "peak_rss_bytes", "startup_seconds",
+      "text_section_size", "total_blocks", "total_bytes",
+      "workspace_members"])
     and ([.cpu_seconds, .peak_rss_bytes, .total_bytes, .total_blocks,
       .binary_file_size, .text_section_size, .package_count,
       .workspace_members, .duplicate_versions, .startup_seconds,
-      .build_seconds, .idle_footprint_kib, .voluntary_ctxt_switches,
-      .wchar_bytes, .sampled_peak_threads, .sampled_peak_fds] | all(num))
+      .build_seconds, .gnu_voluntary_ctxt_switches, .gnu_max_rss_kib,
+      .gnu_fs_outputs, .exit_ms] | all(num))
+    and (.idle_note | note)
     and (.crates | type == "array" and length >= 1 and length <= 5
       and all(.[]; type == "object" and (.size | num)
         and (.name | type == "string" and length <= 64)))
@@ -862,6 +845,9 @@ if [[ "$gate" == metrics/resources ]]; then
     def cell: gsub("[^A-Za-z0-9_.\\[\\]-]"; "?");
     def row($metric; $before; $after; $method):
       "| \($metric) | \($before | fmt) | \($after | fmt) | \($method) |";
+    def textrow($metric; $before; $after; $method):
+      def safe: gsub("[|\r\n]"; "?");
+      "| \($metric) | \($before | safe) | \($after | safe) | \($method) |";
     def size($side; $name):
       [$side.crates[] | select(.name == $name) | .size][0];
 
@@ -896,16 +882,22 @@ if [[ "$gate" == metrics/resources ]]; then
         "hyperfine time_wall_clock median"),
       row("Build time (s)"; $b.build_seconds; $h.build_seconds;
         "cargo build wall clock"),
-      row("Idle footprint (KiB)"; $b.idle_footprint_kib;
-        $h.idle_footprint_kib; "/proc status VmRSS sampled"),
-      row("Voluntary context switches"; $b.voluntary_ctxt_switches;
-        $h.voluntary_ctxt_switches; "/proc status voluntary_ctxt_switches"),
-      row("Bytes written (wchar)"; $b.wchar_bytes; $h.wchar_bytes;
+      row("Voluntary context switches"; $b.gnu_voluntary_ctxt_switches;
+        $h.gnu_voluntary_ctxt_switches; "GNU time Voluntary context switches"),
+      row("Maximum resident set size (kbytes)"; $b.gnu_max_rss_kib;
+        $h.gnu_max_rss_kib; "GNU time Maximum resident set size"),
+      row("File system outputs"; $b.gnu_fs_outputs; $h.gnu_fs_outputs;
+        "GNU time File system outputs"),
+      textrow("Idle footprint (KiB)"; $b.idle_note; $h.idle_note;
+        "/proc status VmRSS sampled"),
+      textrow("Voluntary context switches over idle window"; $b.idle_note;
+        $h.idle_note; "/proc status voluntary_ctxt_switches sampled"),
+      textrow("Bytes written (wchar)"; $b.idle_note; $h.idle_note;
         "/proc io wchar"),
-      row("Sampled peak threads, every 100 ms"; $b.sampled_peak_threads;
-        $h.sampled_peak_threads; "/proc status Threads sampled"),
-      row("Sampled peak FDs, every 100 ms"; $b.sampled_peak_fds;
-        $h.sampled_peak_fds; "/proc fd count sampled")
+      textrow("Sampled peak threads, every 100 ms"; $b.idle_note;
+        $h.idle_note; "/proc status Threads sampled"),
+      textrow("Sampled peak FDs, every 100 ms"; $b.idle_note; $h.idle_note;
+        "/proc fd count sampled")
   ' > /reports/summary.txt; then
     echo "metrics/resources: could not write the resources table" >&2
     exit 1

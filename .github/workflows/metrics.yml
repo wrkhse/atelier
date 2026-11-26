@@ -279,6 +279,33 @@ jobs:
             row_after=$after
           }
 
+          # Requires the summary row for metric $1 to show the idle note in
+          # both cells: idle_note of resources.json before and of
+          # head-resources.json after. The row holds text, not a number.
+          check_text_row() {
+            local metric=$1 base head cells before after
+            base=$(jq -er '.idle_note' "$json") \
+              || fail "no idle_note in resources.json"
+            head=$(jq -er '.idle_note' "$head_json") \
+              || fail "no idle_note in head-resources.json"
+
+            cells=$(awk -F'|' -v metric="$metric" '
+              function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+              trim($2) == metric {
+                print trim($3) "\t" trim($4)
+                found = 1
+                exit
+              }
+              END { exit !found }
+            ' "$summary") || fail "no $metric row in the summary"
+            IFS=$'\t' read -r before after <<< "$cells"
+
+            [[ "$before" == "$base" ]] \
+              || fail "$metric before cell '$before' is not note '$base'"
+            [[ "$after" == "$head" ]] \
+              || fail "$metric after cell '$after' is not note '$head'"
+          }
+
           # Requires the crate rows, in the table's order, to name each crate
           # in either report's top five, head's first, and to show its size
           # in each, or "-" where that side does not list it.
@@ -355,11 +382,14 @@ jobs:
             check_row "Duplicate versions" duplicate_versions whole
             check_row "Startup time (s)" startup_seconds decimal
             check_row "Build time (s)" build_seconds decimal
-            check_row "Idle footprint (KiB)" idle_footprint_kib whole
-            check_row "Voluntary context switches" voluntary_ctxt_switches whole
-            check_row "Bytes written (wchar)" wchar_bytes whole
-            check_row "Sampled peak threads, every 100 ms" sampled_peak_threads whole
-            check_row "Sampled peak FDs, every 100 ms" sampled_peak_fds whole
+            check_row "Voluntary context switches" gnu_voluntary_ctxt_switches whole
+            check_row "Maximum resident set size (kbytes)" gnu_max_rss_kib whole
+            check_row "File system outputs" gnu_fs_outputs whole
+            check_text_row "Idle footprint (KiB)"
+            check_text_row "Voluntary context switches over idle window"
+            check_text_row "Bytes written (wchar)"
+            check_text_row "Sampled peak threads, every 100 ms"
+            check_text_row "Sampled peak FDs, every 100 ms"
             check_crates
             head_blocks=$(jq -er '.total_blocks' "$head_json") \
               || fail "no total_blocks in head-resources.json"

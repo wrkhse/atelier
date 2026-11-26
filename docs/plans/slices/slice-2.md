@@ -53,8 +53,9 @@ Resources appear in a before-and-after table and never fail a check. Each row
 names its method:
 
 - hyperfine 2.0.0 supplies CPU time (`time_user` plus `time_system`), peak
-  memory (`memory_peak_resident`), `startup_seconds` and `build_seconds`.
-  Wall-time percentiles are planned; this slice computes no p99.
+  memory (`memory_peak_resident`) and `startup_seconds`, its wall-clock
+  median. `build_seconds` is the wall clock of `cargo build`, measured around
+  the build. Wall-time percentiles are planned; this slice computes no p99.
 - Gungraun 0.20.0's DHAT tool supplies allocation bytes and blocks
   (`TotalBytes` and `TotalBlocks`), under a pinned Valgrind of at least 3.20
   that the gate image installs from its official tarball with a verified
@@ -62,15 +63,14 @@ names its method:
 - cargo-bloat 0.12.1 with `--crates --message-format json` supplies file size
   and an estimated per-crate `.text` breakdown; `cargo metadata` supplies
   dependency facts.
-- Idle footprint (`idle_footprint_kib`) and `voluntary_ctxt_switches` come
-  from `/proc/<pid>/status` over a bounded idle window, and `wchar_bytes`
-  comes from `/proc/<pid>/io`.
-- Threads and open files come from `/proc` sampling at a fixed 100 ms
-  interval for a bounded duration: `sampled_peak_threads` and
-  `sampled_peak_fds`.
+- GNU time reports three rows for the direct child: `Voluntary context
+  switches`, `Maximum resident set size (kbytes)` and `File system outputs`.
+- Idle footprint, voluntary context switches over an idle window, `wchar`
+  bytes and sampled peak threads and open files every 100 ms apply only to
+  long-running processes the project declares. The reporter exits in
+  milliseconds, so those rows say `not applicable: exits in N ms`.
 
-Exact kernel counters carry no budgets; sampled peaks are only reported, so
-they cannot flake.
+No row carries a budget; all are reported only, so none can flake.
 
 Verification: doubled allocations appear in the table and do not fail.
 
