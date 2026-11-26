@@ -593,6 +593,110 @@ jobs:
             || fail "expected restored head TotalBlocks $restored to equal" \
               "control $control"
 
+  # Checks the named failures of the resources helpers against the entrypoint
+  # itself. No tree is built: the four helpers are read from the shell script.
+  resources-failure-proof:
+    name: metrics/resources-failure-proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - name: Verify the named helper failures
+        shell: bash
+        run: bash .github/ci/resources-failure-tests.sh .github/ci/entrypoint.sh
+
+  # A declared process that exits inside the idle window must fail the gate,
+  # naming its status when it is nonzero and nothing when it is zero. Head's
+  # working tree declares the process; the base tree keeps its own config.
+  resources-exit-proof:
+    name: metrics/resources-exit-proof (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [nonzero, zero]
+    env:
+      GATE: metrics/resources
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - name: Build atelier-metrics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-metrics \
+            --target x86_64-unknown-linux-musl
+      - name: Verify the early-exit verdict
+        shell: bash
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          GATE: metrics/resources
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+          PROOF_MODE: ${{ matrix.mode }}
+        run: |
+          # sample_idle runs the declared command through `exec bash -c "$2"`,
+          # so an inner shell parses it. Quote the Python expression so that
+          # shell passes it to Python as a single argument.
+          if [[ "$PROOF_MODE" == nonzero ]]; then
+            command="python3 -c 'exit(7)'"
+            expected='exited with status 7 before the idle sample finished'
+          else
+            command="python3 -c 'exit(0)'"
+            expected='exited before the idle sample finished'
+          fi
+
+          mkdir -p "$SOURCE/.moon/config"
+          cat > "$SOURCE/.moon/config/metrics.toml" <<EOF
+          instruction_limit_percent = 5
+          new_bench_instruction_ir = 20000
+
+          [[long_running]]
+          name = "early-exit-$PROOF_MODE"
+          command = "$command"
+          EOF
+
+          log="$RUNNER_TEMP/resources-exit-proof-$PROOF_MODE.log"
+          status=0
+          BASE=$BASE bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 \
+            || status=$?
+          cat -- "$log"
+
+          if [[ "$status" != 1 ]]; then
+            echo "::error::$PROOF_MODE expected exit 1, got $status"
+            exit 1
+          fi
+          if ! grep -Fq "$expected" "$log"; then
+            echo "::error::$PROOF_MODE expected '$expected' in the log"
+            exit 1
+          fi
+
+          {
+            echo "### metrics/resources-exit-proof ($PROOF_MODE)"
+            echo
+            echo '```text'
+            cat -- "$log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   budget-proof:
     name: metrics/budget-proof (${{ matrix.mode }})
     runs-on: ubuntu-latest

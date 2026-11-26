@@ -516,9 +516,9 @@ if [[ "$gate" == metrics/spread ]]; then
 fi
 
 # A GNU time field must be a nonnegative integer; otherwise fail, named. The
-# label is matched as a literal string in GNU time's verbose output.
-gnu_time_value() {
-  local file=$1 label=$2 value
+# label is matched as a literal string in GNU time's verbose output in TEXT.
+gnu_time_field() {
+  local text=$1 label=$2 value
 
   value=$(awk -v label="$label" '
     {
@@ -529,12 +529,53 @@ gnu_time_value() {
       print value
       exit
     }
-  ' "$file") || value=
+  ' <<< "$text") || value=
   if [[ ! "$value" =~ ^[0-9]+$ ]]; then
     echo "metrics/resources: missing or nonnumeric $label in GNU time" >&2
     exit 1
   fi
   printf '%s\n' "$value"
+}
+
+# The named GNU time field from the file GNU time wrote.
+gnu_time_value() {
+  local file=$1 label=$2
+  local text
+
+  text=$(cat -- "$file") || text=
+  gnu_time_field "$text" "$label"
+}
+
+# GNU time's wall-clock elapsed field in milliseconds. The value is h:mm:ss
+# or m:ss, with a fractional second; a missing or malformed field fails named.
+gnu_time_elapsed_ms() {
+  local file=$1 text elapsed h=0 m=0 s ms
+
+  text=$(cat -- "$file") || text=
+  elapsed=$(awk '
+    /Elapsed \(wall clock\) time/ {
+      value = $0
+      sub(/^.*: /, "", value)
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      print value
+      exit
+    }
+  ' <<< "$text") || elapsed=
+  if [[ "$elapsed" =~ ^([0-9]+):([0-9]+):([0-9]+([.][0-9]+)?)$ ]]; then
+    h=${BASH_REMATCH[1]}
+    m=${BASH_REMATCH[2]}
+    s=${BASH_REMATCH[3]}
+  elif [[ "$elapsed" =~ ^([0-9]+):([0-9]+([.][0-9]+)?)$ ]]; then
+    m=${BASH_REMATCH[1]}
+    s=${BASH_REMATCH[2]}
+  else
+    echo "metrics/resources: missing or malformed Elapsed (wall clock) time" \
+      "in GNU time" >&2
+    exit 1
+  fi
+  ms=$(awk -v h="$h" -v m="$m" -v s="$s" \
+    'BEGIN { printf "%.0f", (h * 3600 + m * 60 + s) * 1000 }')
+  printf '%s\n' "$ms"
 }
 
 # The single [[long_running]] declaration in a tree's .moon/config/metrics.toml,
@@ -579,18 +620,35 @@ PY
 
 # Terminate a background process and the children the kernel lists for it:
 # TERM the children then the parent, poll up to 20 x 0.1 s, KILL any that
-# remain, and wait. REAP_STATUS holds wait's status. A process still alive
-# after KILL cannot be reaped and fails here, named.
+# remain, and wait. REAP_STATUS holds wait's status. A PID that is no longer
+# a live job of this shell is never signalled, since its number may have been
+# reused. Every path polls and fails named when the child cannot be reaped.
 terminate_tree() {
   local pid=$1 label=$2 children child i running=1
+  local -a live_jobs=()
+  local live signal=0
   local -i status=0
-  if [[ -r "/proc/$pid/task/$pid/children" ]]; then
-    read -r children < "/proc/$pid/task/$pid/children" || children=
-    for child in $children; do
-      kill -TERM "$child" 2>/dev/null || true
-    done
+
+  # A PID that is no longer a live job of this shell may have been reaped and
+  # its number reused. Signal only a live job of this shell; leave a stranger
+  # with a reused PID alone.
+  mapfile -t live_jobs < <(jobs -pr)
+  for live in "${live_jobs[@]}"; do
+    if [[ "$live" == "$pid" ]]; then
+      signal=1
+      break
+    fi
+  done
+
+  if (( signal )); then
+    if [[ -r "/proc/$pid/task/$pid/children" ]]; then
+      read -r children < "/proc/$pid/task/$pid/children" || children=
+      for child in $children; do
+        kill -TERM "$child" 2>/dev/null || true
+      done
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
   fi
-  kill -TERM "$pid" 2>/dev/null || true
   for ((i = 0; i < 20; i++)); do
     if ! kill -0 "$pid" 2>/dev/null; then
       running=0
@@ -598,7 +656,7 @@ terminate_tree() {
     fi
     sleep 0.1
   done
-  if (( running )); then
+  if (( running )) && (( signal )); then
     if [[ -r "/proc/$pid/task/$pid/children" ]]; then
       read -r children < "/proc/$pid/task/$pid/children" || children=
       for child in $children; do
@@ -622,19 +680,74 @@ terminate_tree() {
   REAP_STATUS=$status
 }
 
+# Fail, named, when FILE holds fewer than 10 whitespace-separated /proc sample
+# records of four numeric fields each, one record per line.
+validate_samples() {
+  local file=$1 name=$2 valid
+
+  valid=$(awk '
+    NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ \
+      && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ { count++ }
+    END { print count + 0 }
+  ' "$file") || valid=0
+  if (( valid < 10 )); then
+    echo "metrics/resources: too few valid /proc samples of $name" >&2
+    return 1
+  fi
+}
+
+# The difference between the cumulative voluntary_ctxt_switches counters read
+# at each end of an idle window. Both counters must be nonnegative integers;
+# a missing or nonnumeric one fails named for NAME.
+switch_delta() {
+  local start=$1 end=$2 name=$3
+
+  if [[ ! "$start" =~ ^[0-9]+$ ]]; then
+    echo "metrics/resources: could not read voluntary_ctxt_switches at the" \
+      "start of the idle window for $name" >&2
+    return 1
+  fi
+  if [[ ! "$end" =~ ^[0-9]+$ ]]; then
+    echo "metrics/resources: could not read voluntary_ctxt_switches at the" \
+      "end of the idle window for $name" >&2
+    return 1
+  fi
+  printf '%s\n' "$((end - start))"
+}
+
 # Sample a declared long-running process: launch COMMAND from TREE as a direct
-# child, read the five /proc values every 100 ms for at most 20 samples, then
-# tear it down from the parent. Each field's largest sample goes to OUT's
-# idle.json; a child that exits before the window ends, or fewer than 10 valid
-# samples, fails named.
+# child, read four /proc values every 100 ms for at most 20 samples, and read
+# the cumulative switch counter at each end of the window, then tear the child
+# down from the parent. The largest of each sampled value goes to OUT's
+# idle.json, with the switch counter's window delta; a child that exits before
+# the window ends, or fewer than 10 valid samples, fails named.
 sample_idle() {
   local tree=$1 out=$2 name=$3 command=$4
-  local pid child_status=0 rss threads switches wchar fds sample
-  local -i valid=0 peak_rss=0 peak_threads=0 peak_switches=0 peak_wchar=0
-  local -i peak_fds=0 exited_early=0 i
+  local pid child_status=0 rss threads wchar fds sample
+  local switches_start='' switches_end=''
+  local -i peak_rss=0 peak_threads=0 peak_wchar=0
+  local -i peak_fds=0 exited_early=0 i window_switches=0
+  local samples=$out/idle-samples.txt
 
-  bash -c "cd $tree && exec $command" > "$out/idle.out" &
+  : > "$samples"
+
+  # The tree path is a positional parameter, so spaces and shell characters
+  # in it stay literal; the command keeps its own arguments from config.
+  bash -c 'cd "$1" && exec bash -c "$2"' _ "$tree" "$command" > "$out/idle.out" &
   pid=$!
+
+  # The switch counter is cumulative from process start, so bracket the
+  # window with one read at each end and report the difference.
+  if [[ -r "/proc/$pid/status" ]]; then
+    switches_start=$(awk '/^voluntary_ctxt_switches:/ { print $2 }' \
+      "/proc/$pid/status" || true)
+  fi
+  if [[ ! "$switches_start" =~ ^[0-9]+$ ]]; then
+    echo "metrics/resources: could not read voluntary_ctxt_switches at the" \
+      "start of the idle window for $name" >&2
+    terminate_tree "$pid" "$name" || return 1
+    return 1
+  fi
 
   for ((i = 0; i < 20; i++)); do
     sleep 0.1
@@ -642,12 +755,10 @@ sample_idle() {
       exited_early=1
       break
     fi
-    rss='' threads='' switches='' wchar='' fds=''
+    rss='' threads='' wchar='' fds=''
     if [[ -r "/proc/$pid/status" ]]; then
       rss=$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" || true)
       threads=$(awk '/^Threads:/ { print $2 }' "/proc/$pid/status" || true)
-      switches=$(awk '/^voluntary_ctxt_switches:/ { print $2 }' \
-        "/proc/$pid/status" || true)
     fi
     if [[ -r "/proc/$pid/io" ]]; then
       wchar=$(awk '/^wchar:/ { print $2 }' "/proc/$pid/io" || true)
@@ -660,16 +771,20 @@ sample_idle() {
       fi
       fds=${fds//[[:space:]]/}
     fi
-    sample="$rss $threads $switches $wchar $fds"
-    if [[ "$sample" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]]; then
-      valid=$((valid + 1))
+    sample="$rss $threads $wchar $fds"
+    if [[ "$sample" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+      printf '%s\n' "$sample" >> "$samples"
       if (( rss > peak_rss )); then peak_rss=$rss; fi
       if (( threads > peak_threads )); then peak_threads=$threads; fi
-      if (( switches > peak_switches )); then peak_switches=$switches; fi
       if (( wchar > peak_wchar )); then peak_wchar=$wchar; fi
       if (( fds > peak_fds )); then peak_fds=$fds; fi
     fi
   done
+
+  if [[ -r "/proc/$pid/status" ]]; then
+    switches_end=$(awk '/^voluntary_ctxt_switches:/ { print $2 }' \
+      "/proc/$pid/status" || true)
+  fi
 
   terminate_tree "$pid" "$name" || return 1
   child_status=$REAP_STATUS
@@ -682,13 +797,14 @@ sample_idle() {
     fi
     return 1
   fi
-  if (( valid < 10 )); then
-    echo "metrics/resources: too few valid /proc samples of $name" >&2
+  validate_samples "$samples" "$name" || return 1
+  if ! window_switches=$(switch_delta "$switches_start" "$switches_end" \
+    "$name"); then
     return 1
   fi
 
   if ! jq -n --argjson idle_footprint_kib "$peak_rss" \
-    --argjson voluntary_ctxt_switches "$peak_switches" \
+    --argjson voluntary_ctxt_switches "$window_switches" \
     --argjson wchar_bytes "$peak_wchar" \
     --argjson sampled_peak_threads "$peak_threads" \
     --argjson sampled_peak_fds "$peak_fds" --arg idle_note '' '
@@ -706,6 +822,33 @@ sample_idle() {
   fi
 }
 
+# Run COMMAND as a direct background child, polling at most TICKS times at
+# 100 ms. A child past the deadline is torn down through terminate_tree, which
+# leaves its wait status in REAP_STATUS; a child that finished is waited on here
+# with the same status. A timed-out child fails here, named.
+run_bounded() {
+  local ticks=$1 label=$2
+  shift 2
+  local pid tick running=1
+
+  "$@" &
+  pid=$!
+  for ((tick = 0; tick < ticks; tick++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      running=0
+      break
+    fi
+    sleep 0.1
+  done
+  if (( running )); then
+    terminate_tree "$pid" "$label" || return 1
+    echo "metrics/resources: $label timed out in $PWD" >&2
+    return 1
+  fi
+  REAP_STATUS=0
+  wait "$pid" || REAP_STATUS=$?
+}
+
 # The resources of one tree, measured from inside it with its own manifests,
 # lockfile and .cargo settings: hyperfine times the reporter on a fixed
 # report, Gungraun's DHAT counts the benchmark's allocations, cargo-bloat
@@ -717,7 +860,7 @@ measure_resources() (
   local tree=$1 out=$2
   local fixture=$out/report.json
   local build_start='' build_end='' build_seconds=''
-  local reporter_pid reporter_running reporter_status tick decl
+  local reporter_status decl
   local idle_name idle_command
 
   cd "$tree"
@@ -757,34 +900,16 @@ JSON
   # child gives the context switches, peak RSS and file outputs. Bound the run
   # from the parent, which launches it in the background and kills it at the
   # deadline; no timeout wrapper stands between the two.
-  start_ns=$(date +%s%N)
-  /usr/bin/time -v -o "$out/gnu-time.txt" \
+  run_bounded 300 reporter /usr/bin/time -v -o "$out/gnu-time.txt" \
     target/release/atelier-reporter --report "$fixture" --gate rust/fmt \
-    > "$out/reporter.out" &
-  reporter_pid=$!
-  reporter_running=1
-  for ((tick = 0; tick < 300; tick++)); do
-    if ! kill -0 "$reporter_pid" 2>/dev/null; then
-      reporter_running=0
-      break
-    fi
-    sleep 0.1
-  done
-  if (( reporter_running )); then
-    terminate_tree "$reporter_pid" "reporter" || exit 1
-    echo "metrics/resources: reporter timed out in $tree" >&2
-    exit 1
-  fi
-  reporter_status=0
-  wait "$reporter_pid" || reporter_status=$?
-  end_ns=$(date +%s%N)
+    > "$out/reporter.out" || exit 1
+  reporter_status=$REAP_STATUS
   if (( reporter_status != 0 )); then
     echo "metrics/resources: reporter exited with status $reporter_status" \
       "in $tree" >&2
     exit 1
   fi
-  exit_ms=$(awk -v start="$start_ns" -v end="$end_ns" \
-    'BEGIN { printf "%.0f", (end - start) / 1000000 }')
+  exit_ms=$(gnu_time_elapsed_ms "$out/gnu-time.txt")
 
   gnu_voluntary_ctxt_switches=$(gnu_time_value "$out/gnu-time.txt" \
     'Voluntary context switches')
