@@ -358,11 +358,41 @@ jobs:
               || fail "no total_blocks in head-resources.json"
           }
 
+          # The base tree is identical in all three runs; only head's working
+          # tree changes. A gate that wrote head into resources.json (the
+          # table's before column) changes these base values, so save the
+          # deterministic base fields in the control run and require the two
+          # runs below to match. CPU time and peak memory are hyperfine means
+          # over timed runs and are not deterministic, so they are excluded.
+          base_fields=(total_bytes total_blocks binary_file_size \
+            text_section_size package_count workspace_members \
+            duplicate_versions crates)
+
+          # Requires every base-side field of this run's resources.json to
+          # equal the control run's, naming $run and the field on a mismatch.
+          check_base() {
+            local field expected actual
+            for field in "${base_fields[@]}"; do
+              expected=$(jq -e --arg f "$field" '.[$f]' <<< "$control_base") \
+                || fail "control base has no $field"
+              actual=$(jq -e --arg f "$field" '.[$f]' "$json") \
+                || fail "no $field in resources.json"
+              [[ "$expected" == "$actual" ]] \
+                || fail "base field $field is '$actual', expected" \
+                  "'$expected' from the control run"
+            done
+          }
+
           # Run 1, control: the unpatched head against the PR base.
           run=control
           measure
           show Control
           verify_table
+          control_base=$(jq -c '{
+            total_bytes, total_blocks, binary_file_size,
+            text_section_size, package_count, workspace_members,
+            duplicate_versions, crates
+          }' "$json") || fail "cannot read the base fields from resources.json"
           control=$head_blocks
           control_table_after=$table_after
           # Run 2 must write its own evidence, not inherit run 1's.
@@ -412,6 +442,7 @@ jobs:
           measure
           show Allocated
           verify_table
+          check_base
           allocated=$head_blocks
 
           (( allocated > control )) \
@@ -432,6 +463,7 @@ jobs:
           measure
           show Restored
           verify_table
+          check_base
           restored=$head_blocks
 
           {
