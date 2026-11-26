@@ -16,9 +16,8 @@ trap 'rm -rf -- "$tmp"' EXIT
 # margin. Every nested brace in these helpers is indented, so only the
 # function's own brace ends a block.
 awk '
-  /^(gnu_time_field|terminate_tree|validate_samples|run_bounded)\(\) \{/ {
-    inside = 1
-  }
+  /^(gnu_time_field|switch_delta|terminate_tree)\(\) \{/ { inside = 1 }
+  /^(validate_samples|run_bounded)\(\) \{/ { inside = 1 }
   inside { print }
   inside && /^}/ { inside = 0 }
 ' "$entrypoint" > "$tmp/helpers.sh"
@@ -44,6 +43,22 @@ expect_named_failure() {
   printf 'ok: %s\n' "$case_name"
 }
 
+# True while the Case C fixture command is alive. That script is the only
+# "sleep 60" this test starts, so a survivor means the teardown left the
+# timed-out child running.
+sleep_fixture_remains() {
+  local entry line
+
+  for entry in /proc/[0-9]*/cmdline; do
+    [[ -r "$entry" ]] || continue
+    line=$(tr '\0' ' ' < "$entry") || continue
+    if [[ "$line" == 'sleep 60 '* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Case A: nine valid four-number records are one short of the ten the sampler
 # keeps, so validate_samples must fail and name the process it sampled.
 for ((i = 0; i < 9; i++)); do
@@ -64,9 +79,36 @@ expect_named_failure 'case B: missing GNU time field' \
   'metrics/resources: missing or nonnumeric Voluntary context switches in GNU time' \
   "$status" "$output"
 
-# Case C: two ticks give the child no chance to finish; the parent tears it
-# down and reports the timeout, naming the label and the directory.
+# Case C: two ticks give the child no chance to finish; the parent must tear
+# it down quickly, name the timeout and leave no child running. A teardown
+# that never signals would let the 60-second sleep finish on its own.
+case_c_start=$(date +%s%N)
 status=0
-output=$(run_bounded 2 timeout-test sleep 60 2>&1) || status=$?
+run_bounded 2 timeout-test sleep 60 2> "$tmp/case-c.err" || status=$?
+case_c_end=$(date +%s%N)
+
+case_c_ms=$(awk -v start="$case_c_start" -v end="$case_c_end" \
+  'BEGIN { printf "%.0f", (end - start) / 1000000 }')
+if (( case_c_ms >= 5000 )); then
+  fail "case C: teardown took ${case_c_ms} ms for a 60-second sleep"
+fi
+if sleep_fixture_remains; then
+  fail 'case C: the timed-out sleep 60 is still running'
+fi
+output=$(cat -- "$tmp/case-c.err")
 expect_named_failure 'case C: bounded child timeout' \
   'timeout-test timed out in' "$status" "$output"
+
+# Case D: switch_delta returns the real difference of two cumulative counters
+# and fails named when the end counter is missing or nonnumeric.
+output=$(switch_delta 20 27 window-fixture) || fail "case D: $output"
+if [[ "$output" != 7 ]]; then
+  fail "case D: expected a delta of 7, got $output"
+fi
+printf 'ok: case D: switch delta\n'
+
+status=0
+output=$(switch_delta 20 xx window-fixture 2>&1) || status=$?
+expect_named_failure 'case D: malformed end counter' \
+  'metrics/resources: could not read voluntary_ctxt_switches at the end' \
+  "$status" "$output"

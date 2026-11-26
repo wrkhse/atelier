@@ -621,36 +621,41 @@ PY
 # Terminate a background process and the children the kernel lists for it:
 # TERM the children then the parent, poll up to 20 x 0.1 s, KILL any that
 # remain, and wait. REAP_STATUS holds wait's status. A PID that is no longer
-# a live job of this shell is only waited on, never signalled. A process still
-# alive after KILL cannot be reaped and fails here, named.
+# a live job is signalled only when /proc still shows EXPECTED's command line,
+# since its number may have been reused. Every path polls and fails named when
+# the child cannot be reaped.
 terminate_tree() {
-  local pid=$1 label=$2 children child i running=1
+  local pid=$1 label=$2 expected=$3 children child i running=1
   local -a live_jobs=()
-  local live
-  local -i status=0 is_live=0
+  local live cmdline='' signal=0
+  local -i status=0
 
   # A PID that is no longer a live job of this shell may have been reaped and
-  # its number reused. Wait on it directly instead of signalling a stranger.
+  # its number reused. Signal only a command line that identifies our child;
+  # leave a stranger with a reused PID alone.
   mapfile -t live_jobs < <(jobs -pr)
   for live in "${live_jobs[@]}"; do
     if [[ "$live" == "$pid" ]]; then
-      is_live=1
+      signal=1
       break
     fi
   done
-  if (( ! is_live )); then
-    wait "$pid" || status=$?
-    REAP_STATUS=$status
-    return 0
+  if (( ! signal )) && [[ -r "/proc/$pid/cmdline" ]]; then
+    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline") || cmdline=''
+    if [[ "$cmdline" == *"$expected"* ]]; then
+      signal=1
+    fi
   fi
 
-  if [[ -r "/proc/$pid/task/$pid/children" ]]; then
-    read -r children < "/proc/$pid/task/$pid/children" || children=
-    for child in $children; do
-      kill -TERM "$child" 2>/dev/null || true
-    done
+  if (( signal )); then
+    if [[ -r "/proc/$pid/task/$pid/children" ]]; then
+      read -r children < "/proc/$pid/task/$pid/children" || children=
+      for child in $children; do
+        kill -TERM "$child" 2>/dev/null || true
+      done
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
   fi
-  kill -TERM "$pid" 2>/dev/null || true
   for ((i = 0; i < 20; i++)); do
     if ! kill -0 "$pid" 2>/dev/null; then
       running=0
@@ -658,7 +663,7 @@ terminate_tree() {
     fi
     sleep 0.1
   done
-  if (( running )); then
+  if (( running )) && (( signal )); then
     if [[ -r "/proc/$pid/task/$pid/children" ]]; then
       read -r children < "/proc/$pid/task/$pid/children" || children=
       for child in $children; do
@@ -698,6 +703,25 @@ validate_samples() {
   fi
 }
 
+# The difference between the cumulative voluntary_ctxt_switches counters read
+# at each end of an idle window. Both counters must be nonnegative integers;
+# a missing or nonnumeric one fails named for NAME.
+switch_delta() {
+  local start=$1 end=$2 name=$3
+
+  if [[ ! "$start" =~ ^[0-9]+$ ]]; then
+    echo "metrics/resources: could not read voluntary_ctxt_switches at the" \
+      "start of the idle window for $name" >&2
+    return 1
+  fi
+  if [[ ! "$end" =~ ^[0-9]+$ ]]; then
+    echo "metrics/resources: could not read voluntary_ctxt_switches at the" \
+      "end of the idle window for $name" >&2
+    return 1
+  fi
+  printf '%s\n' "$((end - start))"
+}
+
 # Sample a declared long-running process: launch COMMAND from TREE as a direct
 # child, read four /proc values every 100 ms for at most 20 samples, and read
 # the cumulative switch counter at each end of the window, then tear the child
@@ -728,6 +752,7 @@ sample_idle() {
   if [[ ! "$switches_start" =~ ^[0-9]+$ ]]; then
     echo "metrics/resources: could not read voluntary_ctxt_switches at the" \
       "start of the idle window for $name" >&2
+    terminate_tree "$pid" "$name" "$command" || return 1
     return 1
   fi
 
@@ -768,7 +793,7 @@ sample_idle() {
       "/proc/$pid/status" || true)
   fi
 
-  terminate_tree "$pid" "$name" || return 1
+  terminate_tree "$pid" "$name" "$command" || return 1
   child_status=$REAP_STATUS
   if (( exited_early )); then
     if (( child_status != 0 )); then
@@ -780,12 +805,10 @@ sample_idle() {
     return 1
   fi
   validate_samples "$samples" "$name" || return 1
-  if [[ ! "$switches_end" =~ ^[0-9]+$ ]]; then
-    echo "metrics/resources: could not read voluntary_ctxt_switches at the" \
-      "end of the idle window for $name" >&2
+  if ! window_switches=$(switch_delta "$switches_start" "$switches_end" \
+    "$name"); then
     return 1
   fi
-  window_switches=$((switches_end - switches_start))
 
   if ! jq -n --argjson idle_footprint_kib "$peak_rss" \
     --argjson voluntary_ctxt_switches "$window_switches" \
@@ -813,7 +836,7 @@ sample_idle() {
 run_bounded() {
   local ticks=$1 label=$2
   shift 2
-  local pid tick running=1
+  local expected="$*" pid tick running=1
 
   "$@" &
   pid=$!
@@ -825,7 +848,7 @@ run_bounded() {
     sleep 0.1
   done
   if (( running )); then
-    terminate_tree "$pid" "$label" || return 1
+    terminate_tree "$pid" "$label" "$expected" || return 1
     echo "metrics/resources: $label timed out in $PWD" >&2
     return 1
   fi
