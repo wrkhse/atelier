@@ -56,8 +56,8 @@ SUMMARY="$RUNNER_TEMP/atelier-reports/container/summary.txt"
 SESSION=metrics-demo
 GIF_MAX_BYTES=3000000
 GIF_MAX_WIDTH=1200
-# Two containers per metrics gate, each bounded below the job timeout.
-METRICS_CONTAINER_LIMIT=12m
+# Two containers per metrics gate, each bounded to six minutes.
+METRICS_CONTAINER_LIMIT=6m
 ALLOC_BEFORE=
 ALLOC_AFTER=
 STOPPED=0
@@ -381,7 +381,7 @@ start_recording() {
   termctrl mark "$SESSION" release
   sleep 2
 
-  type_line "export METRICS_CONTAINER_LIMIT=12m"
+  type_line "export METRICS_CONTAINER_LIMIT=6m"
 }
 
 save_screen() {
@@ -404,7 +404,8 @@ gate_run() {
 
   typed="GATE=$gate bash \"\$CI_SUPPORT/run.sh\" metrics 2>>\"\$GATE_LOG\""
   type_line "$typed; echo \"exit \$?\""
-  wait_until 2400 pane_has "$LEFT" '^exit [0-9]+$'
+  # Seven gates at 900s each is 105m, under the 120m job limit.
+  wait_until 900 pane_has "$LEFT" '^exit [0-9]+$'
 
   screen=$(capture "$LEFT")
   rg -qx "exit $code" <<< "$screen" \
