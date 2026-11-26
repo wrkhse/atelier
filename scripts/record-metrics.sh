@@ -155,7 +155,8 @@ make_worktree() {
   rm -f "$SOURCE/.git"
   cp -R "$GITHUB_WORKSPACE/.git" "$SOURCE/.git"
   rm -rf "$SOURCE/.git/worktrees"
-  git -C "$SOURCE" checkout --quiet --detach "$RELEASE_TAG"
+  git -C "$SOURCE" reset --quiet --hard "$RELEASE_TAG"
+  git -C "$SOURCE" checkout --quiet --force --detach "$RELEASE_TAG"
 }
 
 # REQUIRE_INSTALLED defaults to 1: after a gate, the container has installed
@@ -404,8 +405,8 @@ gate_run() {
 
   typed="GATE=$gate bash \"\$CI_SUPPORT/run.sh\" metrics 2>>\"\$GATE_LOG\""
   type_line "$typed; echo \"exit \$?\""
-  # Seven gates at 900s each is 105m, under the 120m job limit.
-  wait_until 900 pane_has "$LEFT" '^exit [0-9]+$'
+  # Seven gates at 600s each is 70m, leaving room in the 120m job limit.
+  wait_until 600 pane_has "$LEFT" '^exit [0-9]+$'
 
   screen=$(capture "$LEFT")
   rg -qx "exit $code" <<< "$screen" \

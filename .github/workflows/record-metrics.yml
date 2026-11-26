@@ -32,9 +32,9 @@ jobs:
       github.event_name == 'workflow_dispatch'
       || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    # Worst case: seven gates x two 6m containers = 84m, each under its 15m
-    # pane wait; setup, download and GIF export fit within the 120m timeout,
-    # so a recording is never cut off mid-way.
+    # Worst case: seven gates at a 10m pane wait each = 70m; setup, download,
+    # Docker build and GIF export fit within the 120m timeout, so a recording
+    # is never cut off mid-way.
     timeout-minutes: 120
     steps:
       # Full history brings every tag, so the release's tag can be found.
@@ -73,10 +73,11 @@ jobs:
               exit 1
             fi
 
-            if [[ "$tag" =~ $version$ ]]; then
-              echo "::error::$tag is not a release candidate tag;" \
-                "this workflow only records rc tags" >&2
-              exit 1
+            if [[ ! "$tag" =~ $version-rc\.$number$ ]]; then
+              echo "tag=" >> "$GITHUB_OUTPUT"
+              echo "::notice title=Recording skipped::$tag is not a" \
+                "release candidate; only rc tags are recorded"
+              exit 0
             fi
           fi
 
