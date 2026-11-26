@@ -62,7 +62,7 @@ enum Command {
         head: PathBuf,
     },
 
-    /// Compare instruction counts; fails past the limit.
+    /// Compare instruction counts; fails on an increase at or past the limit.
     Budget {
         /// JSON with the base version's count, such as `{"ir": 1000}`.
         #[arg(long, value_name = "FILE")]
@@ -72,7 +72,8 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         head: PathBuf,
 
-        /// The largest increase allowed, in percent, such as 5.
+        /// The increase that fails, in percent, such as 5; a smaller increase
+        /// passes, and an unchanged or smaller count passes even at 0.
         #[arg(long, value_name = "PERCENT", allow_negative_numbers = true)]
         limit: f64,
     },
@@ -198,7 +199,8 @@ fn row(comparison: &Comparison) -> String {
     )
 }
 
-/// Prints both counts and the limit; true when head is within the limit.
+/// Prints both counts and the limit; true when head is unchanged or smaller,
+/// or when its increase is below the limit.
 fn instructions(base: &Path, head: &Path, limit: f64) -> Result<bool, Refusal> {
     let before = count(base)?;
     let after = count(head)?;

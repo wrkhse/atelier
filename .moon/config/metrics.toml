@@ -1,0 +1,10 @@
+# The check fails when head's instruction count is this many percent or more
+# above the base's: at 5, +4% passes and +5% and +6% fail. CI reads the limit
+# from both the base and head trees and applies the smaller, so a head may
+# tighten the budget but not loosen it.
+instruction_limit_percent = 5
+
+# A benchmark with no counterpart on the base is allowed at most this many
+# Callgrind instructions. CI reads it from both trees and applies the smaller;
+# a head-only benchmark with no budget in either tree fails the check.
+new_bench_instruction_ir = 20000

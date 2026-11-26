@@ -208,7 +208,14 @@ fn score(before: f64, after: f64) -> Change {
     cost(after, before)
 }
 
-/// True when `head` is at most `base` times (100 + `limit_percent`) / 100.
+/// True when `head` stays within `limit_percent` of `base`.
+///
+/// `head` passes below `base` times (100 + `limit_percent`) / 100, or,
+/// for a limit of zero or more, at most `base`. Under such a limit an
+/// unchanged or smaller count always passes, even at 0 percent or a zero
+/// base; a 5 percent limit passes a 4 percent increase and fails a 5 percent
+/// one. A negative limit demands a reduction: -5 percent passes a 6 percent
+/// reduction and fails a 5 percent one or an unchanged count.
 ///
 /// Fails closed: false for `NaN` or infinite input, a negative count, or a
 /// product too large to represent.
@@ -218,11 +225,18 @@ pub const fn budget(base: f64, head: f64, limit_percent: f64) -> bool {
         return false;
     }
 
-    // A NaN or infinite base or limit leaves `allowed` non-finite, and a NaN
-    // or infinite head fails the comparison, so neither needs its own guard.
-    let allowed = base * (100.0 + limit_percent);
+    within_limit(base, head, limit_percent)
+}
 
-    allowed.is_finite() && head * 100.0 <= allowed
+/// The rule of [`budget`] for counts it has already checked are not negative.
+///
+/// A NaN or infinite base or limit leaves `allowed` non-finite, and a NaN or
+/// infinite head fails both comparisons, so neither needs its own guard.
+const fn within_limit(base: f64, head: f64, limit_percent: f64) -> bool {
+    let allowed = base * (100.0 + limit_percent);
+    let no_increase = limit_percent >= 0.0 && head <= base;
+
+    allowed.is_finite() && (no_increase || head * 100.0 < allowed)
 }
 
 #[cfg(test)]
@@ -463,18 +477,41 @@ mod tests {
     }
 
     #[test]
-    fn a_five_percent_limit_accepts_four_and_refuses_six() {
+    fn a_five_percent_limit_accepts_four_and_refuses_five_and_six() {
         let verdicts = [
             budget(100.0, 104.0, 5.0),
             budget(100.0, 105.0, 5.0),
             budget(100.0, 106.0, 5.0),
         ];
 
+        assert_eq!(verdicts, [true, false, false]);
+    }
+
+    #[test]
+    fn an_unchanged_or_smaller_count_passes_at_a_zero_limit() {
+        let verdicts = [
+            budget(100.0, 100.0, 0.0),
+            budget(100.0, 99.0, 0.0),
+            budget(100.0, 101.0, 0.0),
+        ];
+
         assert_eq!(verdicts, [true, true, false]);
     }
 
     #[test]
-    fn a_zero_count_within_a_zero_base_passes() {
+    fn a_negative_limit_requires_a_reduction_past_it() {
+        let verdicts = [
+            budget(100.0, 100.0, -5.0),
+            budget(100.0, 99.0, -5.0),
+            budget(100.0, 95.0, -5.0),
+            budget(100.0, 94.0, -5.0),
+        ];
+
+        assert_eq!(verdicts, [false, false, false, true]);
+    }
+
+    #[test]
+    fn a_zero_base_allows_zero_and_no_increase() {
         assert_eq!(
             [budget(0.0, 0.0, 5.0), budget(0.0, 1.0, 5.0)],
             [true, false]

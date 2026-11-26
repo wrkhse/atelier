@@ -1,6 +1,5 @@
-# The complexity metric: rust-code-analysis measures the base and head trees
-# and atelier-metrics compares them, both inside the bounded gate container;
-# the runner only shows the summary. See .github/ci/README.md.
+# Measure and compare the base and head trees inside the bounded gate
+# container; the runner only shows the summary. See .github/ci/README.md.
 name: metrics
 
 on:
@@ -58,3 +57,410 @@ jobs:
             exit 1
           fi
           cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+  performance:
+    name: metrics/performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GATE: metrics/performance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - name: Build atelier-metrics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-metrics \
+            --target x86_64-unknown-linux-musl
+      - name: Measure and compare both trees in the container
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          GATES: metrics/performance
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: bash "$CI_SUPPORT/run.sh" metrics
+      - name: Summarize performance
+        if: ${{ !cancelled() }}
+        env:
+          SUMMARY: ${{ runner.temp }}/atelier-reports/container/summary.txt
+        run: |
+          if [[ ! -f "$SUMMARY" || -L "$SUMMARY" || ! -s "$SUMMARY" ]]; then
+            echo "::error::the container wrote no performance summary at $SUMMARY"
+            exit 1
+          fi
+          cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+  budget-proof:
+    name: metrics/budget-proof (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [slowdown, restored, head-raises]
+    env:
+      GATE: metrics/performance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - name: Build atelier-metrics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-metrics \
+            --target x86_64-unknown-linux-musl
+      - name: Verify the performance gate verdict
+        shell: bash
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          # Compare head with the tree it merges into, as the performance job
+          # does, so the proof measures two different trees.
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+          PROOF_MODE: ${{ matrix.mode }}
+        run: |
+          expected_status=0
+          expected_verdict=passed
+          if [[ "$PROOF_MODE" == slowdown ]]; then
+            expected_status=1
+            expected_verdict=failed
+
+            # The slowdown patches the measured function itself in head's
+            # working tree, so the proof is a genuine regression rather than
+            # a repeated call. The base tree comes from git at BASE, unpatched.
+            python3 - "$SOURCE/reporter/src/report.rs" <<'PY' || exit 1
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          signature = (
+              "pub fn results(report: &CiReport, gates: &[String])"
+              " -> Vec<GateCheck> {"
+          )
+          lines = path.read_text().split("\n")
+          found = [i for i, line in enumerate(lines) if line.strip() == signature]
+          if len(found) != 1:
+              print(
+                  f"::error::slowdown expected one results() signature in {path},"
+                  f" found {len(found)}"
+              )
+              sys.exit(1)
+          lines[found[0] + 1 : found[0] + 1] = [
+              "    for i in 0..256 {",
+              "        std::hint::black_box(i);",
+              "    }",
+          ]
+          path.write_text("\n".join(lines))
+          PY
+          fi
+
+          # head-raises loosens head's own budget to 99%; the gate must still
+          # apply the base's 5%.
+          if [[ "$PROOF_MODE" == head-raises ]]; then
+            printf '%s\n' 'instruction_limit_percent = 99' \
+              > "$SOURCE/.moon/config/metrics.toml"
+          fi
+
+          status=0
+          bash "$CI_SUPPORT/run.sh" metrics || status=$?
+          summary="$RUNNER_TEMP/atelier-reports/container/summary.txt"
+          if [[ "$status" != "$expected_status" ]] \
+            || ! grep -Fxq "budget: $expected_verdict" "$summary"; then
+            echo "::error::$PROOF_MODE expected budget: $expected_verdict" \
+              "(exit $expected_status), got exit $status"
+            exit 1
+          fi
+
+          if [[ "$PROOF_MODE" == head-raises ]]; then
+            applied='limit: instruction_limit_percent 5 from base (base 5, head 99)'
+            if ! grep -Fxq "$applied" "$summary"; then
+              echo "::error::head-raises expected '$applied' in the summary"
+              exit 1
+            fi
+          fi
+          cat -- "$summary" >> "$GITHUB_STEP_SUMMARY"
+
+  # Adds a benchmark that only head declares, so the gate judges it against
+  # the absolute new_bench_instruction_ir budget: over sets the budget to 1
+  # Ir and must fail, under keeps 20000 and must pass, and no-budget removes
+  # the key so neither tree sets one and the gate must fail closed.
+  # dependency proves a PR that adds a dependency builds and is measured.
+  new-bench-proof:
+    name: metrics/new-bench-proof (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [over, under, no-budget, dependency]
+    env:
+      GATE: metrics/performance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - name: Build atelier-metrics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-metrics \
+            --target x86_64-unknown-linux-musl
+      - name: Verify the head-only benchmark budget
+        shell: bash
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+          PROOF_MODE: ${{ matrix.mode }}
+        run: |
+          if [[ "$PROOF_MODE" == dependency ]]; then
+            python3 - "$SOURCE/reporter/Cargo.toml" <<'PY' || exit 1
+          import pathlib
+          import sys
+          import tomllib
+
+          path = pathlib.Path(sys.argv[1])
+          text = path.read_text()
+          if "itoa" in tomllib.loads(text)["dependencies"]:
+              print(f"::error::dependency found itoa already declared in {path}")
+              sys.exit(1)
+
+          lines = text.split("\n")
+          start = lines.index("[dependencies]") + 1
+          end = next(
+              (i for i in range(start, len(lines)) if lines[i].startswith("[")),
+              len(lines),
+          )
+          while end > start and not lines[end - 1].strip():
+              end -= 1
+
+          lines.insert(end, 'itoa = "1"')
+          path.write_text("\n".join(lines))
+          PY
+            cargo generate-lockfile --manifest-path "$SOURCE/Cargo.toml"
+          else
+            # head_only is a copy of the reporter benchmark under a name the
+            # base's manifest does not declare, so it has no base count.
+            cp -- "$SOURCE/reporter/benches/library_benchmark.rs" \
+              "$SOURCE/reporter/benches/head_only.rs"
+            python3 - "$SOURCE/reporter/Cargo.toml" <<'PY' || exit 1
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          text = path.read_text()
+          if any(line.strip() == 'name = "head_only"' for line in text.split("\n")):
+              print(f"::error::new-bench-proof found a head_only bench in {path}")
+              sys.exit(1)
+          if not text.endswith("\n"):
+              text += "\n"
+          text += '\n[[bench]]\nname = "head_only"\nharness = false\n'
+          path.write_text(text)
+          PY
+
+            # Head's budget for the mode: over lowers it to 1 Ir, under keeps
+            # 20000, no-budget removes only that key and keeps the 5% limit.
+            python3 - "$SOURCE/.moon/config/metrics.toml" "$PROOF_MODE" \
+              <<'PY' || exit 1
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          mode = sys.argv[2]
+          lines = path.read_text().split("\n")
+          key = re.compile(r"\s*new_bench_instruction_ir\s*=")
+          found = [i for i, line in enumerate(lines) if key.match(line)]
+          if len(found) != 1:
+              print(
+                  f"::error::{mode} expected one new_bench_instruction_ir"
+                  f" in {path}, found {len(found)}"
+              )
+              sys.exit(1)
+          if mode == "over":
+              lines[found[0]] = "new_bench_instruction_ir = 1"
+          elif mode == "no-budget":
+              del lines[found[0]]
+          elif lines[found[0]].strip() != "new_bench_instruction_ir = 20000":
+              print("::error::under expected new_bench_instruction_ir = 20000")
+              sys.exit(1)
+          path.write_text("\n".join(lines))
+          PY
+          fi
+
+          # no-budget must not rest on the real base lacking the key: once main
+          # sets new_bench_instruction_ir, the base would supply a budget. Its
+          # base is a local commit on HEAD whose tree holds head's config with
+          # the key removed, so neither tree sets one. HEAD and the working
+          # tree stay as they are; head_only stays out of that commit.
+          proof_base=$BASE
+          if [[ "$PROOF_MODE" == no-budget ]]; then
+            config=.moon/config/metrics.toml
+            index="$RUNNER_TEMP/no-budget.index"
+            GIT_INDEX_FILE=$index git -C "$SOURCE" read-tree HEAD
+            GIT_INDEX_FILE=$index git -C "$SOURCE" update-index -- "$config"
+            tree=$(GIT_INDEX_FILE=$index git -C "$SOURCE" write-tree)
+            proof_base=$(
+              git -C "$SOURCE" -c user.name=proof \
+                -c user.email=proof@example.invalid \
+                commit-tree "$tree" -p HEAD -m "proof: no new-bench budget"
+            )
+            base_config=$(git -C "$SOURCE" show "$proof_base:$config")
+            if grep -q 'new_bench_instruction_ir' <<< "$base_config"; then
+              echo "::error::no-budget base still sets new_bench_instruction_ir"
+              exit 1
+            fi
+          fi
+
+          log="$RUNNER_TEMP/new-bench-proof.log"
+          summary="$RUNNER_TEMP/atelier-reports/container/summary.txt"
+          status=0
+          BASE=$proof_base bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 \
+            || status=$?
+          cat -- "$log"
+          if [[ -f "$summary" ]]; then
+            cat -- "$summary" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          fail() {
+            echo "::error::$PROOF_MODE: $* (exit $status)"
+            exit 1
+          }
+          case "$PROOF_MODE" in
+            over)
+              [[ "$status" == 1 ]] || fail "expected exit 1"
+              grep -Fq 'new benchmark head_only' "$summary" \
+                || fail "expected 'new benchmark head_only' in the summary"
+              grep -Fxq 'budget: failed' "$summary" \
+                || fail "expected 'budget: failed' in the summary"
+              ;;
+            under)
+              [[ "$status" == 0 ]] || fail "expected exit 0"
+              grep -Fq 'new benchmark head_only' "$summary" \
+                || fail "expected 'new benchmark head_only' in the summary"
+              grep -Fxq 'budget: passed' "$summary" \
+                || fail "expected 'budget: passed' in the summary"
+              ;;
+            no-budget)
+              # Fail closed: a head-only benchmark with no budget in either
+              # tree fails the gate rather than passing unjudged.
+              [[ "$status" == 1 ]] || fail "expected exit 1"
+              grep -Fq 'neither tree sets' "$log" \
+                || fail "expected 'neither tree sets' in the log"
+              ;;
+            dependency)
+              [[ "$status" == 0 ]] || fail "expected exit 0"
+              grep -Fxq 'budget: passed' "$summary" \
+                || fail "expected 'budget: passed' in the summary"
+              grep -q '^limit: instruction_limit_percent ' "$summary" \
+                || fail "expected the instruction limit in the summary"
+              ;;
+            *)
+              fail "unknown mode"
+              ;;
+          esac
+
+  # Runs head's benchmark ten times with ASLR allowed, as metrics/performance
+  # does, and requires the total Callgrind Ir to spread by under 0.5 percent,
+  # so address layout cannot move a count near the budget.
+  aslr-spread:
+    name: metrics/aslr-spread
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GATE: metrics/spread
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - name: Build atelier-metrics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-metrics \
+            --target x86_64-unknown-linux-musl
+      - name: Measure head ten times in the container
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          GATES: metrics/spread
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: bash "$CI_SUPPORT/run.sh" metrics
+      - name: Require an Ir spread under 0.5 percent
+        shell: bash
+        env:
+          SPREAD: ${{ runner.temp }}/atelier-reports/container/spread.txt
+        run: |
+          if [[ ! -f "$SPREAD" || -L "$SPREAD" || ! -s "$SPREAD" ]]; then
+            echo "::error::the container wrote no Ir values at $SPREAD"
+            exit 1
+          fi
+
+          # Ten whole positive counts; any other line fails before the spread.
+          measured=$(awk '
+            !/^[0-9]+$/ { bad = "line " NR " is not a whole Ir count"; exit }
+            NR == 1 || $1 + 0 < min + 0 { min = $1 }
+            NR == 1 || $1 + 0 > max + 0 { max = $1 }
+            END {
+              if (bad == "" && NR != 10) bad = NR " Ir values, not 10"
+              if (bad == "" && min + 0 <= 0) bad = "the smallest Ir is 0"
+              if (bad != "") { print bad > "/dev/stderr"; exit 1 }
+              printf "%s %s %.6f\n", min, max, (max - min) * 100 / min
+            }
+          ' "$SPREAD") || {
+            echo "::error::spread.txt does not hold ten Ir counts"
+            exit 1
+          }
+          read -r min max spread <<< "$measured"
+
+          {
+            echo "### metrics/aslr-spread"
+            echo
+            echo "Ir spread: $spread% (min $min, max $max; limit 0.5%)"
+            echo
+            echo '```text'
+            cat -- "$SPREAD"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if ! awk -v spread="$spread" 'BEGIN { exit !(spread + 0 < 0.5) }'; then
+            echo "::error::Ir spread $spread% is not under 0.5%" \
+              "(min $min, max $max)"
+            exit 1
+          fi
+          echo "Ir spread $spread% (min $min, max $max)"

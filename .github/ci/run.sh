@@ -23,8 +23,8 @@ binary="$RUNNER_TEMP/atelier"
 mkdir -p "$output" "$binary"
 
 # Each job stays inside its 90 minutes: a gate is gate + validate. The
-# metrics mode runs the gate container for metrics/complexity alone, with no
-# moon report to validate.
+# metrics mode runs one metrics gate in the container, with no moon report
+# to validate.
 container_mode=$MODE
 case "$MODE" in
   selftest | validate) limit=10m ;;
@@ -33,8 +33,10 @@ case "$MODE" in
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
-if [[ "$MODE" == metrics && "$GATE" != metrics/complexity ]]; then
-  echo "metrics: GATE must be metrics/complexity, not '$GATE'" >&2
+if [[ "$MODE" == metrics && "$GATE" != metrics/complexity \
+  && "$GATE" != metrics/performance && "$GATE" != metrics/spread ]]; then
+  echo "metrics: GATE must be metrics/complexity, metrics/performance or" \
+    "metrics/spread, not '$GATE'" >&2
   exit 2
 fi
 
@@ -84,20 +86,24 @@ memory="$(( total > 4096 ? total - 2048 : total / 2 ))m"
 # create NAME NETWORK MOUNT...: no runner home, credentials, command files or
 # container-engine socket. Omitting --pid keeps Docker's private PID
 # namespace. The process limit counts threads: three mutant jobs run rustc
-# and nextest.
+# and nextest. GATE_OVERRIDE, when set, is the gate this one container runs,
+# as metrics/performance runs head and base in two.
 create() {
   local name=$1 network=$2
   shift 2
+  local gate=${GATE_OVERRIDE:-$GATE}
   local mounts=()
   for mount in "$@"; do
     mounts+=(--mount "$mount")
   done
+
   docker create --name "$name" --init --user 10001:10001 \
     --cap-drop ALL --security-opt no-new-privileges \
     --pids-limit 4096 --memory "$memory" --memory-swap "$memory" --cpus "$cpus" \
     --network "$network" --ipc private --stop-timeout 10 \
     "${mounts[@]}" \
-    --env "MODE=$container_mode" --env GATE --env ROOT --env BASE --env GATES \
+    --env "MODE=$container_mode" --env "GATE=$gate" --env ROOT --env BASE \
+    --env GATES \
     atelier-gates >/dev/null
   names+=("$name")
   local sources=()
@@ -154,31 +160,100 @@ if [[ "$container_mode" == selftest ]]; then
   network=none
 fi
 
-create "atelier-$container_mode-$id" "$network" \
-  "type=bind,source=$source,target=/source,readonly" \
-  "type=bind,source=$binary,target=/binary,readonly"
-
-start "atelier-$container_mode-$id" || status=$?
-
 # Evidence collection cannot turn a failed, timed-out or killed run green.
 # docker cp keeps links, so only plain files and folders cross to the host.
-docker cp "atelier-$container_mode-$id:/reports/." "$output/" >&2 || true
-find "$output" -mindepth 1 ! -type f ! -type d -delete
+if [[ "$MODE" == metrics && "$GATE" == metrics/performance ]]; then
+  # Head runs untrusted code, so it is measured in its own container, which
+  # has no /reports and so cannot touch the base's evidence. Its output is
+  # copied to the host, then mounted read-only into the trusted container
+  # that measures the base and compares the two counts. A failed head run
+  # keeps status nonzero whatever the base container does.
+  headout="$RUNNER_TEMP/atelier-head-reports"
+  rm -rf -- "$headout"
+  mkdir -p "$headout"
+  # The two containers run one after the other, so each gets 35 minutes to
+  # fit both inside the job's 90-minute timeout.
+  limit=35m
+  GATE_OVERRIDE=metrics/performance-head create "atelier-perf-head-$id" \
+    "$network" \
+    "type=bind,source=$source,target=/source,readonly" \
+    "type=bind,source=$binary,target=/binary,readonly"
+  head_status=0
+  start "atelier-perf-head-$id" || head_status=$?
+
+  if (( head_status == 0 )); then
+    docker cp "atelier-perf-head-$id:/head-out/." "$headout/" >/dev/null 2>&1 \
+      || true
+  else
+    status=$head_status
+  fi
+
+  find "$headout" -mindepth 1 ! -type f ! -type d -delete
+  find "$headout" -type f -printf '%s\n' | awk '
+    function fail(reason) {
+      print "metrics/performance: head output " reason > "/dev/stderr"
+      exit 1
+    }
+    NR > 32 || $1 > 16 * 1024 * 1024 {
+      fail("must have at most 32 regular files of at most 16 MiB each")
+    }
+    {
+      total += $1
+      if (total > 32 * 1024 * 1024) {
+        fail("has more than 32 MiB of regular files in total")
+      }
+    }
+  ' || exit 1
+
+  GATE_OVERRIDE=metrics/performance create "atelier-perf-base-$id" \
+    "$network" \
+    "type=bind,source=$source,target=/source,readonly" \
+    "type=bind,source=$binary,target=/binary,readonly" \
+    "type=bind,source=$headout,target=/head-in,readonly"
+  start "atelier-perf-base-$id" || status=$?
+  docker cp "atelier-perf-base-$id:/reports/." "$output/" >&2 || true
+  find "$output" -mindepth 1 ! -type f ! -type d -delete
+else
+  create "atelier-$container_mode-$id" "$network" \
+    "type=bind,source=$source,target=/source,readonly" \
+    "type=bind,source=$binary,target=/binary,readonly"
+
+  start "atelier-$container_mode-$id" || status=$?
+
+  docker cp "atelier-$container_mode-$id:/reports/." "$output/" >&2 || true
+  find "$output" -mindepth 1 ! -type f ! -type d -delete
+fi
 
 # The container's comparison decided the status. As a second fail-closed
-# check, each side must have come back as a folder holding at least one
-# non-empty report.
+# check, require non-empty evidence from both trees, or for metrics/spread
+# the ten measured counts the workflow judges.
 if [[ "$MODE" == metrics ]]; then
-  for side in base head; do
-    folder="$output/$side"
-    if [[ ! -d "$folder" ]]; then
-      echo "metrics: no $side report folder at $folder" >&2
-      status=1
-    elif [[ -z "$(find "$folder" -type f -size +0c -print -quit)" ]]; then
-      echo "metrics: the $side report folder $folder is empty" >&2
+  if [[ "$GATE" == metrics/spread ]]; then
+    file="$output/spread.txt"
+    if [[ ! -f "$file" || -L "$file" || ! -s "$file" ]]; then
+      echo "metrics/spread: no non-empty plain report at $file" >&2
       status=1
     fi
-  done
+  elif [[ "$GATE" == metrics/complexity ]]; then
+    for side in base head; do
+      folder="$output/$side"
+      if [[ ! -d "$folder" ]]; then
+        echo "metrics: no $side report folder at $folder" >&2
+        status=1
+      elif [[ -z "$(find "$folder" -type f -size +0c -print -quit)" ]]; then
+        echo "metrics: the $side report folder $folder is empty" >&2
+        status=1
+      fi
+    done
+  else
+    for report in base-ir.json head-ir.json summary.txt; do
+      file="$output/$report"
+      if [[ ! -f "$file" || -L "$file" || ! -s "$file" ]]; then
+        echo "metrics/performance: no non-empty plain report at $file" >&2
+        status=1
+      fi
+    done
+  fi
   exit "$status"
 fi
 

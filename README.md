@@ -55,6 +55,17 @@ result by the moon target's task id.
 **Runner.** Project wiring runs `moon ci` and the reporter in CI.
 The same command runs locally in a container; no gate runs on the host.
 
+The instruction budget uses atelier's `atelier-metrics budget` command.
+Both trees use the required base harness, with each tree's own manifests,
+lockfile and `.cargo` settings. Head-only benchmarks use head's manifest and
+run before the harness is replaced. Head writes its own counts in a contained
+job; they are mounted read-only into the job that measures base and judges.
+Head cannot write the base measurement, saved baseline, applied limits,
+summary or trusted verdict. In CI, a slowdown patched into the measured
+function fails, and the unpatched code passes. The gate catches regressions
+in honest code, not a pull request that games its own measurement (supervisor,
+2026-11-26).
+
 ## Roadmap
 
 - [x] Rust gate presets on moon

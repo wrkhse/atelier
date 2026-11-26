@@ -24,13 +24,28 @@ flowchart LR
 
 ### Performance
 
-Instruction counts from Gungraun with Callgrind are the stable measure and can
-fail a check; wall-time percentiles from hyperfine are reported. It lives in a
-metrics crate and a container job for each measure. One CI job runs the same
-benchmark on base and head and compares them.
+Instruction counts are the stable measure and can fail a check. A metrics
+crate and a container job handle each measure. CI runs the same benchmark on
+base and head in separate contained jobs and compares them. Head supplies its
+measured counts read-only to the trusted job. It cannot write the base
+measurement, saved baseline, limits, summary or verdict.
+Gungraun 0.20.0 measures instructions with Callgrind, and the limit comes
+from `.moon/config/metrics.toml`.
 
-Verification: a deliberate slowdown fails the instruction check; removing it
-passes.
+Wall-time percentiles from hyperfine are planned: they are reported, never
+failing, and arrive after instruction counts.
+
+A benchmark with no counterpart on base is judged against its absolute
+budget, and fails closed when it has none. A base without the benchmark
+harness is a named failure.
+
+The gate catches regressions in honest code. It does not defend against a
+pull request that games its own measurement, any more than the test gate
+defends against one that rewrites its tests; that gaming is the review bot's
+gaming digest and the owner's concern (supervisor, 2026-11-26).
+
+Verification: the deliberate-slowdown proof patches `results()` with a real
+loop and fails the instruction check; the unpatched code passes.
 
 ### Resources
 
