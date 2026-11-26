@@ -146,7 +146,7 @@ jobs:
             fi
           done
 
-          "$unpacked/bin/atelier-reporter" --version
+          "$unpacked/bin/atelier-reporter" --help
           "$unpacked/bin/atelier-metrics" --version
 
           # Give the packaged preset a consumer workspace with one Rust crate.

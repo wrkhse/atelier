@@ -35,6 +35,7 @@ METRICS_PATH="$REL/bin/atelier-metrics"
 REPORTER_PATH="$REL/bin/atelier-reporter"
 SOURCE="$RUNNER_TEMP/slice2-head"
 SUPPORT="$GITHUB_WORKSPACE/.github/ci"
+CI_SUPPORT="$SUPPORT"
 METRICS_TARGET="target/x86_64-unknown-linux-musl/release/atelier-metrics"
 # The released binary is staged at METRICS_TARGET on purpose; only a local
 # build is forbidden in the recording.
@@ -514,7 +515,7 @@ expected_text() {
 }
 
 check_markers() {
-  local markers timestamp marker frame expected name
+  local markers timestamp marker frame expected name status=0
 
   markers=$(termctrl markers "$RECORDING") \
     || die "termctrl markers failed for $RECORDING"
@@ -539,9 +540,13 @@ check_markers() {
     expected=$(expected_text "$marker")
     rg -qF -- "$expected" <<< "$frame" \
       || die "marker $marker lacks '$expected'"
-    if rg -q -- "$LOCAL_BUILD_RE" <<< "$frame"; then
-      die "marker $marker shows a locally built metrics binary"
-    fi
+    status=0
+    rg -q -- "$LOCAL_BUILD_RE" <<< "$frame" || status=$?
+    case "$status" in
+      0) die "marker $marker shows a locally built metrics binary" ;;
+      1) ;;
+      *) die "could not scan marker $marker for a local metrics build" ;;
+    esac
   done <<< "$markers"
 }
 
