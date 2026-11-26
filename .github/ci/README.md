@@ -44,22 +44,20 @@ summary. `run.sh` also fails if either report folder comes back empty. There
 is no moon report, so no reporter or offline validation.
 
 `metrics/performance` runs the same Gungraun benchmark harness on both trees
-in the bounded container, each with `cargo bench --locked`. Before head's run
-of it, the base's `reporter/benches/library_benchmark.rs`,
-`reporter/Cargo.toml`, the workspace `Cargo.toml`, `Cargo.lock` and
-`.cargo/` replace head's, so a pull request cannot weaken that benchmark,
-redirect its `[lib]` or `[[bench]]` targets, or change the dependencies,
-profile or rustflags it is measured with. A benchmark that only head has is
-built and measured earlier, with head's own manifest, `Cargo.lock`, profile
-and rustflags, since the base's files have not yet replaced head's. The base
-harness is required: a base without it is a named failure, and the harness is
-never copied from head. The harness has no slowdown switch in its environment.
+in the bounded containers, each with `cargo bench --locked`. Only the base's
+`reporter/benches/library_benchmark.rs` replaces head's. Each tree builds with
+its own manifests, lockfile and `.cargo` settings. A benchmark that only head
+has is built and measured earlier with head's own manifest, before the base's
+harness replaces head's. The base harness is required: a base without it is a
+named failure, and the harness is never copied from head. The harness has no
+slowdown switch in its environment.
 
 Head is measured first, in its own contained job with no access to the trusted
-reports. Its Callgrind `Ir` count is copied out and mounted read-only into a
-second contained job, which measures base, applies the limit and writes the
-summary. A pull request cannot rewrite the base measurement or the limit,
-because it cannot write that evidence at all. `atelier-metrics budget`
+reports. It writes `/head-out/head.jsonl` and the head-only benchmark `Ir`
+files, which are mounted read-only into a second contained job. That job
+measures base, applies the limits and writes the summary and verdict. Head
+cannot write the base measurement, saved baseline, applied limits, summary or
+trusted verdict; it supplies its own measured counts. `atelier-metrics budget`
 compares the two `Ir` counts directly. At any non-negative limit, an
 unchanged or smaller count always passes; only an increase is compared,
 strictly, against the limit, and the check fails when it is at or past it:

@@ -178,9 +178,16 @@ if [[ "$MODE" == metrics && "$GATE" == metrics/performance ]]; then
     "$network" \
     "type=bind,source=$source,target=/source,readonly" \
     "type=bind,source=$binary,target=/binary,readonly"
-  start "atelier-perf-head-$id" || status=$?
-  docker cp "atelier-perf-head-$id:/head-out/." "$headout/" >/dev/null 2>&1 \
-    || true
+  head_status=0
+  start "atelier-perf-head-$id" || head_status=$?
+
+  if (( head_status == 0 )); then
+    docker cp "atelier-perf-head-$id:/head-out/." "$headout/" >/dev/null 2>&1 \
+      || true
+  else
+    status=$head_status
+  fi
+
   find "$headout" -mindepth 1 ! -type f ! -type d -delete
   if ! find "$headout" -type f -printf '%s\n' \
     | awk 'NR > 32 || $1 > 16777216 { exit 1 }'; then

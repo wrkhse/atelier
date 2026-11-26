@@ -320,6 +320,23 @@ PY
     echo "metrics/performance-head: $report has no single Callgrind Ir value" >&2
     exit 1
   fi
+
+  # Bound the regular-file payload before the runner copies it out.
+  find /head-out -type f -printf '%s\n' | awk '
+    function fail(reason) {
+      print "metrics/performance-head: /head-out " reason > "/dev/stderr"
+      exit 1
+    }
+    NR > 32 { fail("has more than 32 regular files") }
+    $1 > 16 * 1024 * 1024 { fail("has a regular file larger than 16 MiB") }
+    {
+      total += $1
+      if (total > 32 * 1024 * 1024) {
+        fail("has more than 32 MiB of regular files in total")
+      }
+    }
+  '
+
   echo "metrics/performance-head: measured head"
   exit 0
 fi
