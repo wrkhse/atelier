@@ -294,20 +294,22 @@ PY
     fi
   done
 
-  # The base's library_benchmark.rs, reporter manifest, workspace Cargo.toml
-  # and .cargo/ replace head's, so a pull request cannot weaken the benchmark
-  # it is measured by, point [lib] or [[bench]] at a decoy, or change how it
-  # is compiled. Head keeps its own lockfile.
+  # The base's library_benchmark.rs, reporter manifest, workspace Cargo.toml,
+  # Cargo.lock and .cargo/ replace head's, so a pull request cannot weaken the
+  # benchmark it is measured by, point [lib] or [[bench]] at a decoy, or change
+  # how it is compiled. The base's manifests build against the base's
+  # dependency set, so a lockfile change in head cannot break them.
   cp -- /work-base/reporter/benches/library_benchmark.rs \
     /work/reporter/benches/library_benchmark.rs
   cp -- /work-base/reporter/Cargo.toml /work/reporter/Cargo.toml
   cp -- /work-base/Cargo.toml /work/Cargo.toml
+  cp -- /work-base/Cargo.lock /work/Cargo.lock
   rm -rf -- /work/.cargo
   if [[ -d /work-base/.cargo ]]; then
     cp -R -- /work-base/.cargo /work/.cargo
   fi
 
-  # --locked keeps the build on head's lockfile.
+  # --locked keeps head's governed measurement on the base's lockfile.
   cargo bench --locked --bench library_benchmark -- --output-format=json \
     > /head-out/head.jsonl
 

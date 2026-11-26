@@ -44,15 +44,16 @@ summary. `run.sh` also fails if either report folder comes back empty. There
 is no moon report, so no reporter or offline validation.
 
 `metrics/performance` runs the same Gungraun benchmark harness on both trees
-in the bounded container, each with `cargo bench --locked`. The base's
-`reporter/benches/library_benchmark.rs`, `reporter/Cargo.toml`, the
-workspace `Cargo.toml` and `.cargo/` replace head's, so a pull request cannot
-weaken the benchmark, redirect its `[lib]` or `[[bench]]` targets, or change
-the profile or rustflags it is measured with. A benchmark that only head has
-is measured with head's own manifest before the base's files replace it. Each
-tree keeps its own `Cargo.lock`. The base harness is required: a base without it is a named
-failure, and the harness is never copied from head. The harness has no
-slowdown switch in its environment.
+in the bounded container, each with `cargo bench --locked`. Before head's run
+of it, the base's `reporter/benches/library_benchmark.rs`,
+`reporter/Cargo.toml`, the workspace `Cargo.toml`, `Cargo.lock` and
+`.cargo/` replace head's, so a pull request cannot weaken that benchmark,
+redirect its `[lib]` or `[[bench]]` targets, or change the dependencies,
+profile or rustflags it is measured with. A benchmark that only head has is
+built and measured earlier, with head's own manifest, `Cargo.lock`, profile
+and rustflags, since the base's files have not yet replaced head's. The base
+harness is required: a base without it is a named failure, and the harness is
+never copied from head. The harness has no slowdown switch in its environment.
 
 Head is measured first, in its own contained job with no access to the trusted
 reports. Its Callgrind `Ir` count is copied out and mounted read-only into a
