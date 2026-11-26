@@ -371,28 +371,39 @@ jobs:
           run=allocated
           python3 - "$SOURCE/reporter/src/report.rs" <<'PY' || exit 1
           import pathlib
+          import re
           import sys
 
           path = pathlib.Path(sys.argv[1])
-          signature = (
-              "pub fn results(report: &CiReport, gates: &[String])"
-              " -> Vec<GateCheck> {"
+          text = path.read_text()
+          # Any whitespace, including line breaks, may separate the tokens, so
+          # rustfmt can wrap the parameters or the return type. The parameters
+          # hold no brace or semicolon, so one match never spans two items.
+          signature = re.compile(
+              r"^[ \t]*pub\s+fn\s+results\s*\([^{};]*\)"
+              r"\s*->\s*Vec\s*<\s*GateCheck\s*>\s*\{",
+              re.MULTILINE,
           )
-          lines = path.read_text().split("\n")
-          found = [i for i, line in enumerate(lines) if line.strip() == signature]
+          found = list(signature.finditer(text))
           if len(found) != 1:
               print(
                   f"::error::allocated expected one results() signature in {path},"
                   f" found {len(found)}"
               )
               sys.exit(1)
-          lines[found[0] + 1 : found[0] + 1] = [
+          # The allocation goes on the lines after the one holding the
+          # signature's opening brace.
+          end = text.find("\n", found[0].end())
+          if end < 0:
+              print(f"::error::allocated found no line after results() in {path}")
+              sys.exit(1)
+          lines = [
               "    let extra: Vec<usize> ="
               " (0..report.actions.len().saturating_mul(8).max(1)).collect();",
               "    std::hint::black_box(&extra);",
               "    drop(extra);",
           ]
-          path.write_text("\n".join(lines))
+          path.write_text(text[: end + 1] + "\n".join(lines) + "\n" + text[end + 1 :])
           PY
 
           # Run 2, allocated: the patched head against the same PR base.
