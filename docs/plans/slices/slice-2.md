@@ -64,9 +64,12 @@ names its method:
 - cargo-bloat 0.12.1 with `--crates --message-format json` supplies file size
   and an estimated per-crate `.text` breakdown; `cargo metadata` supplies
   dependency facts.
-- `/proc/<pid>/status` gives `voluntary_ctxt_switches` over a fixed idle
-  window, and `/proc/<pid>/io` gives `wchar`; the rows carry those names.
-- Threads and open files come from `/proc` sampling at a fixed 100 ms
+
+The gate in this part samples no `/proc` counters. The next part adds them:
+
+- `/proc/<pid>/status` will give `voluntary_ctxt_switches` over a fixed idle
+  window, and `/proc/<pid>/io` will give `wchar`; the rows carry those names.
+- Threads and open files will come from `/proc` sampling at a fixed 100 ms
   interval for a bounded duration, and their rows read "sampled peak, every
   100 ms".
 

@@ -144,19 +144,17 @@ jobs:
           fi
           cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
 
-  # allocated adds a real allocation to results() in head, so head's DHAT
-  # TotalBlocks must exceed base's; restored leaves head as it is, so the
-  # two counts must be equal. Both runs must exit 0.
+  # A controlled A/B of the allocation patch. The trusted container measures
+  # the PR base in both runs; only the untrusted head container sees the
+  # patch. The patched head's DHAT TotalBlocks must exceed the unpatched
+  # head's, so a later PR that changes the reporter's allocations still
+  # passes. Both runs must exit 0.
   resources-proof:
-    name: metrics/resources-proof (${{ matrix.mode }})
+    name: metrics/resources-proof
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: [allocated, restored]
     env:
       GATE: metrics/resources
     steps:
@@ -181,19 +179,48 @@ jobs:
           CI_SUPPORT: ${{ github.workspace }}/.github/ci
           SOURCE: ${{ github.workspace }}
           GATES: metrics/resources
-          PROOF_MODE: ${{ matrix.mode }}
+          # The real PR base: the trusted container measures it in both runs.
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
         run: |
-          # A controlled A/B of the patch, not a PR-versus-base resource
-          # comparison: both modes take the checkout's own commit as BASE, so
-          # the base tree is the pristine checkout. Only allocated's
-          # working-tree patch differs; restored compares the tree to itself.
-          proof_base=$(git -C "$SOURCE" rev-parse HEAD) \
-            || { echo "::error::$PROOF_MODE: cannot read HEAD"; exit 1; }
+          reports="$RUNNER_TEMP/atelier-reports/container"
+          summary="$reports/summary.txt"
+          control_head="$RUNNER_TEMP/control-head.json"
+          control_summary="$RUNNER_TEMP/control-summary.txt"
+          status=0
 
-          if [[ "$PROOF_MODE" == allocated ]]; then
-            # Patches head's working tree only; the base tree comes from git
-            # at the checkout's commit, unpatched.
-            python3 - "$SOURCE/reporter/src/report.rs" <<'PY' || exit 1
+          fail() {
+            echo "::error::$run: $* (exit $status)"
+            exit 1
+          }
+
+          # Runs the resources gate against BASE and requires exit 0 and an
+          # allocations row in the summary.
+          measure() {
+            local log="$RUNNER_TEMP/resources-proof-$run.log"
+            status=0
+            bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 || status=$?
+            cat -- "$log"
+            [[ "$status" == 0 ]] || fail "expected exit 0"
+            [[ -f "$summary" && ! -L "$summary" && -s "$summary" ]] \
+              || fail "no resources summary at $summary"
+            grep -Eiq '^\| *allocations' "$summary" \
+              || fail "expected an allocations row in the summary"
+          }
+
+          # Run 1, control: the unpatched head against the PR base.
+          run=control
+          measure
+          cp -- "$reports/head-resources.json" "$control_head" \
+            || fail "cannot keep head-resources.json"
+          cp -- "$summary" "$control_summary" \
+            || fail "cannot keep summary.txt"
+          # Run 2 must write its own evidence, not inherit run 1's.
+          rm -rf -- "$reports"
+
+          # Patches head's working tree only, which only the untrusted head
+          # container measures; the trusted side reads BASE from git.
+          run=allocated
+          python3 - "$SOURCE/reporter/src/report.rs" <<'PY' || exit 1
           import pathlib
           import sys
 
@@ -211,35 +238,20 @@ jobs:
               )
               sys.exit(1)
           lines[found[0] + 1 : found[0] + 1] = [
-              "    let extra: Vec<GateCheck> ="
-              " Vec::with_capacity(report.actions.len());",
+              "    let extra: Vec<usize> ="
+              " (0..report.actions.len().saturating_mul(8).max(1)).collect();",
+              "    std::hint::black_box(&extra);",
               "    drop(extra);",
           ]
           path.write_text("\n".join(lines))
           PY
-          fi
 
-          log="$RUNNER_TEMP/resources-proof.log"
-          reports="$RUNNER_TEMP/atelier-reports/container"
-          summary="$reports/summary.txt"
-          status=0
-          BASE=$proof_base bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 \
-            || status=$?
-          cat -- "$log"
+          # Run 2, allocated: the patched head against the same PR base.
+          measure
 
-          fail() {
-            echo "::error::$PROOF_MODE: $* (exit $status)"
-            exit 1
-          }
-          [[ "$status" == 0 ]] || fail "expected exit 0"
-          [[ -f "$summary" && ! -L "$summary" && -s "$summary" ]] \
-            || fail "no resources summary at $summary"
-          grep -Eiq '^\| *allocations' "$summary" \
-            || fail "expected an allocations row in the summary"
-
-          base=$(jq -er '.total_blocks' "$reports/resources.json") \
-            || fail "no total_blocks in resources.json"
-          head=$(jq -er '.total_blocks' "$reports/head-resources.json") \
+          control=$(jq -er '.total_blocks' "$control_head") \
+            || fail "no total_blocks in control-head.json"
+          allocated=$(jq -er '.total_blocks' "$reports/head-resources.json") \
             || fail "no total_blocks in head-resources.json"
 
           # The rendered table must agree: its Allocations (blocks) row holds
@@ -253,33 +265,26 @@ jobs:
             || fail "table before cell '$table_base' is not a whole number"
           [[ "$table_head" =~ ^[0-9]+$ ]] \
             || fail "table after cell '$table_head' is not a whole number"
-          {
-            echo "### metrics/resources-proof ($PROOF_MODE)"
-            echo
-            echo "TotalBlocks: base $base, head $head"
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
-          cat -- "$summary" >> "$GITHUB_STEP_SUMMARY"
 
-          case "$PROOF_MODE" in
-            allocated)
-              (( head > base )) \
-                || fail "expected head TotalBlocks $head above base $base"
-              (( table_head > table_base )) \
-                || fail "expected table after $table_head" \
-                  "above before $table_base"
-              ;;
-            restored)
-              (( head == base )) \
-                || fail "expected head TotalBlocks $head equal to base $base"
-              (( table_head == table_base )) \
-                || fail "expected table after $table_head" \
-                  "equal to before $table_base"
-              ;;
-            *)
-              fail "unknown mode"
-              ;;
-          esac
+          {
+            echo "### metrics/resources-proof"
+            echo
+            echo "Head TotalBlocks: control $control, allocated $allocated"
+            echo
+            echo "#### Control"
+            echo
+            cat -- "$control_summary"
+            echo
+            echo "#### Allocated"
+            echo
+            cat -- "$summary"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          (( allocated > control )) \
+            || fail "expected allocated head TotalBlocks $allocated" \
+              "above control $control"
+          (( table_head > table_base )) \
+            || fail "expected table after $table_head above before $table_base"
 
   budget-proof:
     name: metrics/budget-proof (${{ matrix.mode }})
