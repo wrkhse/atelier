@@ -83,23 +83,38 @@ contained runner and writes the ten Callgrind `Ir` values; the CI job requires
 their spread to stay under 0.5%. This is why the performance gate sets
 `GUNGRAUN_ALLOW_ASLR`: address layout randomisation does not move the count.
 
-`metrics/resources` reports a before-and-after table of CPU time, peak
-memory, allocations, binary size and dependency facts for the base and head
-trees: hyperfine 2.0.0 times the runs, Gungraun 0.20.0 counts allocations with
-DHAT under the pinned Valgrind 3.24.0, cargo-bloat 0.12.1 sizes the binary and
-`cargo metadata` counts the packages, the workspace members and the package
-names with more than one version. As with the performance gate, head is
-measured in its own contained job, with the base's harness and its own
+`metrics/resources` reports a before-and-after table for the base and head
+trees: CPU time, peak memory, allocations, binary size, dependency counts,
+startup time and build time. hyperfine 2.0.0 times the runs, Gungraun 0.20.0
+counts allocations with DHAT under the pinned Valgrind 3.24.0, cargo-bloat
+0.12.1 sizes the binary and `cargo metadata` counts the packages, the
+workspace members and the package names with more than one version. GNU time
+supplies three per-run rows for the direct child: `Voluntary context
+switches`, `Maximum resident set size (kbytes)` and `File system outputs`. A
+`long_running` declaration in `.moon/config/metrics.toml` names a process
+that the gate samples directly in `/proc` every 100 ms. Idle footprint,
+voluntary context switches over the idle window, `wchar` bytes and sampled
+peak threads and open files are numeric for a declared process. An
+undeclared, short-lived command reports `not applicable: exits in N ms` in
+those five rows. As with the performance gate,
+head is measured in its own contained job, with the base's harness and its own
 manifests, and its evidence is mounted read-only into the job that measures
-base and writes the table. The gate only reports: it never gives a failing
-verdict. `metrics/resources-proof` measures head against the PR base three
-times. The control run measures head as it is. The allocated run patches a
-real allocation into `results()` in head: head's DHAT `TotalBlocks` must
+base and writes the table. The resources rows carry no budgets and cannot
+fail a budget. The gate fails closed on missing evidence or a failed
+measurement: a declared process that exits nonzero, fewer than ten valid
+`/proc` samples or an early exit, missing or nonnumeric GNU time fields,
+or a reporter timeout.
+`metrics/resources-proof` measures head against the real PR base three
+times. The control run measures head as it is. The allocated run patches
+a real allocation into `results()` in head: head's DHAT `TotalBlocks` must
 exceed the control run's, and the table's `Allocations (blocks)` after cell
 must exceed the control run's after cell. The restored run checks
 `report.rs` out again, and head's `TotalBlocks` must return to the control
-run's count. In every run, every rendered row is checked against the matching
-field in that run's `resources.json` and `head-resources.json`, with a
+run's count. The proof copies the idle fixture config into head's working tree
+and restores the original on exit, so a base without a `long_running`
+declaration renders the not-applicable note before while head supplies numeric
+sampled values after. In every run, every rendered row is checked against the
+matching field in that run's `resources.json` and `head-resources.json`, with a
 tolerance for rounded decimal values.
 
 ## The container

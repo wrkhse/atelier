@@ -515,6 +515,197 @@ if [[ "$gate" == metrics/spread ]]; then
   exit
 fi
 
+# A GNU time field must be a nonnegative integer; otherwise fail, named. The
+# label is matched as a literal string in GNU time's verbose output.
+gnu_time_value() {
+  local file=$1 label=$2 value
+
+  value=$(awk -v label="$label" '
+    {
+      pos = index($0, label ":")
+      if (pos == 0) next
+      value = substr($0, pos + length(label) + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      print value
+      exit
+    }
+  ' "$file") || value=
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "metrics/resources: missing or nonnumeric $label in GNU time" >&2
+    exit 1
+  fi
+  printf '%s\n' "$value"
+}
+
+# The single [[long_running]] declaration in a tree's .moon/config/metrics.toml,
+# printed as NAME<TAB>COMMAND, or nothing when the tree has no such file or no
+# declaration. A file that is not regular, a malformed table, or more than one
+# declaration fails, named.
+long_running_command() {
+  local config=$1/.moon/config/metrics.toml
+
+  if [[ ! -e "$config" && ! -L "$config" ]]; then
+    return
+  fi
+  if [[ ! -f "$config" || -L "$config" ]]; then
+    echo "metrics/resources: $config is not a regular file" >&2
+    return 1
+  fi
+  python3 - "$config" <<'PY'
+import sys
+import tomllib
+
+path = sys.argv[1]
+with open(path, "rb") as config:
+    decls = tomllib.load(config).get("long_running", [])
+if not isinstance(decls, list):
+    sys.exit(f"metrics/resources: long_running in {path} is not an array")
+if len(decls) > 1:
+    sys.exit(f"metrics/resources: more than one long_running in {path}")
+if not decls:
+    sys.exit(0)
+decl = decls[0]
+name = decl.get("name") if isinstance(decl, dict) else None
+command = decl.get("command") if isinstance(decl, dict) else None
+if not isinstance(name, str) or not name or "\t" in name or "\n" in name:
+    sys.exit(f"metrics/resources: long_running in {path} has no plain name")
+if not isinstance(command, str) or not command or "\n" in command:
+    sys.exit(f"metrics/resources: long_running in {path} has no command")
+if "\t" in command:
+    sys.exit(f"metrics/resources: long_running in {path} has a tab in its command")
+print(f"{name}\t{command}")
+PY
+}
+
+# Terminate a background process and the children the kernel lists for it:
+# TERM the children then the parent, poll up to 20 x 0.1 s, KILL any that
+# remain, and wait. REAP_STATUS holds wait's status. A process still alive
+# after KILL cannot be reaped and fails here, named.
+terminate_tree() {
+  local pid=$1 label=$2 children child i running=1
+  local -i status=0
+  if [[ -r "/proc/$pid/task/$pid/children" ]]; then
+    read -r children < "/proc/$pid/task/$pid/children" || children=
+    for child in $children; do
+      kill -TERM "$child" 2>/dev/null || true
+    done
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  for ((i = 0; i < 20; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      running=0
+      break
+    fi
+    sleep 0.1
+  done
+  if (( running )); then
+    if [[ -r "/proc/$pid/task/$pid/children" ]]; then
+      read -r children < "/proc/$pid/task/$pid/children" || children=
+      for child in $children; do
+        kill -KILL "$child" 2>/dev/null || true
+      done
+    fi
+    kill -KILL "$pid" 2>/dev/null || true
+    for ((i = 0; i < 20; i++)); do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        running=0
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+  if (( running )); then
+    echo "metrics/resources: could not reap $label (pid $pid)" >&2
+    return 1
+  fi
+  wait "$pid" || status=$?
+  REAP_STATUS=$status
+}
+
+# Sample a declared long-running process: launch COMMAND from TREE as a direct
+# child, read the five /proc values every 100 ms for at most 20 samples, then
+# tear it down from the parent. Each field's largest sample goes to OUT's
+# idle.json; a child that exits before the window ends, or fewer than 10 valid
+# samples, fails named.
+sample_idle() {
+  local tree=$1 out=$2 name=$3 command=$4
+  local pid child_status=0 rss threads switches wchar fds sample
+  local -i valid=0 peak_rss=0 peak_threads=0 peak_switches=0 peak_wchar=0
+  local -i peak_fds=0 exited_early=0 i
+
+  bash -c "cd $tree && exec $command" > "$out/idle.out" &
+  pid=$!
+
+  for ((i = 0; i < 20; i++)); do
+    sleep 0.1
+    if ! kill -0 "$pid" 2>/dev/null; then
+      exited_early=1
+      break
+    fi
+    rss='' threads='' switches='' wchar='' fds=''
+    if [[ -r "/proc/$pid/status" ]]; then
+      rss=$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" || true)
+      threads=$(awk '/^Threads:/ { print $2 }' "/proc/$pid/status" || true)
+      switches=$(awk '/^voluntary_ctxt_switches:/ { print $2 }' \
+        "/proc/$pid/status" || true)
+    fi
+    if [[ -r "/proc/$pid/io" ]]; then
+      wchar=$(awk '/^wchar:/ { print $2 }' "/proc/$pid/io" || true)
+    fi
+    if [[ -d "/proc/$pid/fd" ]]; then
+      if ! fds=$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 -print \
+        2>/dev/null | wc -l); then
+        echo "metrics/resources: could not count open fds for $name" >&2
+        return 1
+      fi
+      fds=${fds//[[:space:]]/}
+    fi
+    sample="$rss $threads $switches $wchar $fds"
+    if [[ "$sample" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+      valid=$((valid + 1))
+      if (( rss > peak_rss )); then peak_rss=$rss; fi
+      if (( threads > peak_threads )); then peak_threads=$threads; fi
+      if (( switches > peak_switches )); then peak_switches=$switches; fi
+      if (( wchar > peak_wchar )); then peak_wchar=$wchar; fi
+      if (( fds > peak_fds )); then peak_fds=$fds; fi
+    fi
+  done
+
+  terminate_tree "$pid" "$name" || return 1
+  child_status=$REAP_STATUS
+  if (( exited_early )); then
+    if (( child_status != 0 )); then
+      echo "metrics/resources: $name exited with status $child_status" \
+        "before the idle sample finished" >&2
+    else
+      echo "metrics/resources: $name exited before the idle sample finished" >&2
+    fi
+    return 1
+  fi
+  if (( valid < 10 )); then
+    echo "metrics/resources: too few valid /proc samples of $name" >&2
+    return 1
+  fi
+
+  if ! jq -n --argjson idle_footprint_kib "$peak_rss" \
+    --argjson voluntary_ctxt_switches "$peak_switches" \
+    --argjson wchar_bytes "$peak_wchar" \
+    --argjson sampled_peak_threads "$peak_threads" \
+    --argjson sampled_peak_fds "$peak_fds" --arg idle_note '' '
+    {
+      idle_footprint_kib: $idle_footprint_kib,
+      voluntary_ctxt_switches: $voluntary_ctxt_switches,
+      wchar_bytes: $wchar_bytes,
+      sampled_peak_threads: $sampled_peak_threads,
+      sampled_peak_fds: $sampled_peak_fds,
+      idle_note: $idle_note
+    }
+  ' > "$out/idle.json"; then
+    echo "metrics/resources: could not write the idle report in $tree" >&2
+    return 1
+  fi
+}
+
 # The resources of one tree, measured from inside it with its own manifests,
 # lockfile and .cargo settings: hyperfine times the reporter on a fixed
 # report, Gungraun's DHAT counts the benchmark's allocations, cargo-bloat
@@ -525,13 +716,20 @@ fi
 measure_resources() (
   local tree=$1 out=$2
   local fixture=$out/report.json
+  local build_start='' build_end='' build_seconds=''
+  local reporter_pid reporter_running reporter_status tick decl
+  local idle_name idle_command
 
   cd "$tree"
 
+  build_start=$(date +%s%N)
   if ! cargo build --release --locked -p atelier-reporter; then
     echo "metrics/resources: could not build atelier-reporter in $tree" >&2
     exit 1
   fi
+  build_end=$(date +%s%N)
+  build_seconds=$(awk -v start="$build_start" -v end="$build_end" \
+    'BEGIN { printf "%.9f", (end - start) / 1000000000 }')
 
   if [[ ! -e "$fixture" && ! -L "$fixture" ]]; then
     cat > "$fixture" <<'JSON'
@@ -552,6 +750,84 @@ JSON
     --metrics time_wall_clock,time_user,time_system,memory_peak_resident \
     "target/release/atelier-reporter --report $fixture --gate rust/fmt"; then
     echo "metrics/resources: hyperfine could not time the reporter in $tree" >&2
+    exit 1
+  fi
+
+  # Time one direct reporter run with GNU time: its accounting of the direct
+  # child gives the context switches, peak RSS and file outputs. Bound the run
+  # from the parent, which launches it in the background and kills it at the
+  # deadline; no timeout wrapper stands between the two.
+  start_ns=$(date +%s%N)
+  /usr/bin/time -v -o "$out/gnu-time.txt" \
+    target/release/atelier-reporter --report "$fixture" --gate rust/fmt \
+    > "$out/reporter.out" &
+  reporter_pid=$!
+  reporter_running=1
+  for ((tick = 0; tick < 300; tick++)); do
+    if ! kill -0 "$reporter_pid" 2>/dev/null; then
+      reporter_running=0
+      break
+    fi
+    sleep 0.1
+  done
+  if (( reporter_running )); then
+    terminate_tree "$reporter_pid" "reporter" || exit 1
+    echo "metrics/resources: reporter timed out in $tree" >&2
+    exit 1
+  fi
+  reporter_status=0
+  wait "$reporter_pid" || reporter_status=$?
+  end_ns=$(date +%s%N)
+  if (( reporter_status != 0 )); then
+    echo "metrics/resources: reporter exited with status $reporter_status" \
+      "in $tree" >&2
+    exit 1
+  fi
+  exit_ms=$(awk -v start="$start_ns" -v end="$end_ns" \
+    'BEGIN { printf "%.0f", (end - start) / 1000000 }')
+
+  gnu_voluntary_ctxt_switches=$(gnu_time_value "$out/gnu-time.txt" \
+    'Voluntary context switches')
+  gnu_max_rss_kib=$(gnu_time_value "$out/gnu-time.txt" \
+    'Maximum resident set size (kbytes)')
+  gnu_fs_outputs=$(gnu_time_value "$out/gnu-time.txt" \
+    'File system outputs')
+
+  # The declaration lives in this tree. Without one, all five idle fields
+  # are zero and the note names the short run.
+  decl=$(long_running_command "$tree") || exit 1
+  if [[ -n "$decl" ]]; then
+    IFS=$'\t' read -r idle_name idle_command <<< "$decl"
+    sample_idle "$tree" "$out" "$idle_name" "$idle_command" || exit 1
+  else
+    if ! jq -n --argjson exit_ms "$exit_ms" \
+      --arg idle_note "not applicable: exits in $exit_ms ms" '
+      {
+        idle_footprint_kib: 0,
+        voluntary_ctxt_switches: 0,
+        wchar_bytes: 0,
+        sampled_peak_threads: 0,
+        sampled_peak_fds: 0,
+        idle_note: $idle_note
+      }
+    ' > "$out/idle.json"; then
+      echo "metrics/resources: could not write the idle report in $tree" >&2
+      exit 1
+    fi
+  fi
+
+  if ! jq -n --argjson exit_ms "$exit_ms" \
+    --argjson gnu_voluntary_ctxt_switches "$gnu_voluntary_ctxt_switches" \
+    --argjson gnu_max_rss_kib "$gnu_max_rss_kib" \
+    --argjson gnu_fs_outputs "$gnu_fs_outputs" '
+    {
+      exit_ms: $exit_ms,
+      gnu_voluntary_ctxt_switches: $gnu_voluntary_ctxt_switches,
+      gnu_max_rss_kib: $gnu_max_rss_kib,
+      gnu_fs_outputs: $gnu_fs_outputs
+    }
+  ' > "$out/timing.json"; then
+    echo "metrics/resources: could not write the timing report in $tree" >&2
     exit 1
   fi
 
@@ -577,24 +853,48 @@ JSON
 
   if ! jq -n --slurpfile hyperfine "$out/hyperfine.json" \
     --slurpfile dhat "$out/dhat.jsonl" --slurpfile bloat "$out/bloat.json" \
-    --slurpfile metadata "$out/metadata.json" '
+    --slurpfile metadata "$out/metadata.json" \
+    --slurpfile timing "$out/timing.json" --slurpfile idle "$out/idle.json" \
+    --argjson build_seconds "$build_seconds" '
     def need($name):
       if type == "number" then .
       else error("metrics/resources: missing or nonnumeric \($name)") end;
     def list($name):
       if type == "array" then .
       else error("metrics/resources: missing list \($name)") end;
+    def note($name):
+      if type == "string" then .
+      else error("metrics/resources: missing or malformed \($name)") end;
 
     ($hyperfine[0].results[0].summary) as $run
     | ([$dhat[] | .profiles[]? | select(.tool == "DHAT")
         | .data.total.metrics][0]) as $alloc
     | $bloat[0] as $size
     | ($metadata[0].packages | list("cargo metadata packages")) as $packages
+    | $timing[0] as $t
+    | $idle[0] as $i
     | {
         cpu_seconds: (($run.time_user.mean | need("time_user.mean"))
           + ($run.time_system.mean | need("time_system.mean"))),
         peak_rss_bytes: ($run.memory_peak_resident.median
           | need("memory_peak_resident.median")),
+        startup_seconds: ($run.time_wall_clock.median
+          | need("time_wall_clock.median")),
+        build_seconds: ($build_seconds | need("build_seconds")),
+        gnu_voluntary_ctxt_switches: ($t.gnu_voluntary_ctxt_switches
+          | need("gnu_voluntary_ctxt_switches")),
+        gnu_max_rss_kib: ($t.gnu_max_rss_kib | need("gnu_max_rss_kib")),
+        gnu_fs_outputs: ($t.gnu_fs_outputs | need("gnu_fs_outputs")),
+        exit_ms: ($t.exit_ms | need("exit_ms")),
+        idle_footprint_kib: ($i.idle_footprint_kib
+          | need("idle_footprint_kib")),
+        voluntary_ctxt_switches: ($i.voluntary_ctxt_switches
+          | need("voluntary_ctxt_switches")),
+        wchar_bytes: ($i.wchar_bytes | need("wchar_bytes")),
+        sampled_peak_threads: ($i.sampled_peak_threads
+          | need("sampled_peak_threads")),
+        sampled_peak_fds: ($i.sampled_peak_fds | need("sampled_peak_fds")),
+        idle_note: ($i.idle_note | note("idle_note")),
         total_bytes: ($alloc.TotalBytes.values.new
           | need("DHAT TotalBytes")),
         total_blocks: ($alloc.TotalBlocks.values.new
@@ -621,19 +921,31 @@ JSON
 )
 
 # True when FILE is a resources.json of the shape measure_resources writes:
-# every value a number, and one to five crates with short names.
+# every measured value, including the five idle fields, a number, idle_note a
+# string, and one to five crates with short names.
 resources_valid() {
   jq -e '
     def num: type == "number";
+    def note:
+      type == "string"
+      and (. == "" or startswith("not applicable: exits in"));
 
     type == "object"
-    and (keys == ["binary_file_size", "cpu_seconds", "crates",
-      "duplicate_versions", "package_count", "peak_rss_bytes",
-      "text_section_size", "total_blocks", "total_bytes",
-      "workspace_members"])
+    and (keys == ["binary_file_size", "build_seconds", "cpu_seconds",
+      "crates", "duplicate_versions", "exit_ms", "gnu_fs_outputs",
+      "gnu_max_rss_kib", "gnu_voluntary_ctxt_switches", "idle_footprint_kib",
+      "idle_note", "package_count", "peak_rss_bytes", "sampled_peak_fds",
+      "sampled_peak_threads", "startup_seconds", "text_section_size",
+      "total_blocks", "total_bytes", "voluntary_ctxt_switches",
+      "wchar_bytes", "workspace_members"])
     and ([.cpu_seconds, .peak_rss_bytes, .total_bytes, .total_blocks,
       .binary_file_size, .text_section_size, .package_count,
-      .workspace_members, .duplicate_versions] | all(num))
+      .workspace_members, .duplicate_versions, .startup_seconds,
+      .build_seconds, .gnu_voluntary_ctxt_switches, .gnu_max_rss_kib,
+      .gnu_fs_outputs, .exit_ms, .idle_footprint_kib,
+      .voluntary_ctxt_switches, .wchar_bytes, .sampled_peak_threads,
+      .sampled_peak_fds] | all(num))
+    and (.idle_note | note)
     and (.crates | type == "array" and length >= 1 and length <= 5
       and all(.[]; type == "object" and (.size | num)
         and (.name | type == "string" and length <= 64)))
@@ -756,6 +1068,12 @@ if [[ "$gate" == metrics/resources ]]; then
     def cell: gsub("[^A-Za-z0-9_.\\[\\]-]"; "?");
     def row($metric; $before; $after; $method):
       "| \($metric) | \($before | fmt) | \($after | fmt) | \($method) |";
+    def textrow($metric; $before; $after; $method):
+      def safe: gsub("[|\r\n]"; "?");
+      "| \($metric) | \($before | safe) | \($after | safe) | \($method) |";
+    def idlecell($side; $field):
+      if $side.idle_note == "" then ($side[$field] | tostring)
+      else $side.idle_note end;
     def size($side; $name):
       [$side.crates[] | select(.name == $name) | .size][0];
 
@@ -785,7 +1103,31 @@ if [[ "$gate" == metrics/resources ]]; then
       row("Workspace members"; $b.workspace_members; $h.workspace_members;
         "cargo metadata"),
       row("Duplicate versions"; $b.duplicate_versions;
-        $h.duplicate_versions; "cargo metadata")
+        $h.duplicate_versions; "cargo metadata"),
+      row("Startup time (s)"; $b.startup_seconds; $h.startup_seconds;
+        "hyperfine time_wall_clock median"),
+      row("Build time (s)"; $b.build_seconds; $h.build_seconds;
+        "cargo build wall clock"),
+      row("Voluntary context switches"; $b.gnu_voluntary_ctxt_switches;
+        $h.gnu_voluntary_ctxt_switches; "GNU time Voluntary context switches"),
+      row("Maximum resident set size (kbytes)"; $b.gnu_max_rss_kib;
+        $h.gnu_max_rss_kib; "GNU time Maximum resident set size"),
+      row("File system outputs"; $b.gnu_fs_outputs; $h.gnu_fs_outputs;
+        "GNU time File system outputs"),
+      textrow("Idle footprint (KiB)"; idlecell($b; "idle_footprint_kib");
+        idlecell($h; "idle_footprint_kib"); "/proc status VmRSS sampled"),
+      textrow("Voluntary context switches over idle window";
+        idlecell($b; "voluntary_ctxt_switches");
+        idlecell($h; "voluntary_ctxt_switches");
+        "/proc status voluntary_ctxt_switches sampled"),
+      textrow("Bytes written (wchar)"; idlecell($b; "wchar_bytes");
+        idlecell($h; "wchar_bytes"); "/proc io wchar"),
+      textrow("Sampled peak threads, every 100 ms";
+        idlecell($b; "sampled_peak_threads");
+        idlecell($h; "sampled_peak_threads"); "/proc status Threads sampled"),
+      textrow("Sampled peak FDs, every 100 ms";
+        idlecell($b; "sampled_peak_fds");
+        idlecell($h; "sampled_peak_fds"); "/proc fd count sampled")
   ' > /reports/summary.txt; then
     echo "metrics/resources: could not write the resources table" >&2
     exit 1

@@ -3,7 +3,7 @@
 FROM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
 
 RUN apt-get update && apt-get install --yes --no-install-recommends \
-    ca-certificates curl git jq libc6-dbg python3 valgrind xz-utils \
+    ca-certificates curl git jq libc6-dbg python3 time valgrind xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # moon 2.6.5, checked against its published SHA-256 before it is installed.

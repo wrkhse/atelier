@@ -49,14 +49,13 @@ loop and fails the instruction check; the unpatched code passes.
 
 ### Resources
 
-Resources appear in a before-and-after table and never fail a check. The
-core rows land in this part; the idle footprint, wake-ups, startup and build
-time, bytes written, open files and threads follow in the next part. Each row
+Resources appear in a before-and-after table and never fail a check. Each row
 names its method:
 
-- hyperfine 2.0.0 supplies CPU time (`time_user` plus `time_system`) and peak
-  memory (`memory_peak_resident`). Wall-time percentiles are planned; this
-  slice computes no p99.
+- hyperfine 2.0.0 supplies CPU time (`time_user` plus `time_system`), peak
+  memory (`memory_peak_resident`) and `startup_seconds`, its wall-clock
+  median. `build_seconds` is the wall clock of `cargo build`, measured around
+  the build. Wall-time percentiles are planned; this slice computes no p99.
 - Gungraun 0.20.0's DHAT tool supplies allocation bytes and blocks
   (`TotalBytes` and `TotalBlocks`), under a pinned Valgrind of at least 3.20
   that the gate image installs from its official tarball with a verified
@@ -64,21 +63,21 @@ names its method:
 - cargo-bloat 0.12.1 with `--crates --message-format json` supplies file size
   and an estimated per-crate `.text` breakdown; `cargo metadata` supplies
   dependency facts.
+- GNU time reports three rows for the direct child: `Voluntary context
+  switches`, `Maximum resident set size (kbytes)` and `File system outputs`.
+- A `long_running` declaration in `.moon/config/metrics.toml` names a process
+  the gate samples directly in `/proc` every 100 ms. Idle footprint,
+  voluntary context switches over the idle window, `wchar` bytes and sampled
+  peak threads and open files are numeric for a declared process. An
+  undeclared, short-lived command reports `not applicable: exits in N ms` in
+  those five rows. The fixture at
+  `tests/fixtures/metrics-idle/.moon/config/metrics.toml` declares a
+  long-running process for the proof.
 
-The gate in this part samples no `/proc` counters. The next part adds them:
-
-- `/proc/<pid>/status` will give `voluntary_ctxt_switches` over a fixed idle
-  window, and `/proc/<pid>/io` will give `wchar`; the rows carry those names.
-- Threads and open files will come from `/proc` sampling at a fixed 100 ms
-  interval for a bounded duration, and their rows read "sampled peak, every
-  100 ms".
-
-Exact kernel counters could carry budgets in a later slice; none are enabled
-in this one. Sampled peaks are only reported, so they cannot flake.
-
-The work lands in two parts. The core table and the doubled-allocation proof
-come first; idle footprint, wake-ups, startup and build time, bytes written,
-open files and threads follow.
+No row carries a budget; all are reported only. The gate fails closed on
+missing evidence or a failed measurement; it never reports a wrong value. A
+broken measurement is an error, not a budget failure. The timed and sampled
+rows can vary, and no budget turns that variation into a verdict.
 
 Verification: doubled allocations appear in the table and do not fail.
 
