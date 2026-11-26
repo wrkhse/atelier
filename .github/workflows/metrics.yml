@@ -360,16 +360,19 @@ jobs:
 
           # The base tree is identical in all three runs; only head's working
           # tree changes. A gate that wrote head into resources.json (the
-          # table's before column) changes these base values, so save the
-          # deterministic base fields in the control run and require the two
-          # runs below to match. CPU time and peak memory are hyperfine means
-          # over timed runs and are not deterministic, so they are excluded.
+          # table's before column) changes these base values, so save them in
+          # the control run and require the two runs below to match. The
+          # deterministic fields must match exactly; CPU time and peak memory
+          # are hyperfine means over timed runs, so they get a 25% tolerance.
           base_fields=(total_bytes total_blocks binary_file_size \
             text_section_size package_count workspace_members \
             duplicate_versions crates)
+          tolerant_fields=(cpu_seconds peak_rss_bytes)
 
           # Requires every base-side field of this run's resources.json to
-          # equal the control run's, naming $run and the field on a mismatch.
+          # match the control run's, naming $run and the field on a mismatch.
+          # Deterministic fields must be equal; the two timed fields must lie
+          # within 25% of the control run's value.
           check_base() {
             local field expected actual
             for field in "${base_fields[@]}"; do
@@ -381,6 +384,20 @@ jobs:
                 || fail "base field $field is '$actual', expected" \
                   "'$expected' from the control run"
             done
+
+            for field in "${tolerant_fields[@]}"; do
+              expected=$(jq -e --arg f "$field" '.[$f]' <<< "$control_base") \
+                || fail "control base has no $field"
+              actual=$(jq -e --arg f "$field" '.[$f]' "$json") \
+                || fail "no $field in resources.json"
+              awk -v expected="$expected" -v actual="$actual" 'BEGIN {
+                if (expected + 0 == 0) exit !(actual + 0 == 0)
+                d = (actual - expected) / expected
+                if (d < 0) d = -d
+                exit !(d <= 0.25)
+              }' || fail "base field $field is '$actual', more than 25%" \
+                "from '$expected' in the control run"
+            done
           }
 
           # Run 1, control: the unpatched head against the PR base.
@@ -389,9 +406,9 @@ jobs:
           show Control
           verify_table
           control_base=$(jq -c '{
-            total_bytes, total_blocks, binary_file_size,
-            text_section_size, package_count, workspace_members,
-            duplicate_versions, crates
+            cpu_seconds, peak_rss_bytes, total_bytes, total_blocks,
+            binary_file_size, text_section_size, package_count,
+            workspace_members, duplicate_versions, crates
           }' "$json") || fail "cannot read the base fields from resources.json"
           control=$head_blocks
           control_table_after=$table_after
