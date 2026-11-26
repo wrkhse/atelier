@@ -371,6 +371,11 @@ if [[ "$gate" == metrics/performance ]]; then
     echo "metrics/performance: $new_list is not a plain file" >&2
     exit 1
   fi
+  if ! LC_ALL=C awk 'NR > 64 || length($0) > 64 { exit 1 }' "$new_list"; then
+    echo "metrics/performance: $new_list must have at most" \
+      "64 lines of at most 64 characters each" >&2
+    exit 1
+  fi
   mapfile -t new_benches < "$new_list"
   for name in "${new_benches[@]}"; do
     if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then

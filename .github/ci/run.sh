@@ -189,12 +189,21 @@ if [[ "$MODE" == metrics && "$GATE" == metrics/performance ]]; then
   fi
 
   find "$headout" -mindepth 1 ! -type f ! -type d -delete
-  if ! find "$headout" -type f -printf '%s\n' \
-    | awk 'NR > 32 || $1 > 16777216 { exit 1 }'; then
-    echo "metrics/performance: head output must have at most 32 regular files" \
-      "of at most 16 MiB each" >&2
-    exit 1
-  fi
+  find "$headout" -type f -printf '%s\n' | awk '
+    function fail(reason) {
+      print "metrics/performance: head output " reason > "/dev/stderr"
+      exit 1
+    }
+    NR > 32 || $1 > 16 * 1024 * 1024 {
+      fail("must have at most 32 regular files of at most 16 MiB each")
+    }
+    {
+      total += $1
+      if (total > 32 * 1024 * 1024) {
+        fail("has more than 32 MiB of regular files in total")
+      }
+    }
+  ' || exit 1
 
   GATE_OVERRIDE=metrics/performance create "atelier-perf-base-$id" \
     "$network" \

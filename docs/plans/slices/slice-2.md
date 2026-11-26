@@ -26,8 +26,9 @@ flowchart LR
 
 Instruction counts are the stable measure and can fail a check. A metrics
 crate and a container job handle each measure. CI runs the same benchmark on
-base and head in separate contained jobs and compares them. Head cannot write
-the evidence used to judge it.
+base and head in separate contained jobs and compares them. Head supplies its
+measured counts read-only to the trusted job. It cannot write the base
+measurement, saved baseline, limits, summary or verdict.
 Gungraun 0.20.0 measures instructions with Callgrind, and the limit comes
 from `.moon/config/metrics.toml`.
 
