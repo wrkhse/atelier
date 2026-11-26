@@ -85,16 +85,18 @@ their spread to stay under 0.5%. This is why the performance gate sets
 
 `metrics/resources` reports a before-and-after table for the base and head
 trees: CPU time, peak memory, allocations, binary size, dependency counts,
-startup time and build time. GNU time reports three rows for the direct child:
-`Voluntary context switches`, `Maximum resident set size (kbytes)` and
-`File system outputs`. hyperfine 2.0.0 times the runs, Gungraun 0.20.0 counts
-allocations with DHAT under the pinned Valgrind 3.24.0, cargo-bloat 0.12.1
-sizes the binary and `cargo metadata` counts the packages, the workspace
-members and the package names with more than one version. Idle footprint,
-voluntary context switches over an idle window, `wchar` and sampled peak
-threads and open files every 100 ms apply only to long-running processes the
-project declares. The reporter exits in milliseconds, so those rows say
-`not applicable: exits in N ms`. As with the performance gate,
+startup time and build time. hyperfine 2.0.0 times the runs, Gungraun 0.20.0
+counts allocations with DHAT under the pinned Valgrind 3.24.0, cargo-bloat
+0.12.1 sizes the binary and `cargo metadata` counts the packages, the
+workspace members and the package names with more than one version. GNU time
+supplies three per-run rows for the direct child: `Voluntary context
+switches`, `Maximum resident set size (kbytes)` and `File system outputs`. A
+`long_running` declaration in `.moon/config/metrics.toml` names a process
+that the gate samples directly in `/proc` every 100 ms. Idle footprint,
+voluntary context switches over the idle window, `wchar` bytes and sampled
+peak threads and open files are numeric for a declared process. An
+undeclared, short-lived command reports `not applicable: exits in N ms` in
+those five rows. As with the performance gate,
 head is measured in its own contained job, with the base's harness and its own
 manifests, and its evidence is mounted read-only into the job that measures
 base and writes the table. The gate only reports: it never gives a failing

@@ -65,10 +65,14 @@ names its method:
   dependency facts.
 - GNU time reports three rows for the direct child: `Voluntary context
   switches`, `Maximum resident set size (kbytes)` and `File system outputs`.
-- Idle footprint, voluntary context switches over an idle window, `wchar`
-  bytes and sampled peak threads and open files every 100 ms apply only to
-  long-running processes the project declares. The reporter exits in
-  milliseconds, so those rows say `not applicable: exits in N ms`.
+- A `long_running` declaration in `.moon/config/metrics.toml` names a process
+  the gate samples directly in `/proc` every 100 ms. Idle footprint,
+  voluntary context switches over the idle window, `wchar` bytes and sampled
+  peak threads and open files are numeric for a declared process. An
+  undeclared, short-lived command reports `not applicable: exits in N ms` in
+  those five rows. The fixture at
+  `tests/fixtures/metrics-idle/.moon/config/metrics.toml` declares a
+  long-running process for the proof.
 
 No row carries a budget; all are reported only, so none can flake.
 

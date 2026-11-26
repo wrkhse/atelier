@@ -370,6 +370,7 @@ jobs:
           # head's TotalBlocks and the Allocations (blocks) after cell for the
           # runs to compare.
           verify_table() {
+            local idle_note
             check_row "CPU time (s)" cpu_seconds decimal
             check_row "Peak memory (bytes)" peak_rss_bytes decimal
             check_row "Allocations (bytes)" total_bytes whole
@@ -385,11 +386,23 @@ jobs:
             check_row "Voluntary context switches" gnu_voluntary_ctxt_switches whole
             check_row "Maximum resident set size (kbytes)" gnu_max_rss_kib whole
             check_row "File system outputs" gnu_fs_outputs whole
-            check_text_row "Idle footprint (KiB)"
-            check_text_row "Voluntary context switches over idle window"
-            check_text_row "Bytes written (wchar)"
-            check_text_row "Sampled peak threads, every 100 ms"
-            check_text_row "Sampled peak FDs, every 100 ms"
+            idle_note=$(jq -er '.idle_note' "$head_json") \
+              || fail "no idle_note in head-resources.json"
+            if [[ -z "$idle_note" ]]; then
+              check_row "Idle footprint (KiB)" idle_footprint_kib whole
+              check_row "Voluntary context switches over idle window" \
+                voluntary_ctxt_switches whole
+              check_row "Bytes written (wchar)" wchar_bytes whole
+              check_row "Sampled peak threads, every 100 ms" \
+                sampled_peak_threads whole
+              check_row "Sampled peak FDs, every 100 ms" sampled_peak_fds whole
+            else
+              check_text_row "Idle footprint (KiB)"
+              check_text_row "Voluntary context switches over idle window"
+              check_text_row "Bytes written (wchar)"
+              check_text_row "Sampled peak threads, every 100 ms"
+              check_text_row "Sampled peak FDs, every 100 ms"
+            fi
             check_crates
             head_blocks=$(jq -er '.total_blocks' "$head_json") \
               || fail "no total_blocks in head-resources.json"
@@ -440,11 +453,40 @@ jobs:
             done
           }
 
-          # Run 1, control: the unpatched head against the PR base.
+          # Run 1, control: the unpatched head against the PR base. The
+          # fixture's config declares a long-running process, so all three
+          # runs sample the five idle fields from /proc, not a note.
           run=control
+          fixture_dir="$SOURCE/tests/fixtures/metrics-idle"
+          fixture_config="$fixture_dir/.moon/config/metrics.toml"
+          [[ -f "$fixture_config" && ! -L "$fixture_config" ]] \
+            || fail "no metrics-idle fixture config at $fixture_config"
+          cp -- "$fixture_config" "$SOURCE/.moon/config/metrics.toml" \
+            || fail "cannot copy the fixture config into $SOURCE"
           measure
           show Control
           verify_table
+
+          # The declared process must really have been sampled in /proc:
+          # require a positive footprint, at least one thread and FD, and
+          # enough wchar output to show a process ran. Bounds, not timings.
+          footprint=$(jq -er '.idle_footprint_kib' "$head_json") \
+            || fail "no idle_footprint_kib in head-resources.json"
+          (( footprint > 0 )) \
+            || fail "head idle_footprint_kib $footprint is not above 0"
+          threads=$(jq -er '.sampled_peak_threads' "$head_json") \
+            || fail "no sampled_peak_threads in head-resources.json"
+          (( threads >= 1 )) \
+            || fail "head sampled_peak_threads $threads is below 1"
+          fds=$(jq -er '.sampled_peak_fds' "$head_json") \
+            || fail "no sampled_peak_fds in head-resources.json"
+          (( fds >= 1 )) \
+            || fail "head sampled_peak_fds $fds is below 1"
+          wchar=$(jq -er '.wchar_bytes' "$head_json") \
+            || fail "no wchar_bytes in head-resources.json"
+          (( wchar >= 1000 )) \
+            || fail "head wchar_bytes $wchar is below 1000"
+
           control_base=$(jq -c '{
             cpu_seconds, peak_rss_bytes, total_bytes, total_blocks,
             binary_file_size, text_section_size, package_count,

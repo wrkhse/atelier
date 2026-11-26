@@ -1,0 +1,13 @@
+# The check fails when head's instruction count is this many percent or more
+# above the base's; CI applies the smaller of the two trees' limits.
+instruction_limit_percent = 5
+
+# A benchmark with no counterpart on the base is allowed at most this many
+# Callgrind instructions; CI applies the smaller of the two trees' budgets.
+new_bench_instruction_ir = 20000
+
+# A declared long-running process is sampled over an idle window instead of
+# being marked inapplicable like the short-lived reporter.
+[[long_running]]
+name = "idle-fixture"
+command = "bash tests/fixtures/metrics-idle/idle.sh"
