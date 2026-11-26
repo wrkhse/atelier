@@ -523,6 +523,28 @@ fn complexity_accepts_const_only_reports_beside_a_report_with_functions() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+fn complexity_passes_when_all_head_reports_are_functionless() {
+    let head = scratch("functionless").expect("scratch folder");
+    let modules = r#"{
+        "name":"src/lib.rs","kind":"unit",
+        "spaces":[{"name":"constants","kind":"module","spaces":[]}]
+    }"#;
+    let constants = r#"{"name":"src/constants.rs","kind":"unit","spaces":[]}"#;
+
+    fs::write(head.join("lib.json"), modules).expect("write lib.json");
+    fs::write(head.join("constants.json"), constants).expect("write constants.json");
+
+    let output = complexity(&fixture("complexity/base"), &head).expect("run the metrics binary");
+
+    assert_eq!(stderr(&output), "");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout_lines(&output), table(&[], "complexity: passed"));
+
+    fs::remove_dir_all(&head).expect("remove the scratch folder");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
 fn complexity_refuses_reports_without_a_top_level_unit() {
     let head = scratch("no-unit").expect("scratch folder");
     let file = head.join("extra.json");
@@ -564,6 +586,11 @@ fn complexity_refuses_reports_with_parse_errors_even_with_a_unit() {
         unit.replacen(
             r#""name": "src/lib.rs""#,
             r#""errors": ["parse failed"], "name": "src/lib.rs""#,
+            1,
+        ),
+        unit.replacen(
+            r#""name": "src/lib.rs""#,
+            r#""error": {"message": "parse failed"}, "name": "src/lib.rs""#,
             1,
         ),
     ];
