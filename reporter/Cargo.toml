@@ -10,10 +10,17 @@ publish.workspace = true
 name = "atelier-reporter"
 path = "src/main.rs"
 
+[[bench]]
+name = "library_benchmark"
+harness = false
+
 [dependencies]
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+gungraun = "=0.20.0"
 
 [lints]
 workspace = true
