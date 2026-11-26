@@ -652,6 +652,47 @@ fn budget_passes_within_the_limit() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+fn budget_passes_an_unchanged_count_at_a_zero_limit() {
+    let base = fixture("budget/base.json");
+
+    let output = budget(&base, &base, "0").expect("run the metrics binary");
+
+    let expected = [
+        "instructions before: 1000000",
+        "instructions after: 1000000",
+        "limit: +0%",
+        "budget: passed",
+    ];
+    assert_eq!(stderr(&output), "");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout_lines(&output), expected);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn budget_fails_at_the_limit() {
+    let dir = scratch("at-limit").expect("scratch folder");
+    let base = fixture("budget/base.json");
+    let head = dir.join("head.json");
+    fs::write(&head, r#"{"ir": 1050000}"#).expect("write head.json");
+
+    let output = budget(&base, &head, "5").expect("run the metrics binary");
+
+    let expected = [
+        "instructions before: 1000000",
+        "instructions after: 1050000",
+        "limit: +5%",
+        "budget: failed",
+    ];
+    assert_eq!(stderr(&output), "");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout_lines(&output), expected);
+
+    fs::remove_dir_all(&dir).expect("remove the scratch folder");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
 fn budget_fails_past_the_limit() {
     let base = fixture("budget/base.json");
     let head = fixture("budget/head.json");
@@ -667,6 +708,49 @@ fn budget_fails_past_the_limit() {
     assert_eq!(stderr(&output), "");
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stdout_lines(&output), expected);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn budget_requires_a_reduction_past_a_negative_limit() {
+    let dir = scratch("negative-limit").expect("scratch folder");
+    let base = fixture("budget/base.json");
+    let reduced = dir.join("reduced.json");
+    let barely = dir.join("barely.json");
+    fs::write(&reduced, r#"{"ir": 940000}"#).expect("write reduced.json");
+    fs::write(&barely, r#"{"ir": 950000}"#).expect("write barely.json");
+
+    let cases = [
+        (
+            &base,
+            "instructions after: 1000000",
+            Some(1),
+            "budget: failed",
+        ),
+        (
+            &barely,
+            "instructions after: 950000",
+            Some(1),
+            "budget: failed",
+        ),
+        (
+            &reduced,
+            "instructions after: 940000",
+            Some(0),
+            "budget: passed",
+        ),
+    ];
+
+    for (head, after, status, verdict) in cases {
+        let output = budget(&base, head, "-5").expect("run the metrics binary");
+
+        let expected = ["instructions before: 1000000", after, "limit: -5%", verdict];
+        assert_eq!(stderr(&output), "");
+        assert_eq!(output.status.code(), status);
+        assert_eq!(stdout_lines(&output), expected);
+    }
+
+    fs::remove_dir_all(&dir).expect("remove the scratch folder");
 }
 
 #[test]

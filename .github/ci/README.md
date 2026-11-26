@@ -32,7 +32,7 @@ The runner builds the reporter as a static musl binary for the container,
 but Kani, Miri, the tests and the mutants execute only inside the gate
 container, never on the runner or a developer machine.
 
-`metrics.yml` runs one more check, `metrics/complexity`, through
+`metrics.yml` runs `metrics/complexity` through
 `run.sh metrics`. The same bounded container checks out the base commit as a
 worktree and runs the pinned `rust-code-analysis-cli` on both trees, writing
 `base/` and `head/` json reports, and fails if either holds no json. The
@@ -42,6 +42,47 @@ inside the same container; its exit status is the container's, and so the
 check. Its table goes to `summary.txt`, which the runner only shows in the job
 summary. `run.sh` also fails if either report folder comes back empty. There
 is no moon report, so no reporter or offline validation.
+
+`metrics/performance` runs the same Gungraun benchmark harness on both trees
+in the bounded container, each with `cargo bench --locked`. The base's
+`reporter/benches/library_benchmark.rs`, `reporter/Cargo.toml`, the
+workspace `Cargo.toml` and `.cargo/` replace head's, so a pull request cannot
+weaken the benchmark, redirect its `[lib]` or `[[bench]]` targets, or change
+the profile or rustflags it is measured with. A benchmark that only head has
+is measured with head's own manifest before the base's files replace it. Each
+tree keeps its own `Cargo.lock`. The base harness is required: a base without it is a named
+failure, and the harness is never copied from head. The harness has no
+slowdown switch in its environment.
+
+Head is measured first, in its own contained job with no access to the trusted
+reports. Its Callgrind `Ir` count is copied out and mounted read-only into a
+second contained job, which measures base, applies the limit and writes the
+summary. A pull request cannot rewrite the base measurement or the limit,
+because it cannot write that evidence at all. `atelier-metrics budget`
+compares the two `Ir` counts directly. At any non-negative limit, an
+unchanged or smaller count always passes; only an increase is compared,
+strictly, against the limit, and the check fails when it is at or past it:
+with the 5% limit, +4% passes and +5% and +6% fail. The limit is
+`instruction_limit_percent` in `.moon/config/metrics.toml`, read from both
+trees, and the stricter applies: a head may tighten its budget, but not loosen
+it. The job summary shows the limit that applied and the comparison; a missing
+or empty summary fails the check. A benchmark that head has and base lacks is
+judged against `new_bench_instruction_ir`, its absolute budget, and fails
+closed when that budget is absent.
+
+`metrics/budget-proof` proves the verdict in CI. Its slowdown run patches
+`results()` in head's working tree with a real loop, a genuine regression in
+the measured function, and the gate fails; the unpatched code passes.
+
+The gate catches regressions in honest code. It does not defend against a
+pull request that games its own measurement, any more than the test gate
+defends against one that rewrites its tests; that gaming is the review bot's
+gaming digest and the owner's concern (supervisor, 2026-11-26).
+
+`metrics/spread` runs the benchmark ten times, with ASLR on, in the same
+contained runner and writes the ten Callgrind `Ir` values; the CI job requires
+their spread to stay under 0.5%. This is why the performance gate sets
+`GUNGRAUN_ALLOW_ASLR`: address layout randomisation does not move the count.
 
 ## The container
 

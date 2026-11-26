@@ -3,7 +3,7 @@
 FROM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
 
 RUN apt-get update && apt-get install --yes --no-install-recommends \
-    ca-certificates curl git jq python3 xz-utils \
+    ca-certificates curl git jq python3 valgrind xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # moon 2.6.5, checked against its published SHA-256 before it is installed.
@@ -28,13 +28,18 @@ RUN rustup component add clippy rustfmt rust-src \
     && cargo install --locked cargo-nextest@0.9.152 cargo-mutants@27.1.0 \
     && cargo install --locked kani-verifier --version 0.68.0 \
     && cargo install --locked rust-code-analysis-cli --version 0.0.25 \
+    && cargo install --locked gungraun-runner --version 0.20.0 \
     && rm -rf "$CARGO_HOME/registry" "$CARGO_HOME/git" \
     && chmod -R a+w "$CARGO_HOME" "$RUSTUP_HOME"
 
 # /reports is outside the copied checkout, so no committed file can sit there.
-# /work-base holds metrics/complexity's worktree of the base commit.
+# /work-base holds the metrics gates' worktree of the base commit. The
+# performance gate measures head in its own container, which writes only
+# /head-out and keeps Gungraun's files in /head-gungraun; the base container
+# reads that output, read-only, at /head-in.
 RUN useradd --uid 10001 --create-home ci \
-    && install -d -o ci -g ci /work /work-base /reports
+    && install -d -o ci -g ci /work /work-base /reports /head-in /head-out \
+       /head-gungraun
 COPY entrypoint.sh /opt/ci/entrypoint.sh
 RUN chmod 0555 /opt/ci/entrypoint.sh
 
