@@ -571,22 +571,69 @@ if not isinstance(name, str) or not name or "\t" in name or "\n" in name:
     sys.exit(f"metrics/resources: long_running in {path} has no plain name")
 if not isinstance(command, str) or not command or "\n" in command:
     sys.exit(f"metrics/resources: long_running in {path} has no command")
+if "\t" in command:
+    sys.exit(f"metrics/resources: long_running in {path} has a tab in its command")
 print(f"{name}\t{command}")
 PY
 }
 
-# Sample a declared long-running process: launch COMMAND from the read-only
-# /source tree as a direct child, read the five /proc values every 100 ms for
-# at most 20 samples, then kill and wait from the parent. Each field's largest
-# sample goes to OUT's idle.json; a child that exits nonzero mid-sample, or no
-# valid sample, fails named.
+# Terminate a background process and the children the kernel lists for it:
+# TERM the children then the parent, poll up to 20 x 0.1 s, KILL any that
+# remain, and wait. REAP_STATUS holds wait's status. A process still alive
+# after KILL cannot be reaped and fails here, named.
+terminate_tree() {
+  local pid=$1 label=$2 children child i running=1
+  local -i status=0
+  if [[ -r "/proc/$pid/task/$pid/children" ]]; then
+    read -r children < "/proc/$pid/task/$pid/children" || children=
+    for child in $children; do
+      kill -TERM "$child" 2>/dev/null || true
+    done
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  for ((i = 0; i < 20; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      running=0
+      break
+    fi
+    sleep 0.1
+  done
+  if (( running )); then
+    if [[ -r "/proc/$pid/task/$pid/children" ]]; then
+      read -r children < "/proc/$pid/task/$pid/children" || children=
+      for child in $children; do
+        kill -KILL "$child" 2>/dev/null || true
+      done
+    fi
+    kill -KILL "$pid" 2>/dev/null || true
+    for ((i = 0; i < 20; i++)); do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        running=0
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+  if (( running )); then
+    echo "metrics/resources: could not reap $label (pid $pid)" >&2
+    return 1
+  fi
+  wait "$pid" || status=$?
+  REAP_STATUS=$status
+}
+
+# Sample a declared long-running process: launch COMMAND from TREE as a direct
+# child, read the five /proc values every 100 ms for at most 20 samples, then
+# tear it down from the parent. Each field's largest sample goes to OUT's
+# idle.json; a child that exits nonzero mid-sample, or no valid sample, fails
+# named.
 sample_idle() {
   local tree=$1 out=$2 name=$3 command=$4
   local pid child_status=0 rss threads switches wchar fds sample
   local -i valid=0 peak_rss=0 peak_threads=0 peak_switches=0 peak_wchar=0
   local -i peak_fds=0 exited_early=0 i
 
-  bash -c "cd /source && exec $command" > "$out/idle.out" &
+  bash -c "cd $tree && exec $command" > "$out/idle.out" &
   pid=$!
 
   for ((i = 0; i < 20; i++)); do
@@ -621,8 +668,8 @@ sample_idle() {
     fi
   done
 
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" || child_status=$?
+  terminate_tree "$pid" "$name" || return 1
+  child_status=$REAP_STATUS
   if (( exited_early && child_status != 0 )); then
     echo "metrics/resources: $name exited with status $child_status" \
       "before the idle sample finished" >&2
@@ -717,8 +764,7 @@ JSON
     sleep 0.1
   done
   if (( reporter_running )); then
-    kill "$reporter_pid" 2>/dev/null || true
-    wait "$reporter_pid" 2>/dev/null || true
+    terminate_tree "$reporter_pid" "reporter" || exit 1
     echo "metrics/resources: reporter timed out in $tree" >&2
     exit 1
   fi
@@ -740,10 +786,9 @@ JSON
   gnu_fs_outputs=$(gnu_time_value "$out/gnu-time.txt" \
     'File system outputs')
 
-  # The declaration lives in the shared source, not in either measured tree:
-  # the base tree predates it. Without one, all five idle fields are zero and
-  # the note names the short run.
-  decl=$(long_running_command /source) || exit 1
+  # The declaration lives in this tree. Without one, all five idle fields
+  # are zero and the note names the short run.
+  decl=$(long_running_command "$tree") || exit 1
   if [[ -n "$decl" ]]; then
     IFS=$'\t' read -r idle_name idle_command <<< "$decl"
     sample_idle "$tree" "$out" "$idle_name" "$idle_command" || exit 1
@@ -874,7 +919,9 @@ JSON
 resources_valid() {
   jq -e '
     def num: type == "number";
-    def note: type == "string";
+    def note:
+      type == "string"
+      and (. == "" or startswith("not applicable: exits in"));
 
     type == "object"
     and (keys == ["binary_file_size", "build_seconds", "cpu_seconds",

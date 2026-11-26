@@ -145,8 +145,8 @@ jobs:
           cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
 
   # A controlled A/B of the allocation patch. The trusted container measures
-  # the PR base in both runs; only the untrusted head container sees the
-  # patch. The patched head's DHAT TotalBlocks must exceed the unpatched
+  # the local proof base in both runs; only the untrusted head container sees
+  # the patch. The patched head's DHAT TotalBlocks must exceed the unpatched
   # head's, so a later PR that changes the reporter's allocations still
   # passes. Both runs must exit 0.
   resources-proof:
@@ -179,8 +179,6 @@ jobs:
           CI_SUPPORT: ${{ github.workspace }}/.github/ci
           SOURCE: ${{ github.workspace }}
           GATES: metrics/resources
-          # The real PR base: the trusted container measures it in both runs.
-          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           # Three runs of two containers each fit inside the 90-minute job.
           # The measured runs finish well under this; the cap keeps a runaway
           # from consuming the proof job.
@@ -215,7 +213,8 @@ jobs:
           measure() {
             local log="$RUNNER_TEMP/resources-proof-$run.log"
             status=0
-            bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 || status=$?
+            BASE=$proof_base bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 \
+              || status=$?
             cat -- "$log"
             [[ "$status" == 0 ]] || fail "expected exit 0"
             [[ -f "$summary" && ! -L "$summary" && -s "$summary" ]] \
@@ -453,16 +452,44 @@ jobs:
             done
           }
 
-          # Run 1, control: the unpatched head against the PR base. The
-          # fixture's config declares a long-running process, so all three
-          # runs sample the five idle fields from /proc, not a note.
+          # Run 1, control: the unpatched head against a local proof commit.
+          # The fixture config declares a long-running process; the base
+          # worktree created from that commit has the same declaration as
+          # head, so all three runs sample the five idle fields from /proc.
           run=control
           fixture_dir="$SOURCE/tests/fixtures/metrics-idle"
           fixture_config="$fixture_dir/.moon/config/metrics.toml"
           [[ -f "$fixture_config" && ! -L "$fixture_config" ]] \
             || fail "no metrics-idle fixture config at $fixture_config"
-          cp -- "$fixture_config" "$SOURCE/.moon/config/metrics.toml" \
+
+          # Head reads this config from the working tree. Save the checkout's
+          # own copy and restore it on exit so the step leaves no mutation.
+          config=.moon/config/metrics.toml
+          original_config="$RUNNER_TEMP/resources-proof-metrics.toml"
+          [[ -f "$SOURCE/$config" && ! -L "$SOURCE/$config" ]] \
+            || fail "no metrics config at $SOURCE/$config"
+          cp -- "$SOURCE/$config" "$original_config" \
+            || fail "cannot save $SOURCE/$config"
+          trap 'cp -- "$original_config" "$SOURCE/$config"' EXIT
+          cp -- "$fixture_config" "$SOURCE/$config" \
             || fail "cannot copy the fixture config into $SOURCE"
+
+          # Commit the fixture config onto a local child of HEAD so the base
+          # worktree declares the same long-running process as head.
+          index="$RUNNER_TEMP/resources-proof.index"
+          rm -f -- "$index"
+          GIT_INDEX_FILE=$index git -C "$SOURCE" read-tree HEAD \
+            || fail "cannot read HEAD into the proof index"
+          GIT_INDEX_FILE=$index git -C "$SOURCE" update-index -- "$config" \
+            || fail "cannot stage $config in the proof index"
+          tree=$(GIT_INDEX_FILE=$index git -C "$SOURCE" write-tree) \
+            || fail "cannot write the proof tree"
+          proof_base=$(
+            git -C "$SOURCE" -c user.name=proof \
+              -c user.email=proof@example.invalid \
+              commit-tree "$tree" -p HEAD -m "proof: fixture idle config"
+          ) || fail "cannot create the proof base commit"
+
           measure
           show Control
           verify_table
@@ -537,7 +564,7 @@ jobs:
           path.write_text(text[: end + 1] + "\n".join(lines) + "\n" + text[end + 1 :])
           PY
 
-          # Run 2, allocated: the patched head against the same PR base.
+          # Run 2, allocated: the patched head against the same proof base.
           measure
           show Allocated
           verify_table
@@ -554,8 +581,8 @@ jobs:
           # Run 3 must write its own evidence, not inherit run 2's.
           rm -rf -- "$reports"
 
-          # Run 3, restored: head's own report.rs again, against the same PR
-          # base; head's count must return to the control run's.
+          # Run 3, restored: head's own report.rs again, against the same
+          # proof base; head's count must return to the control run's.
           run=restored
           git -C "$SOURCE" checkout -- reporter/src/report.rs \
             || fail "cannot restore reporter/src/report.rs"
