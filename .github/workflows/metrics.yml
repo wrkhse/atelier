@@ -1,0 +1,60 @@
+# The complexity metric: rust-code-analysis measures the base and head trees
+# and atelier-metrics compares them, both inside the bounded gate container;
+# the runner only shows the summary. See .github/ci/README.md.
+name: metrics
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The job's status is the check metrics/complexity; no job holds a token
+  # that can write.
+  complexity:
+    name: metrics/complexity
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GATE: metrics/complexity
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Reads .prototools and installs moon 2.6.5.
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      # atelier-metrics is built on the runner as a static musl binary and
+      # runs in the container; rust-code-analysis lives in the gate image.
+      - name: Build atelier-metrics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-metrics \
+            --target x86_64-unknown-linux-musl
+      # Measures and compares both trees; its exit status is the job's.
+      - name: Measure and compare both trees in the container
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          GATES: metrics/complexity
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: bash "$CI_SUPPORT/run.sh" metrics
+      # Shows the container's table, after a failed comparison too. It only
+      # reports: a missing summary fails this step, not the job.
+      - name: Summarize complexity
+        if: ${{ !cancelled() }}
+        env:
+          SUMMARY: ${{ runner.temp }}/atelier-reports/container/summary.txt
+        run: |
+          if [[ ! -f "$SUMMARY" ]]; then
+            echo "::error::the container wrote no complexity summary at $SUMMARY"
+            exit 1
+          fi
+          cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
