@@ -181,9 +181,13 @@ jobs:
           GATES: metrics/resources
           # The real PR base: the trusted container measures it in both runs.
           BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+          # Three runs of two containers each fit inside the 90-minute job.
+          METRICS_CONTAINER_LIMIT: 12m
         run: |
           reports="$RUNNER_TEMP/atelier-reports/container"
           summary="$reports/summary.txt"
+          json="$reports/resources.json"
+          head_json="$reports/head-resources.json"
           status=0
 
           fail() {
@@ -218,38 +222,135 @@ jobs:
               || fail "expected an allocations row in the summary"
           }
 
-          # Reads the run's base and head TotalBlocks from resources.json and
-          # head-resources.json, and requires the Allocations (blocks) row,
-          # before and after in fields 3 and 4, to show those measured counts.
+          # Requires the table cell $2, named $1, to show the measured value
+          # $3. A whole cell must equal it exactly; a decimal one, which the
+          # table rounds to six places, must lie within 0.000001 of it.
+          check_cell() {
+            local name=$1 cell=$2 value=$3 kind=$4
+            local number='^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+
+            if [[ "$kind" == whole ]]; then
+              [[ "$value" =~ ^[0-9]+$ ]] \
+                || fail "$name measured '$value' is not a whole number"
+              [[ "$cell" =~ ^[0-9]+$ ]] \
+                || fail "$name cell '$cell' is not a whole number"
+              (( 10#$cell == 10#$value )) \
+                || fail "$name cell $cell is not the measured $value"
+              return
+            fi
+
+            [[ "$value" =~ $number ]] \
+              || fail "$name measured '$value' is not a number"
+            [[ "$cell" =~ $number ]] \
+              || fail "$name cell '$cell' is not a number"
+            awk -v cell="$cell" -v value="$value" 'BEGIN {
+              d = cell - value
+              if (d < 0) d = -d
+              exit !(d <= 0.000001)
+            }' || fail "$name cell $cell is not within 0.000001 of the" \
+              "measured $value"
+          }
+
+          # Requires the summary row for metric $1 to show field $2 of
+          # resources.json before and of head-resources.json after, as $3:
+          # whole or decimal.
+          check_row() {
+            local metric=$1 field=$2 kind=$3 base head cells before after
+            base=$(jq -er ".$field" "$json") \
+              || fail "no $field in resources.json"
+            head=$(jq -er ".$field" "$head_json") \
+              || fail "no $field in head-resources.json"
+
+            cells=$(awk -F'|' -v metric="$metric" '
+              function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+              trim($2) == metric {
+                print trim($3) "\t" trim($4)
+                found = 1
+                exit
+              }
+              END { exit !found }
+            ' "$summary") || fail "no $metric row in the summary"
+            IFS=$'\t' read -r before after <<< "$cells"
+
+            check_cell "$metric before" "$before" "$base" "$kind"
+            check_cell "$metric after" "$after" "$head" "$kind"
+          }
+
+          # Requires the crate rows, in the table's order, to name each crate
+          # in either report's top five, head's first, and to show its size
+          # in each, or "-" where that side does not list it.
+          check_crates() {
+            local expected actual i label base head row_label before after
+            local -a want got
+            expected=$(jq -nr --slurpfile base "$json" \
+              --slurpfile head "$head_json" '
+              def cell: gsub("[^A-Za-z0-9_.\\[\\]-]"; "?");
+              def size($side; $name):
+                [$side.crates[] | select(.name == $name) | .size][0]
+                | if . == null then "-" else tostring end;
+
+              $base[0] as $b
+              | $head[0] as $h
+              | [$h.crates[].name, $b.crates[].name]
+              | reduce .[] as $n ([];
+                  if any(.[]; . == $n) then . else . + [$n] end)
+              | .[]
+              | "Crate \(cell) (text bytes, top five)\t\(size($b; .))"
+                + "\t\(size($h; .))"
+            ') || fail "cannot read the crates of resources.json and" \
+              "head-resources.json"
+            actual=$(awk -F'|' '
+              function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+              trim($2) ~ /^Crate .* \(text bytes, top five\)$/ {
+                print trim($2) "\t" trim($3) "\t" trim($4)
+              }
+            ' "$summary")
+            mapfile -t want <<< "$expected"
+            mapfile -t got <<< "$actual"
+
+            (( ${#got[@]} == ${#want[@]} )) \
+              || fail "the summary has ${#got[@]} crate rows, expected" \
+                "${#want[@]}"
+
+            for i in "${!want[@]}"; do
+              IFS=$'\t' read -r label base head <<< "${want[i]}"
+              IFS=$'\t' read -r row_label before after <<< "${got[i]}"
+              [[ "$row_label" == "$label" ]] \
+                || fail "crate row $((i + 1)) is '$row_label', expected" \
+                  "'$label'"
+
+              if [[ "$base" == - ]]; then
+                [[ "$before" == - ]] \
+                  || fail "$label before cell '$before' should be -"
+              else
+                check_cell "$label before" "$before" "$base" whole
+              fi
+
+              if [[ "$head" == - ]]; then
+                [[ "$after" == - ]] \
+                  || fail "$label after cell '$after' should be -"
+              else
+                check_cell "$label after" "$after" "$head" whole
+              fi
+            done
+          }
+
+          # Requires every row of the run's table to show the measured values
+          # of resources.json before and head-resources.json after, and reads
+          # head's TotalBlocks for the runs to compare.
           verify_table() {
-            local json="$reports/resources.json"
-            local head_json="$reports/head-resources.json"
-            local row
-            base_blocks=$(jq -er '.total_blocks' "$json") \
-              || fail "no total_blocks in resources.json"
+            check_row "CPU time (s)" cpu_seconds decimal
+            check_row "Peak memory (bytes)" peak_rss_bytes decimal
+            check_row "Allocations (bytes)" total_bytes whole
+            check_row "Allocations (blocks)" total_blocks whole
+            check_row "Binary size (file bytes)" binary_file_size whole
+            check_row "Binary size (text bytes)" text_section_size whole
+            check_row "Packages" package_count whole
+            check_row "Workspace members" workspace_members whole
+            check_row "Duplicate versions" duplicate_versions whole
+            check_crates
             head_blocks=$(jq -er '.total_blocks' "$head_json") \
               || fail "no total_blocks in head-resources.json"
-            [[ "$base_blocks" =~ ^[0-9]+$ ]] \
-              || fail "base TotalBlocks '$base_blocks' is not a whole number"
-            [[ "$head_blocks" =~ ^[0-9]+$ ]] \
-              || fail "head TotalBlocks '$head_blocks' is not a whole number"
-
-            row=$(grep -m1 '^| Allocations (blocks)' "$summary") \
-              || fail "no Allocations (blocks) row in the summary"
-            IFS='|' read -r _ _ table_base table_head _ <<< "$row"
-            table_base=$(xargs <<< "$table_base")
-            table_head=$(xargs <<< "$table_head")
-            [[ "$table_base" =~ ^[0-9]+$ ]] \
-              || fail "table before cell '$table_base' is not a whole number"
-            [[ "$table_head" =~ ^[0-9]+$ ]] \
-              || fail "table after cell '$table_head' is not a whole number"
-
-            (( table_base == base_blocks )) \
-              || fail "table before cell $table_base is not the measured" \
-                "base TotalBlocks $base_blocks"
-            (( table_head == head_blocks )) \
-              || fail "table after cell $table_head is not the measured" \
-                "head TotalBlocks $head_blocks"
           }
 
           # Run 1, control: the unpatched head against the PR base.
@@ -299,8 +400,6 @@ jobs:
           (( allocated > control )) \
             || fail "expected allocated head TotalBlocks $allocated" \
               "above control $control"
-          (( table_head > table_base )) \
-            || fail "expected table after $table_head above before $table_base"
           # Run 3 must write its own evidence, not inherit run 2's.
           rm -rf -- "$reports"
 

@@ -178,8 +178,15 @@ if [[ "$MODE" == metrics && ( "$GATE" == metrics/performance \
   rm -rf -- "$headout"
   mkdir -p "$headout"
   # The two containers run one after the other, so each gets 35 minutes to
-  # fit both inside the job's 90-minute timeout.
-  limit=35m
+  # fit both inside the job's 90-minute timeout. A job that runs the gate
+  # more than once sets METRICS_CONTAINER_LIMIT, in whole minutes, so every
+  # run fits. Zero is refused: timeout reads 0m as no limit at all.
+  limit=${METRICS_CONTAINER_LIMIT:-35m}
+  if [[ ! "$limit" =~ ^[1-9][0-9]*m$ ]]; then
+    echo "metrics: METRICS_CONTAINER_LIMIT must be whole minutes above" \
+      "zero, such as 12m, not '$limit'" >&2
+    exit 2
+  fi
   GATE_OVERRIDE="$GATE-head" create "atelier-$short-head-$id" \
     "$network" \
     "type=bind,source=$source,target=/source,readonly" \
