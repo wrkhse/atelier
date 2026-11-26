@@ -1,3 +1,5 @@
+# Packages the atelier-reporter and atelier-metrics binaries for each
+# release candidate, with pinned actions and a container smoke test.
 name: release
 
 on:
@@ -48,6 +50,7 @@ jobs:
 
           cargo build --release --locked \
             -p atelier-reporter \
+            -p atelier-metrics \
             --target "$TARGET"
       - name: Verify version matches tag
         shell: bash
@@ -56,24 +59,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          version=$(
-            cargo metadata --locked --no-deps --format-version 1 | python3 -c '
+          expected="${TAG#v}"
+          cargo metadata --locked --no-deps --format-version 1 | \
+            python3 -c '
           import json
           import sys
 
+          names = ("atelier-reporter", "atelier-metrics")
+          expected = sys.argv[1]
           packages = json.load(sys.stdin)["packages"]
-          print(next(
-              p["version"] for p in packages if p["name"] == "atelier-reporter"
-          ))
-          '
-          )
 
-          expected="${TAG#v}"
-          if [[ "$version" != "$expected" ]]; then
-            echo "workspace version $version does not match tag $TAG" \
-              "(expected $expected)" >&2
-            exit 1
-          fi
+          for name in names:
+              version = next(
+                  p["version"] for p in packages if p["name"] == name
+              )
+              if version != expected:
+                  sys.exit(
+                      f"{name} version {version} does not match tag {expected}"
+                  )
+          ' "$expected"
       - name: Package
         shell: bash
         env:
@@ -94,6 +98,7 @@ jobs:
           cp .moon/scripts/mutants.sh "$stage/.moon/scripts/mutants.sh"
           cp .prototools "$stage/.prototools"
           cp "target/$TARGET/release/atelier-reporter" "$stage/bin/atelier-reporter"
+          cp "target/$TARGET/release/atelier-metrics" "$stage/bin/atelier-metrics"
           cp README.md "$stage/README.md"
           cp LICENSE "$stage/LICENSE"
 
@@ -105,6 +110,7 @@ jobs:
             .moon/scripts/mutants.sh \
             .prototools \
             bin/atelier-reporter \
+            bin/atelier-metrics \
             README.md \
             LICENSE
       # Reads .prototools and installs the pinned moon version for the query.
@@ -131,6 +137,7 @@ jobs:
             .moon/scripts/mutants.sh \
             .prototools \
             bin/atelier-reporter \
+            bin/atelier-metrics \
             README.md \
             LICENSE; do
             if [[ ! -f "$unpacked/$path" || -L "$unpacked/$path" ]]; then
@@ -140,6 +147,7 @@ jobs:
           done
 
           "$unpacked/bin/atelier-reporter" --help
+          "$unpacked/bin/atelier-metrics" --version
 
           # Give the packaged preset a consumer workspace with one Rust crate.
           consumer="$smoke/consumer"
