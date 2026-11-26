@@ -36,6 +36,10 @@ REPORTER_PATH="$REL/bin/atelier-reporter"
 SOURCE="$RUNNER_TEMP/slice2-head"
 SUPPORT="$GITHUB_WORKSPACE/.github/ci"
 METRICS_TARGET="target/x86_64-unknown-linux-musl/release/atelier-metrics"
+# The released binary is staged at METRICS_TARGET on purpose; only a local
+# build is forbidden in the recording.
+LOCAL_BUILD_RE='cargo build.*atelier-metrics|atelier-metrics.*cargo build'
+LOCAL_BUILD_RE+='|Compiling atelier-metrics'
 RESULTS_FILE="reporter/src/report.rs"
 WORK="$RUNNER_TEMP/record-metrics"
 ORIGINAL="$WORK/report.rs.orig"
@@ -153,7 +157,10 @@ make_worktree() {
   git -C "$SOURCE" checkout --quiet --detach "$RELEASE_TAG"
 }
 
+# REQUIRE_INSTALLED defaults to 1: after a gate, the container has installed
+# the binary. Staging passes 0 because no container has run yet.
 check_staged_metrics() {
+  local require_installed=${1:-1}
   local released staged installed installed_sum
 
   [[ -f "$SOURCE/$METRICS_TARGET" && ! -L "$SOURCE/$METRICS_TARGET" ]] \
@@ -166,7 +173,9 @@ check_staged_metrics() {
   fi
 
   installed="$RUNNER_TEMP/atelier/atelier-metrics"
-  if [[ -f "$installed" && ! -L "$installed" ]]; then
+  if ((require_installed)); then
+    [[ -f "$installed" && ! -L "$installed" ]] \
+      || die "the container's metrics binary is missing or not a plain file"
     installed_sum=$(sha256sum "$installed" | awk '{print $1}')
     if [[ "$installed_sum" != "$released" ]]; then
       die "the container's metrics binary differs from the released one"
@@ -182,7 +191,7 @@ stage_metrics() {
 
   mkdir -p "$(dirname "$SOURCE/$METRICS_TARGET")"
   install -m 0555 -- "$METRICS_PATH" "$SOURCE/$METRICS_TARGET"
-  check_staged_metrics
+  check_staged_metrics 0
 }
 
 # Every patch finds the exact results() signature once, then inserts lines
@@ -366,6 +375,8 @@ start_recording() {
   wait_until 30 pane_has "$LEFT" -x -F -- "atelier-reporter $VERSION"
 
   capture "$LEFT" > "$SCREENS/release-command.txt"
+  mkdir -p "$SCREENS/release"
+  cp -- "$SCREENS/release-command.txt" "$SCREENS/release/screen.txt"
   termctrl mark "$SESSION" release
   sleep 2
 
@@ -528,9 +539,8 @@ check_markers() {
     expected=$(expected_text "$marker")
     rg -qF -- "$expected" <<< "$frame" \
       || die "marker $marker lacks '$expected'"
-    if rg -qF -- 'target/x86_64-unknown-linux-musl/release/atelier-metrics' \
-      <<< "$frame"; then
-      die "marker $marker shows a locally built metrics path"
+    if rg -q -- "$LOCAL_BUILD_RE" <<< "$frame"; then
+      die "marker $marker shows a locally built metrics binary"
     fi
   done <<< "$markers"
 }
@@ -559,9 +569,8 @@ check_screens() {
       || die "$marker screen lacks '$expected'"
   done
 
-  rg -qF --no-ignore \
-    'target/x86_64-unknown-linux-musl/release/atelier-metrics' \
-    "$SCREENS" "$GATE_LOG" || status=$?
+  rg -q --no-ignore -- "$LOCAL_BUILD_RE" "$SCREENS" "$GATE_LOG" \
+    || status=$?
   case "$status" in
     0) die "a saved screen or gate log shows a local metrics build" ;;
     1) ;;
