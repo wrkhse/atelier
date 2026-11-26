@@ -184,13 +184,24 @@ jobs:
         run: |
           reports="$RUNNER_TEMP/atelier-reports/container"
           summary="$reports/summary.txt"
-          control_head="$RUNNER_TEMP/control-head.json"
-          control_summary="$RUNNER_TEMP/control-summary.txt"
           status=0
 
           fail() {
             echo "::error::$run: $* (exit $status)"
             exit 1
+          }
+
+          echo "### metrics/resources-proof" >> "$GITHUB_STEP_SUMMARY"
+
+          # Appends this run's summary under the heading $1, so the evidence of
+          # every run that measured stays visible when a later assertion fails.
+          show() {
+            {
+              echo
+              echo "#### $1"
+              echo
+              cat -- "$summary"
+            } >> "$GITHUB_STEP_SUMMARY"
           }
 
           # Runs the resources gate against BASE and requires exit 0 and an
@@ -207,13 +218,46 @@ jobs:
               || fail "expected an allocations row in the summary"
           }
 
+          # Reads the run's base and head TotalBlocks from resources.json and
+          # head-resources.json, and requires the Allocations (blocks) row,
+          # before and after in fields 3 and 4, to show those measured counts.
+          verify_table() {
+            local json="$reports/resources.json"
+            local head_json="$reports/head-resources.json"
+            local row
+            base_blocks=$(jq -er '.total_blocks' "$json") \
+              || fail "no total_blocks in resources.json"
+            head_blocks=$(jq -er '.total_blocks' "$head_json") \
+              || fail "no total_blocks in head-resources.json"
+            [[ "$base_blocks" =~ ^[0-9]+$ ]] \
+              || fail "base TotalBlocks '$base_blocks' is not a whole number"
+            [[ "$head_blocks" =~ ^[0-9]+$ ]] \
+              || fail "head TotalBlocks '$head_blocks' is not a whole number"
+
+            row=$(grep -m1 '^| Allocations (blocks)' "$summary") \
+              || fail "no Allocations (blocks) row in the summary"
+            IFS='|' read -r _ _ table_base table_head _ <<< "$row"
+            table_base=$(xargs <<< "$table_base")
+            table_head=$(xargs <<< "$table_head")
+            [[ "$table_base" =~ ^[0-9]+$ ]] \
+              || fail "table before cell '$table_base' is not a whole number"
+            [[ "$table_head" =~ ^[0-9]+$ ]] \
+              || fail "table after cell '$table_head' is not a whole number"
+
+            (( table_base == base_blocks )) \
+              || fail "table before cell $table_base is not the measured" \
+                "base TotalBlocks $base_blocks"
+            (( table_head == head_blocks )) \
+              || fail "table after cell $table_head is not the measured" \
+                "head TotalBlocks $head_blocks"
+          }
+
           # Run 1, control: the unpatched head against the PR base.
           run=control
           measure
-          cp -- "$reports/head-resources.json" "$control_head" \
-            || fail "cannot keep head-resources.json"
-          cp -- "$summary" "$control_summary" \
-            || fail "cannot keep summary.txt"
+          show Control
+          verify_table
+          control=$head_blocks
           # Run 2 must write its own evidence, not inherit run 1's.
           rm -rf -- "$reports"
 
@@ -248,43 +292,37 @@ jobs:
 
           # Run 2, allocated: the patched head against the same PR base.
           measure
-
-          control=$(jq -er '.total_blocks' "$control_head") \
-            || fail "no total_blocks in control-head.json"
-          allocated=$(jq -er '.total_blocks' "$reports/head-resources.json") \
-            || fail "no total_blocks in head-resources.json"
-
-          # The rendered table must agree: its Allocations (blocks) row holds
-          # the before and after cells in fields 3 and 4.
-          row=$(grep -m1 '^| Allocations (blocks)' "$summary") \
-            || fail "no Allocations (blocks) row in the summary"
-          IFS='|' read -r _ _ table_base table_head _ <<< "$row"
-          table_base=$(xargs <<< "$table_base")
-          table_head=$(xargs <<< "$table_head")
-          [[ "$table_base" =~ ^[0-9]+$ ]] \
-            || fail "table before cell '$table_base' is not a whole number"
-          [[ "$table_head" =~ ^[0-9]+$ ]] \
-            || fail "table after cell '$table_head' is not a whole number"
-
-          {
-            echo "### metrics/resources-proof"
-            echo
-            echo "Head TotalBlocks: control $control, allocated $allocated"
-            echo
-            echo "#### Control"
-            echo
-            cat -- "$control_summary"
-            echo
-            echo "#### Allocated"
-            echo
-            cat -- "$summary"
-          } >> "$GITHUB_STEP_SUMMARY"
+          show Allocated
+          verify_table
+          allocated=$head_blocks
 
           (( allocated > control )) \
             || fail "expected allocated head TotalBlocks $allocated" \
               "above control $control"
           (( table_head > table_base )) \
             || fail "expected table after $table_head above before $table_base"
+          # Run 3 must write its own evidence, not inherit run 2's.
+          rm -rf -- "$reports"
+
+          # Run 3, restored: head's own report.rs again, against the same PR
+          # base; head's count must return to the control run's.
+          run=restored
+          git -C "$SOURCE" checkout -- reporter/src/report.rs \
+            || fail "cannot restore reporter/src/report.rs"
+          measure
+          show Restored
+          verify_table
+          restored=$head_blocks
+
+          {
+            echo
+            echo "Head TotalBlocks: control $control, allocated $allocated," \
+              "restored $restored"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          (( restored == control )) \
+            || fail "expected restored head TotalBlocks $restored to equal" \
+              "control $control"
 
   budget-proof:
     name: metrics/budget-proof (${{ matrix.mode }})
