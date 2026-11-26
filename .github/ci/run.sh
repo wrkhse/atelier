@@ -34,9 +34,10 @@ case "$MODE" in
 esac
 
 if [[ "$MODE" == metrics && "$GATE" != metrics/complexity \
-  && "$GATE" != metrics/performance && "$GATE" != metrics/spread ]]; then
-  echo "metrics: GATE must be metrics/complexity, metrics/performance or" \
-    "metrics/spread, not '$GATE'" >&2
+  && "$GATE" != metrics/performance && "$GATE" != metrics/spread \
+  && "$GATE" != metrics/resources ]]; then
+  echo "metrics: GATE must be metrics/complexity, metrics/performance," \
+    "metrics/spread or metrics/resources, not '$GATE'" >&2
   exit 2
 fi
 
@@ -87,7 +88,7 @@ memory="$(( total > 4096 ? total - 2048 : total / 2 ))m"
 # container-engine socket. Omitting --pid keeps Docker's private PID
 # namespace. The process limit counts threads: three mutant jobs run rustc
 # and nextest. GATE_OVERRIDE, when set, is the gate this one container runs,
-# as metrics/performance runs head and base in two.
+# as metrics/performance and metrics/resources run head and base in two.
 create() {
   local name=$1 network=$2
   shift 2
@@ -162,36 +163,48 @@ fi
 
 # Evidence collection cannot turn a failed, timed-out or killed run green.
 # docker cp keeps links, so only plain files and folders cross to the host.
-if [[ "$MODE" == metrics && "$GATE" == metrics/performance ]]; then
+if [[ "$MODE" == metrics && ( "$GATE" == metrics/performance \
+  || "$GATE" == metrics/resources ) ]]; then
   # Head runs untrusted code, so it is measured in its own container, which
   # has no /reports and so cannot touch the base's evidence. Its output is
   # copied to the host, then mounted read-only into the trusted container
-  # that measures the base and compares the two counts. A failed head run
-  # keeps status nonzero whatever the base container does.
+  # that measures the base and compares or tabulates the two. A failed head
+  # run keeps status nonzero whatever the base container does.
+  case "$GATE" in
+    metrics/performance) short=perf ;;
+    metrics/resources) short=res ;;
+  esac
   headout="$RUNNER_TEMP/atelier-head-reports"
   rm -rf -- "$headout"
   mkdir -p "$headout"
   # The two containers run one after the other, so each gets 35 minutes to
-  # fit both inside the job's 90-minute timeout.
-  limit=35m
-  GATE_OVERRIDE=metrics/performance-head create "atelier-perf-head-$id" \
+  # fit both inside the job's 90-minute timeout. A job that runs the gate
+  # more than once sets METRICS_CONTAINER_LIMIT, in whole minutes, so every
+  # run fits. Zero is refused: timeout reads 0m as no limit at all.
+  limit=${METRICS_CONTAINER_LIMIT:-35m}
+  if [[ ! "$limit" =~ ^[1-9][0-9]*m$ ]]; then
+    echo "metrics: METRICS_CONTAINER_LIMIT must be whole minutes above" \
+      "zero, such as 12m, not '$limit'" >&2
+    exit 2
+  fi
+  GATE_OVERRIDE="$GATE-head" create "atelier-$short-head-$id" \
     "$network" \
     "type=bind,source=$source,target=/source,readonly" \
     "type=bind,source=$binary,target=/binary,readonly"
   head_status=0
-  start "atelier-perf-head-$id" || head_status=$?
+  start "atelier-$short-head-$id" || head_status=$?
 
   if (( head_status == 0 )); then
-    docker cp "atelier-perf-head-$id:/head-out/." "$headout/" >/dev/null 2>&1 \
-      || true
+    docker cp "atelier-$short-head-$id:/head-out/." "$headout/" \
+      >/dev/null 2>&1 || true
   else
     status=$head_status
   fi
 
   find "$headout" -mindepth 1 ! -type f ! -type d -delete
-  find "$headout" -type f -printf '%s\n' | awk '
+  find "$headout" -type f -printf '%s\n' | awk -v gate="$GATE" '
     function fail(reason) {
-      print "metrics/performance: head output " reason > "/dev/stderr"
+      print gate ": head output " reason > "/dev/stderr"
       exit 1
     }
     NR > 32 || $1 > 16 * 1024 * 1024 {
@@ -205,13 +218,13 @@ if [[ "$MODE" == metrics && "$GATE" == metrics/performance ]]; then
     }
   ' || exit 1
 
-  GATE_OVERRIDE=metrics/performance create "atelier-perf-base-$id" \
+  GATE_OVERRIDE="$GATE" create "atelier-$short-base-$id" \
     "$network" \
     "type=bind,source=$source,target=/source,readonly" \
     "type=bind,source=$binary,target=/binary,readonly" \
     "type=bind,source=$headout,target=/head-in,readonly"
-  start "atelier-perf-base-$id" || status=$?
-  docker cp "atelier-perf-base-$id:/reports/." "$output/" >&2 || true
+  start "atelier-$short-base-$id" || status=$?
+  docker cp "atelier-$short-base-$id:/reports/." "$output/" >&2 || true
   find "$output" -mindepth 1 ! -type f ! -type d -delete
 else
   create "atelier-$container_mode-$id" "$network" \
@@ -226,7 +239,8 @@ fi
 
 # The container's comparison decided the status. As a second fail-closed
 # check, require non-empty evidence from both trees, or for metrics/spread
-# the ten measured counts the workflow judges.
+# the ten measured counts the workflow judges. metrics/resources only
+# reports, so its evidence is the two resources files and the table.
 if [[ "$MODE" == metrics ]]; then
   if [[ "$GATE" == metrics/spread ]]; then
     file="$output/spread.txt"
@@ -246,10 +260,14 @@ if [[ "$MODE" == metrics ]]; then
       fi
     done
   else
-    for report in base-ir.json head-ir.json summary.txt; do
+    evidence=(base-ir.json head-ir.json summary.txt)
+    if [[ "$GATE" == metrics/resources ]]; then
+      evidence=(resources.json head-resources.json summary.txt)
+    fi
+    for report in "${evidence[@]}"; do
       file="$output/$report"
       if [[ ! -f "$file" || -L "$file" || ! -s "$file" ]]; then
-        echo "metrics/performance: no non-empty plain report at $file" >&2
+        echo "$GATE: no non-empty plain report at $file" >&2
         status=1
       fi
     done

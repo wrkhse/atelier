@@ -100,6 +100,399 @@ jobs:
           fi
           cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
 
+  # Reports CPU time, peak memory, allocations, binary size and dependency
+  # facts for both trees; it never fails on what it measures.
+  resources:
+    name: metrics/resources
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GATE: metrics/resources
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - name: Build atelier-metrics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-metrics \
+            --target x86_64-unknown-linux-musl
+      - name: Measure both trees' resources in the container
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          GATES: metrics/resources
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: bash "$CI_SUPPORT/run.sh" metrics
+      - name: Summarize resources
+        if: ${{ !cancelled() }}
+        env:
+          SUMMARY: ${{ runner.temp }}/atelier-reports/container/summary.txt
+        run: |
+          if [[ ! -f "$SUMMARY" || -L "$SUMMARY" || ! -s "$SUMMARY" ]]; then
+            echo "::error::the container wrote no resources summary at $SUMMARY"
+            exit 1
+          fi
+          cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+  # A controlled A/B of the allocation patch. The trusted container measures
+  # the PR base in both runs; only the untrusted head container sees the
+  # patch. The patched head's DHAT TotalBlocks must exceed the unpatched
+  # head's, so a later PR that changes the reporter's allocations still
+  # passes. Both runs must exit 0.
+  resources-proof:
+    name: metrics/resources-proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GATE: metrics/resources
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - name: Build atelier-metrics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-metrics \
+            --target x86_64-unknown-linux-musl
+      - name: Verify the allocation count
+        shell: bash
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          GATES: metrics/resources
+          # The real PR base: the trusted container measures it in both runs.
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+          # Three runs of two containers each fit inside the 90-minute job.
+          # The measured runs finish well under this; the cap keeps a runaway
+          # from consuming the proof job.
+          METRICS_CONTAINER_LIMIT: 8m
+        run: |
+          reports="$RUNNER_TEMP/atelier-reports/container"
+          summary="$reports/summary.txt"
+          json="$reports/resources.json"
+          head_json="$reports/head-resources.json"
+          status=0
+
+          fail() {
+            echo "::error::$run: $* (exit $status)"
+            exit 1
+          }
+
+          echo "### metrics/resources-proof" >> "$GITHUB_STEP_SUMMARY"
+
+          # Appends this run's summary under the heading $1, so the evidence of
+          # every run that measured stays visible when a later assertion fails.
+          show() {
+            {
+              echo
+              echo "#### $1"
+              echo
+              cat -- "$summary"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          # Runs the resources gate against BASE and requires exit 0 and an
+          # allocations row in the summary.
+          measure() {
+            local log="$RUNNER_TEMP/resources-proof-$run.log"
+            status=0
+            bash "$CI_SUPPORT/run.sh" metrics > "$log" 2>&1 || status=$?
+            cat -- "$log"
+            [[ "$status" == 0 ]] || fail "expected exit 0"
+            [[ -f "$summary" && ! -L "$summary" && -s "$summary" ]] \
+              || fail "no resources summary at $summary"
+            grep -Eiq '^\| *allocations' "$summary" \
+              || fail "expected an allocations row in the summary"
+          }
+
+          # Requires the table cell $2, named $1, to show the measured value
+          # $3. A whole cell must equal it exactly; a decimal one, which the
+          # table rounds to six places, must lie within 0.000001 of it.
+          check_cell() {
+            local name=$1 cell=$2 value=$3 kind=$4
+            local number='^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+
+            if [[ "$kind" == whole ]]; then
+              [[ "$value" =~ ^[0-9]+$ ]] \
+                || fail "$name measured '$value' is not a whole number"
+              [[ "$cell" =~ ^[0-9]+$ ]] \
+                || fail "$name cell '$cell' is not a whole number"
+              (( 10#$cell == 10#$value )) \
+                || fail "$name cell $cell is not the measured $value"
+              return
+            fi
+
+            [[ "$value" =~ $number ]] \
+              || fail "$name measured '$value' is not a number"
+            [[ "$cell" =~ $number ]] \
+              || fail "$name cell '$cell' is not a number"
+            awk -v cell="$cell" -v value="$value" 'BEGIN {
+              d = cell - value
+              if (d < 0) d = -d
+              exit !(d <= 0.000001)
+            }' || fail "$name cell $cell is not within 0.000001 of the" \
+              "measured $value"
+          }
+
+          # Requires the summary row for metric $1 to show field $2 of
+          # resources.json before and of head-resources.json after, as $3:
+          # whole or decimal, and leaves its after cell in row_after.
+          check_row() {
+            local metric=$1 field=$2 kind=$3 base head cells before after
+            base=$(jq -er ".$field" "$json") \
+              || fail "no $field in resources.json"
+            head=$(jq -er ".$field" "$head_json") \
+              || fail "no $field in head-resources.json"
+
+            cells=$(awk -F'|' -v metric="$metric" '
+              function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+              trim($2) == metric {
+                print trim($3) "\t" trim($4)
+                found = 1
+                exit
+              }
+              END { exit !found }
+            ' "$summary") || fail "no $metric row in the summary"
+            IFS=$'\t' read -r before after <<< "$cells"
+
+            check_cell "$metric before" "$before" "$base" "$kind"
+            check_cell "$metric after" "$after" "$head" "$kind"
+            row_after=$after
+          }
+
+          # Requires the crate rows, in the table's order, to name each crate
+          # in either report's top five, head's first, and to show its size
+          # in each, or "-" where that side does not list it.
+          check_crates() {
+            local expected actual i label base head row_label before after
+            local -a want got
+            expected=$(jq -nr --slurpfile base "$json" \
+              --slurpfile head "$head_json" '
+              def cell: gsub("[^A-Za-z0-9_.\\[\\]-]"; "?");
+              def size($side; $name):
+                [$side.crates[] | select(.name == $name) | .size][0]
+                | if . == null then "-" else tostring end;
+
+              $base[0] as $b
+              | $head[0] as $h
+              | [$h.crates[].name, $b.crates[].name]
+              | reduce .[] as $n ([];
+                  if any(.[]; . == $n) then . else . + [$n] end)
+              | .[]
+              | "Crate \(cell) (text bytes, top five)\t\(size($b; .))"
+                + "\t\(size($h; .))"
+            ') || fail "cannot read the crates of resources.json and" \
+              "head-resources.json"
+            actual=$(awk -F'|' '
+              function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+              trim($2) ~ /^Crate .* \(text bytes, top five\)$/ {
+                print trim($2) "\t" trim($3) "\t" trim($4)
+              }
+            ' "$summary")
+            mapfile -t want <<< "$expected"
+            mapfile -t got <<< "$actual"
+
+            (( ${#got[@]} == ${#want[@]} )) \
+              || fail "the summary has ${#got[@]} crate rows, expected" \
+                "${#want[@]}"
+
+            for i in "${!want[@]}"; do
+              IFS=$'\t' read -r label base head <<< "${want[i]}"
+              IFS=$'\t' read -r row_label before after <<< "${got[i]}"
+              [[ "$row_label" == "$label" ]] \
+                || fail "crate row $((i + 1)) is '$row_label', expected" \
+                  "'$label'"
+
+              if [[ "$base" == - ]]; then
+                [[ "$before" == - ]] \
+                  || fail "$label before cell '$before' should be -"
+              else
+                check_cell "$label before" "$before" "$base" whole
+              fi
+
+              if [[ "$head" == - ]]; then
+                [[ "$after" == - ]] \
+                  || fail "$label after cell '$after' should be -"
+              else
+                check_cell "$label after" "$after" "$head" whole
+              fi
+            done
+          }
+
+          # Requires every row of the run's table to show the measured values
+          # of resources.json before and head-resources.json after, and reads
+          # head's TotalBlocks and the Allocations (blocks) after cell for the
+          # runs to compare.
+          verify_table() {
+            check_row "CPU time (s)" cpu_seconds decimal
+            check_row "Peak memory (bytes)" peak_rss_bytes decimal
+            check_row "Allocations (bytes)" total_bytes whole
+            check_row "Allocations (blocks)" total_blocks whole
+            table_after=$row_after
+            check_row "Binary size (file bytes)" binary_file_size whole
+            check_row "Binary size (text bytes)" text_section_size whole
+            check_row "Packages" package_count whole
+            check_row "Workspace members" workspace_members whole
+            check_row "Duplicate versions" duplicate_versions whole
+            check_crates
+            head_blocks=$(jq -er '.total_blocks' "$head_json") \
+              || fail "no total_blocks in head-resources.json"
+          }
+
+          # The base tree is identical in all three runs; only head's working
+          # tree changes. A gate that wrote head into resources.json (the
+          # table's before column) changes these base values, so save them in
+          # the control run and require the two runs below to match. The
+          # deterministic fields must match exactly; CPU time and peak memory
+          # are hyperfine means over timed runs, so they get a 25% tolerance.
+          base_fields=(total_bytes total_blocks binary_file_size \
+            text_section_size package_count workspace_members \
+            duplicate_versions crates)
+          tolerant_fields=(cpu_seconds peak_rss_bytes)
+
+          # Requires every base-side field of this run's resources.json to
+          # match the control run's, naming $run and the field on a mismatch.
+          # Deterministic fields must be equal; the two timed fields must lie
+          # within 25% of the control run's value.
+          check_base() {
+            local field expected actual
+            for field in "${base_fields[@]}"; do
+              expected=$(jq -e --arg f "$field" '.[$f]' <<< "$control_base") \
+                || fail "control base has no $field"
+              actual=$(jq -e --arg f "$field" '.[$f]' "$json") \
+                || fail "no $field in resources.json"
+              [[ "$expected" == "$actual" ]] \
+                || fail "base field $field is '$actual', expected" \
+                  "'$expected' from the control run"
+            done
+
+            for field in "${tolerant_fields[@]}"; do
+              expected=$(jq -e --arg f "$field" '.[$f]' <<< "$control_base") \
+                || fail "control base has no $field"
+              actual=$(jq -e --arg f "$field" '.[$f]' "$json") \
+                || fail "no $field in resources.json"
+              awk -v expected="$expected" -v actual="$actual" 'BEGIN {
+                if (expected + 0 == 0) exit !(actual + 0 == 0)
+                d = (actual - expected) / expected
+                if (d < 0) d = -d
+                exit !(d <= 0.25)
+              }' || fail "base field $field is '$actual', more than 25%" \
+                "from '$expected' in the control run"
+            done
+          }
+
+          # Run 1, control: the unpatched head against the PR base.
+          run=control
+          measure
+          show Control
+          verify_table
+          control_base=$(jq -c '{
+            cpu_seconds, peak_rss_bytes, total_bytes, total_blocks,
+            binary_file_size, text_section_size, package_count,
+            workspace_members, duplicate_versions, crates
+          }' "$json") || fail "cannot read the base fields from resources.json"
+          control=$head_blocks
+          control_table_after=$table_after
+          # Run 2 must write its own evidence, not inherit run 1's.
+          rm -rf -- "$reports"
+
+          # Patches head's working tree only, which only the untrusted head
+          # container measures; the trusted side reads BASE from git.
+          run=allocated
+          python3 - "$SOURCE/reporter/src/report.rs" <<'PY' || exit 1
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          text = path.read_text()
+          # Any whitespace, including line breaks, may separate the tokens, so
+          # rustfmt can wrap the parameters or the return type. The parameters
+          # hold no brace or semicolon, so one match never spans two items.
+          signature = re.compile(
+              r"^[ \t]*pub\s+fn\s+results\s*\([^{};]*\)"
+              r"\s*->\s*Vec\s*<\s*GateCheck\s*>\s*\{",
+              re.MULTILINE,
+          )
+          found = list(signature.finditer(text))
+          if len(found) != 1:
+              print(
+                  f"::error::allocated expected one results() signature in {path},"
+                  f" found {len(found)}"
+              )
+              sys.exit(1)
+          # The allocation goes on the lines after the one holding the
+          # signature's opening brace.
+          end = text.find("\n", found[0].end())
+          if end < 0:
+              print(f"::error::allocated found no line after results() in {path}")
+              sys.exit(1)
+          lines = [
+              "    let extra: Vec<usize> ="
+              " (0..report.actions.len().saturating_mul(8).max(1)).collect();",
+              "    std::hint::black_box(&extra);",
+              "    drop(extra);",
+          ]
+          path.write_text(text[: end + 1] + "\n".join(lines) + "\n" + text[end + 1 :])
+          PY
+
+          # Run 2, allocated: the patched head against the same PR base.
+          measure
+          show Allocated
+          verify_table
+          check_base
+          allocated=$head_blocks
+
+          (( allocated > control )) \
+            || fail "expected allocated head TotalBlocks $allocated" \
+              "above control $control"
+          (( 10#$table_after > 10#$control_table_after )) \
+            || fail "expected the allocated table's Allocations (blocks)" \
+              "after cell $table_after above the control table's" \
+              "after cell $control_table_after"
+          # Run 3 must write its own evidence, not inherit run 2's.
+          rm -rf -- "$reports"
+
+          # Run 3, restored: head's own report.rs again, against the same PR
+          # base; head's count must return to the control run's.
+          run=restored
+          git -C "$SOURCE" checkout -- reporter/src/report.rs \
+            || fail "cannot restore reporter/src/report.rs"
+          measure
+          show Restored
+          verify_table
+          check_base
+          restored=$head_blocks
+
+          {
+            echo
+            echo "Head TotalBlocks: control $control, allocated $allocated," \
+              "restored $restored"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          (( restored == control )) \
+            || fail "expected restored head TotalBlocks $restored to equal" \
+              "control $control"
+
   budget-proof:
     name: metrics/budget-proof (${{ matrix.mode }})
     runs-on: ubuntu-latest

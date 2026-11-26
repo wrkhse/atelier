@@ -515,6 +515,293 @@ if [[ "$gate" == metrics/spread ]]; then
   exit
 fi
 
+# The resources of one tree, measured from inside it with its own manifests,
+# lockfile and .cargo settings: hyperfine times the reporter on a fixed
+# report, Gungraun's DHAT counts the benchmark's allocations, cargo-bloat
+# sizes the reporter binary and cargo metadata lists the dependencies. The raw
+# outputs stay in OUT beside resources.json, which keeps only the values the
+# table shows; a missing or nonnumeric value fails, named. The body is a
+# subshell, so its cd stays inside it.
+measure_resources() (
+  local tree=$1 out=$2
+  local fixture=$out/report.json
+
+  cd "$tree"
+
+  if ! cargo build --release --locked -p atelier-reporter; then
+    echo "metrics/resources: could not build atelier-reporter in $tree" >&2
+    exit 1
+  fi
+
+  if [[ ! -e "$fixture" && ! -L "$fixture" ]]; then
+    cat > "$fixture" <<'JSON'
+{"actions": [{
+  "node": {"action": "run-task", "params": {"target": "reporter:fmt"}},
+  "status": "passed",
+  "label": "RunTask(reporter:fmt)"
+}]}
+JSON
+  fi
+
+  if [[ ! -f "$fixture" || -L "$fixture" || ! -s "$fixture" ]]; then
+    echo "metrics/resources: $fixture is not a plain non-empty file" >&2
+    exit 1
+  fi
+
+  if ! hyperfine --warmup 2 --runs 10 --export-json "$out/hyperfine.json" \
+    --metrics time_wall_clock,time_user,time_system,memory_peak_resident \
+    "target/release/atelier-reporter --report $fixture --gate rust/fmt"; then
+    echo "metrics/resources: hyperfine could not time the reporter in $tree" >&2
+    exit 1
+  fi
+
+  if ! cargo bench --locked --bench library_benchmark \
+    -- --tools=dhat --output-format=json > "$out/dhat.jsonl"; then
+    echo "metrics/resources: the DHAT benchmark failed in $tree" >&2
+    exit 1
+  fi
+
+  # The workspace is virtual, so cargo-bloat is told which binary to size.
+  if ! cargo bloat --release --locked -p atelier-reporter \
+    --bin atelier-reporter --crates --message-format json -n 0 \
+    > "$out/bloat.json"; then
+    echo "metrics/resources: cargo-bloat could not size the reporter in" \
+      "$tree" >&2
+    exit 1
+  fi
+
+  if ! cargo metadata --format-version 1 --locked > "$out/metadata.json"; then
+    echo "metrics/resources: cargo metadata failed in $tree" >&2
+    exit 1
+  fi
+
+  if ! jq -n --slurpfile hyperfine "$out/hyperfine.json" \
+    --slurpfile dhat "$out/dhat.jsonl" --slurpfile bloat "$out/bloat.json" \
+    --slurpfile metadata "$out/metadata.json" '
+    def need($name):
+      if type == "number" then .
+      else error("metrics/resources: missing or nonnumeric \($name)") end;
+    def list($name):
+      if type == "array" then .
+      else error("metrics/resources: missing list \($name)") end;
+
+    ($hyperfine[0].results[0].summary) as $run
+    | ([$dhat[] | .profiles[]? | select(.tool == "DHAT")
+        | .data.total.metrics][0]) as $alloc
+    | $bloat[0] as $size
+    | ($metadata[0].packages | list("cargo metadata packages")) as $packages
+    | {
+        cpu_seconds: (($run.time_user.mean | need("time_user.mean"))
+          + ($run.time_system.mean | need("time_system.mean"))),
+        peak_rss_bytes: ($run.memory_peak_resident.median
+          | need("memory_peak_resident.median")),
+        total_bytes: ($alloc.TotalBytes.values.new
+          | need("DHAT TotalBytes")),
+        total_blocks: ($alloc.TotalBlocks.values.new
+          | need("DHAT TotalBlocks")),
+        binary_file_size: ($size["file-size"] | need("bloat file-size")),
+        text_section_size: ($size["text-section-size"]
+          | need("bloat text-section-size")),
+        crates: ([$size.crates | list("bloat crates") | .[]
+          | {name: (.name | tostring), size: (.size | need("crate size"))}]
+          | sort_by(-.size) | .[:5]),
+        package_count: ($packages | length),
+        workspace_members: ($metadata[0].workspace_members
+          | list("cargo metadata workspace_members") | length),
+        duplicate_versions: ($packages | group_by(.name)
+          | map(select(map(.version) | unique | length > 1)) | length)
+      }
+    | if (.crates | length) == 0 then
+        error("metrics/resources: cargo-bloat listed no crates")
+      else . end
+  ' > "$out/resources.json"; then
+    echo "metrics/resources: could not combine the measurements of $tree" >&2
+    exit 1
+  fi
+)
+
+# True when FILE is a resources.json of the shape measure_resources writes:
+# every value a number, and one to five crates with short names.
+resources_valid() {
+  jq -e '
+    def num: type == "number";
+
+    type == "object"
+    and (keys == ["binary_file_size", "cpu_seconds", "crates",
+      "duplicate_versions", "package_count", "peak_rss_bytes",
+      "text_section_size", "total_blocks", "total_bytes",
+      "workspace_members"])
+    and ([.cpu_seconds, .peak_rss_bytes, .total_bytes, .total_blocks,
+      .binary_file_size, .text_section_size, .package_count,
+      .workspace_members, .duplicate_versions] | all(num))
+    and (.crates | type == "array" and length >= 1 and length <= 5
+      and all(.[]; type == "object" and (.size | num)
+        and (.name | type == "string" and length <= 64)))
+  ' "$1" > /dev/null
+}
+
+# metrics/resources-head measures head alone, in its own container, which has
+# no /reports and no access to the base's evidence: it writes only /head-out,
+# which the runner copies out and the trusted metrics/resources container
+# reads, read-only, at /head-in.
+if [[ "$gate" == metrics/resources-head ]]; then
+  if [[ -z "${BASE:-}" ]]; then
+    echo "metrics/resources-head needs BASE" >&2
+    exit 1
+  fi
+
+  git worktree add --detach /work-base "$BASE"
+
+  # The base's harness measures head's allocations, as in performance.
+  if [[ ! -f /work-base/reporter/benches/library_benchmark.rs ]]; then
+    echo "metrics/resources-head: the base has no benchmark harness" >&2
+    exit 1
+  fi
+
+  # Only the harness file comes from the base. Head builds with its own
+  # manifests, lockfile and .cargo settings.
+  cp -- /work-base/reporter/benches/library_benchmark.rs \
+    /work/reporter/benches/library_benchmark.rs
+
+  # The gate container drops all capabilities and fixes SecurityOpt, so
+  # gungraun's setarch -R cannot set ADDR_NO_RANDOMIZE. The table reports
+  # total DHAT bytes and blocks, which address layout does not change.
+  export GUNGRAUN_HOME=/res-gungraun GUNGRAUN_ALLOW_ASLR=true
+  mkdir -p /head-out
+  measure_resources /work /head-out
+
+  report=/head-out/resources.json
+  if [[ ! -f "$report" || -L "$report" || ! -s "$report" ]]; then
+    echo "metrics/resources-head: missing or empty report at $report" >&2
+    exit 1
+  fi
+
+  # Bound the regular-file payload before the runner copies it out.
+  find /head-out -type f -printf '%s\n' | awk '
+    function fail(reason) {
+      print "metrics/resources-head: /head-out " reason > "/dev/stderr"
+      exit 1
+    }
+    NR > 32 { fail("has more than 32 regular files") }
+    $1 > 16 * 1024 * 1024 { fail("has a regular file larger than 16 MiB") }
+    {
+      total += $1
+      if (total > 32 * 1024 * 1024) {
+        fail("has more than 32 MiB of regular files in total")
+      }
+    }
+  '
+
+  echo "metrics/resources-head: measured head"
+  exit 0
+fi
+
+# metrics/resources is the trusted container: it measures the base and writes
+# the before-and-after table. Head ran in a separate container with no access
+# to /reports; its resources.json arrives read-only at /head-in and is copied
+# beside the base's as head-resources.json. The gate only reports: it fails
+# on missing evidence, never on what it measures.
+if [[ "$gate" == metrics/resources ]]; then
+  if [[ -z "${BASE:-}" ]]; then
+    echo "metrics/resources needs BASE" >&2
+    exit 1
+  fi
+  head_report=/head-in/resources.json
+  if [[ ! -e "$head_report" && ! -L "$head_report" ]]; then
+    echo "metrics/resources: head's container wrote no report at" \
+      "$head_report" >&2
+    exit 1
+  fi
+  if [[ -L "$head_report" || ! -f "$head_report" ]]; then
+    echo "metrics/resources: $head_report is not a plain file" >&2
+    exit 1
+  fi
+  if [[ ! -s "$head_report" ]]; then
+    echo "metrics/resources: $head_report is empty" >&2
+    exit 1
+  fi
+  if ! resources_valid "$head_report"; then
+    echo "metrics/resources: $head_report is not a valid resources report" >&2
+    exit 1
+  fi
+
+  git worktree add --detach /work-base "$BASE"
+
+  # Only the base tree is ever built or run here; head's code never is.
+  if [[ ! -f /work-base/reporter/benches/library_benchmark.rs ]]; then
+    echo "metrics/resources: the base has no benchmark harness" >&2
+    exit 1
+  fi
+
+  # The gate container drops all capabilities and fixes SecurityOpt, so
+  # gungraun's setarch -R cannot set ADDR_NO_RANDOMIZE. The table reports
+  # total DHAT bytes and blocks, which address layout does not change.
+  export GUNGRAUN_HOME=/reports/gungraun GUNGRAUN_ALLOW_ASLR=true
+  measure_resources /work-base /reports
+
+  if ! resources_valid /reports/resources.json; then
+    echo "metrics/resources: the base's resources report is not valid" >&2
+    exit 1
+  fi
+  cp -- "$head_report" /reports/head-resources.json
+
+  # Before is the base, after is head. A crate in either side's top five
+  # gets a row; a side without it shows "-".
+  if ! jq -nr --slurpfile base /reports/resources.json \
+    --slurpfile head /reports/head-resources.json '
+    def fmt:
+      if type != "number" then "-"
+      elif . == floor then tostring
+      else (. * 1000000 | round) / 1000000 | tostring end;
+    def cell: gsub("[^A-Za-z0-9_.\\[\\]-]"; "?");
+    def row($metric; $before; $after; $method):
+      "| \($metric) | \($before | fmt) | \($after | fmt) | \($method) |";
+    def size($side; $name):
+      [$side.crates[] | select(.name == $name) | .size][0];
+
+    $base[0] as $b
+    | $head[0] as $h
+    | ([$h.crates[].name, $b.crates[].name]
+      | reduce .[] as $n ([]; if any(.[]; . == $n) then . else . + [$n] end))
+      as $names
+    | "| Metric | Before | After | Method |",
+      "| --- | --- | --- | --- |",
+      row("CPU time (s)"; $b.cpu_seconds; $h.cpu_seconds;
+        "hyperfine time_user+time_system"),
+      row("Peak memory (bytes)"; $b.peak_rss_bytes; $h.peak_rss_bytes;
+        "hyperfine memory_peak_resident"),
+      row("Allocations (bytes)"; $b.total_bytes; $h.total_bytes;
+        "Gungraun DHAT TotalBytes"),
+      row("Allocations (blocks)"; $b.total_blocks; $h.total_blocks;
+        "Gungraun DHAT TotalBlocks"),
+      row("Binary size (file bytes)"; $b.binary_file_size;
+        $h.binary_file_size; "cargo-bloat"),
+      row("Binary size (text bytes)"; $b.text_section_size;
+        $h.text_section_size; "cargo-bloat"),
+      ($names[] as $n
+        | row("Crate \($n | cell) (text bytes, top five)"; size($b; $n);
+          size($h; $n); "cargo-bloat")),
+      row("Packages"; $b.package_count; $h.package_count; "cargo metadata"),
+      row("Workspace members"; $b.workspace_members; $h.workspace_members;
+        "cargo metadata"),
+      row("Duplicate versions"; $b.duplicate_versions;
+        $h.duplicate_versions; "cargo metadata")
+  ' > /reports/summary.txt; then
+    echo "metrics/resources: could not write the resources table" >&2
+    exit 1
+  fi
+  cat -- /reports/summary.txt
+
+  for report in resources.json head-resources.json summary.txt; do
+    file=/reports/$report
+    if [[ ! -f "$file" || -L "$file" || ! -s "$file" ]]; then
+      echo "metrics/resources: missing or empty report at $file" >&2
+      exit 1
+    fi
+  done
+  exit 0
+fi
+
 # moon's own status; its report is judged in a separate container.
 status=0
 if [[ "$gate" == all ]]; then
