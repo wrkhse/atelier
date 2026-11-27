@@ -382,13 +382,36 @@ start_panes() {
 start_recording() {
   local intro="atelier: metrics against the previous version"
   local intro_len=${#intro}
+  local right_width left_width value
+
+  # A requested tmux split can be clamped when the window is narrow, so use
+  # the width tmux actually reports, not the configured split width.
+  right_width=$(tmux display-message -p -t "$RIGHT" "#{pane_width}" || true)
+  if [[ ! "$right_width" =~ ^[0-9]+$ ]] || (( 10#$right_width == 0 )); then
+    die "right pane has no positive integer width: '$right_width'"
+  fi
 
   # termctrl waits on the rendered screen, where a wrapped intro never
   # matches the full string, so an intro that wraps must fail up front.
-  if (( intro_len > RIGHT_PANE_WIDTH )); then
+  if (( intro_len > right_width )); then
     die "intro does not fit on one row: length $intro_len exceeds pane" \
-      "width $RIGHT_PANE_WIDTH"
+      "width $right_width"
   fi
+
+  left_width=$(tmux display-message -p -t "$LEFT" "#{pane_width}" || true)
+  if [[ ! "$left_width" =~ ^[0-9]+$ ]] || (( 10#$left_width == 0 )); then
+    die "left pane has no positive integer width: '$left_width'"
+  fi
+
+  # Widening the right pane narrows the left. Every string waited for in the
+  # left pane must render on one row or its wait never matches.
+  for value in "release $RELEASE_TAG" "atelier-metrics $VERSION" \
+    "atelier-reporter $VERSION" 'exit 1'; do
+    if (( ${#value} > left_width )); then
+      die "left pane string does not fit on one row: '$value' length" \
+        "${#value} exceeds pane width $left_width"
+    fi
+  done
 
   printf '%s from release %s\n' "$intro" "$RELEASE_TAG" >> "$CAPTIONS"
   wait_until 10 pane_has "$RIGHT" -F -- "$intro"
