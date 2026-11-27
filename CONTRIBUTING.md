@@ -16,4 +16,5 @@ tests. The tidy pins live as plain data in .github/tidy.env; the binary is
 verified by SHA-256 on first use and its cached archive is verified on every
 run at `~/.cache/wrkhse/tidy-<sha>/`.
 
-CI runs the hook selftest on Ubuntu and macOS.
+CI runs the hook selftest on Ubuntu and macOS on pull requests that change
+hook paths, on pushes to main, daily on main, and on demand.
