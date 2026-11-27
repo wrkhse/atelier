@@ -14,6 +14,6 @@ cannot parse, a partially staged file, or a tidy download/checksum/platform
 failure stops the commit with a named reason. It runs no clippy, compile or
 tests. The tidy pins live as plain data in .github/tidy.env; the binary is
 verified by SHA-256 on first use and its cached archive is verified on every
-run at ~/.cache/wrkhse/tidy-<sha>/.
+run at `~/.cache/wrkhse/tidy-<sha>/`.
 
 CI runs the hook selftest on Ubuntu and macOS.
