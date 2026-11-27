@@ -418,20 +418,30 @@ jobs:
           # tree changes. A gate that wrote head into resources.json (the
           # table's before column) changes these base values, so save them in
           # the control run and require the two runs below to match. The
-          # deterministic fields must match exactly; CPU time and peak memory
-          # are hyperfine means over timed runs, so they get a 25% tolerance.
+          # deterministic fields must match exactly, peak RSS tolerantly, and
+          # CPU time within the larger of 25% and an absolute 0.0005-second
+          # noise floor.
           base_fields=(total_bytes total_blocks binary_file_size \
             text_section_size package_count workspace_members \
             duplicate_versions crates)
-          tolerant_fields=(cpu_seconds peak_rss_bytes)
+          tolerant_fields=(peak_rss_bytes)
+          # CPU time is a timed mean. Identical base trees swung by 0.000326
+          # seconds in job 140266821006, so a bare relative bound would flake
+          # on small means. The bound is the larger of 25% and an absolute
+          # 0.0005-second floor: it tolerates measured noise, keeps larger
+          # means under a relative check, and catches contamination.
+          absolute_fields=(cpu_seconds)
           # Startup, build, idle footprint, context switches, bytes written
           # and sampled peaks are timed or sampled and would flake across
           # runs, so check_base does not compare them.
 
           # Requires every base-side field of this run's resources.json to
           # match the control run's, naming $run and the field on a mismatch.
-          # Deterministic fields must be equal; the two timed fields must lie
-          # within 25% of the control run's value.
+          # Deterministic fields must be equal, peak RSS must lie within 25%,
+          # and CPU time within the larger of 25% and an absolute 0.0005-second
+          # floor, measured against the control run's value. Identical trees
+          # swung by 0.000326 seconds in job 140266821006: the floor absorbs
+          # that noise while the relative bound catches contamination.
           check_base() {
             local field expected actual
             for field in "${base_fields[@]}"; do
@@ -456,6 +466,25 @@ jobs:
                 exit !(d <= 0.25)
               }' || fail "base field $field is '$actual', more than 25%" \
                 "from '$expected' in the control run"
+            done
+
+            for field in "${absolute_fields[@]}"; do
+              expected=$(jq -e --arg f "$field" \
+                '.[$f] | select(type == "number")' <<< "$control_base") \
+                || fail "control base $field is not a JSON number"
+              actual=$(jq -e --arg f "$field" \
+                '.[$f] | select(type == "number")' "$json") \
+                || fail "$field in resources.json is not a JSON number"
+              awk -v expected="$expected" -v actual="$actual" 'BEGIN {
+                bound = 0.25 * expected
+                if (bound < 0.0005) bound = 0.0005
+                d = actual - expected
+                if (d < 0) d = -d
+                exit !(d <= bound)
+              }' || fail "base field $field is '$actual', beyond the larger" \
+                "of 25% and 0.0005 seconds from '$expected' in the control" \
+                "run; identical base trees swung by 0.000326 seconds in job" \
+                "140266821006"
             done
           }
 
@@ -1065,3 +1094,155 @@ jobs:
             exit 1
           fi
           echo "Ir spread $spread% (min $min, max $max)"
+
+  # Measures the base tree's CPU time in 30 independent gate runs and keeps
+  # each measurement as a small artifact, so the summary below can judge the
+  # cross-run spread before tightening the resources-proof bound.
+  cpu-bound-run:
+    name: metrics/cpu-bound-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+              16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+    env:
+      GATE: metrics/resources
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - name: Build atelier-metrics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked -p atelier-metrics \
+            --target x86_64-unknown-linux-musl
+      - name: Measure the base tree in the container
+        shell: bash
+        env:
+          CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          SOURCE: ${{ github.workspace }}
+          GATES: metrics/resources
+          BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: bash "$CI_SUPPORT/run.sh" metrics
+      - name: Record this run's CPU seconds
+        shell: bash
+        env:
+          RUN: ${{ matrix.run }}
+        run: |
+          json="$RUNNER_TEMP/atelier-reports/container/resources.json"
+          if [[ ! -f "$json" || -L "$json" ]]; then
+            echo "::error::run $RUN: no resources.json at $json"
+            exit 1
+          fi
+          cpu=$(jq -er '.cpu_seconds | select(type == "number")' "$json") || {
+            echo "::error::run $RUN: missing or nonnumeric .cpu_seconds" \
+              "in $json"
+            exit 1
+          }
+          out="$RUNNER_TEMP/cpu-bound-$RUN.json"
+          jq -n --argjson run "$RUN" --argjson cpu "$cpu" \
+            '{run: $run, cpu_seconds: $cpu}' > "$out"
+      # actions/upload-artifact v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cpu-bound-${{ matrix.run }}
+          path: ${{ runner.temp }}/cpu-bound-${{ matrix.run }}.json
+          if-no-files-found: error
+
+  # Judges the 30 CPU measurements together. The first artifact is the
+  # control run. The bound matches resources-proof: the larger of an absolute
+  # 0.0005-second floor and 25% of the control run's cpu_seconds. Every other
+  # run's absolute difference from that value must lie within the bound.
+  cpu-bound-summary:
+    name: metrics/cpu-bound-summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: cpu-bound-run
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # actions/download-artifact v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: cpu-bound-*
+          path: ${{ runner.temp }}/cpu-bound
+          merge-multiple: true
+      - name: Require a bounded CPU spread
+        shell: bash
+        env:
+          DIR: ${{ runner.temp }}/cpu-bound
+        run: |
+          shopt -s nullglob
+          files=("$DIR"/*)
+          # With if: always() the summary also runs after a failed or
+          # cancelled matrix run, so name the artifact that was not uploaded
+          # before checking the total.
+          for run in {1..30}; do
+            artifact="$DIR/cpu-bound-$run.json"
+            [[ -f "$artifact" && ! -L "$artifact" ]] || {
+              echo "::error::run $run: no cpu-bound artifact at $artifact"
+              exit 1
+            }
+          done
+          (( ${#files[@]} == 30 )) || {
+            echo "::error::expected 30 cpu-bound files, found ${#files[@]}"
+            exit 1
+          }
+          for f in "${files[@]}"; do
+            [[ -f "$f" && ! -L "$f" ]] || {
+              echo "::error::$f is not a plain file"
+              exit 1
+            }
+          done
+
+          if ! values=$(jq -sc 'map(.cpu_seconds)' "${files[@]}"); then
+            echo "::error::cannot read cpu_seconds from the 30 files"
+            exit 1
+          fi
+          if ! jq -e 'length == 30 and all(.[]; type == "number")' \
+            <<< "$values" > /dev/null; then
+            echo "::error::each of the 30 files needs a numeric cpu_seconds"
+            exit 1
+          fi
+
+          read -r min max spread expected bound worst <<< "$(jq -r '
+            .[0] as $expected
+            | (if 0.0005 > (0.25 * $expected) then 0.0005
+               else 0.25 * $expected end) as $bound
+            | min as $lo | max as $hi
+            | (map((. - $expected) | abs) | max) as $worst
+            | "\($lo) \($hi) \($hi - $lo) \($expected) \($bound) \($worst)"
+          ' <<< "$values")"
+
+          {
+            echo "### metrics/cpu-bound-summary"
+            echo
+            echo "Runs: ${#files[@]}"
+            echo "min $min, max $max, spread $spread, expected $expected," \
+              "bound $bound"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          awk -v worst="$worst" -v bound="$bound" 'BEGIN {
+            exit !(worst + 0 <= bound + 0)
+          }' || {
+            echo "::error::cpu_seconds differ from expected $expected by" \
+              "$worst, beyond bound $bound"
+            exit 1
+          }
+          echo "CPU spread $spread (min $min, max $max, expected $expected," \
+            "bound $bound)"

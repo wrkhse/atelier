@@ -72,3 +72,24 @@ check_failure v0.2.0-rc.0 'tag v0.2.0-rc.0 has no previous rc tag to compare'
 check_failure 0.2.0-rc.0 'tag 0.2.0-rc.0 has no previous rc tag to compare'
 check_failure v0.2.0 'tag v0.2.0 is not a release candidate tag'
 check_failure 0.2.0 'tag 0.2.0 is not a release candidate tag'
+
+# The intro is one waited-for string; termctrl reads the rendered screen, so
+# a wrapped intro never matches. Check from the source alone that it fits on
+# one row of the right pane.
+pane_width=$(sed -n 's/^RIGHT_PANE_WIDTH=\([0-9][0-9]*\)$/\1/p' "$recorder")
+intro=$(sed -n 's/^[[:space:]]*local intro="\([^"]*\)"$/\1/p' "$recorder")
+
+if [[ ! "$pane_width" =~ ^[0-9]+$ ]]; then
+  echo "::error::RIGHT_PANE_WIDTH constant not found in $recorder"
+  exit 1
+fi
+if [[ -z "$intro" ]]; then
+  echo "::error::intro string not found in $recorder"
+  exit 1
+fi
+if (( ${#intro} > 10#$pane_width )); then
+  echo "::error::intro length ${#intro} exceeds right pane width $pane_width"
+  exit 1
+fi
+
+printf 'pass: intro fits one row: %d <= %d\n' "${#intro}" "$((10#$pane_width))"
