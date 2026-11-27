@@ -75,26 +75,7 @@ if [[ "$MODE" == record-gate ]]; then
   printf 'reporter: %s\n' "$reporter" >&2
 fi
 
-# A transient crates.io fetch failure while installing kani-verifier can fail
-# one job's image build while siblings on the same head pass. Retry a bounded
-# number of times before failing with a named reason.
-image_built=0
-for ((attempt = 1; attempt <= 3; attempt++)); do
-  if docker build --tag atelier-gates --file "$support/Dockerfile" \
-    "$support" >&2; then
-    image_built=1
-    break
-  fi
-
-  if ((attempt < 3)); then
-    sleep 5
-  fi
-done
-
-if ((image_built == 0)); then
-  echo "docker build: image build failed after 3 attempts" >&2
-  exit 1
-fi
+docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
 names=()
 trap 'docker rm --force "${names[@]}" >/dev/null 2>&1 || true' EXIT
 

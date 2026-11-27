@@ -87,9 +87,9 @@ if [[ -z "$intro" ]]; then
   echo "::error::intro string not found in $recorder"
   exit 1
 fi
-if (( ${#intro} > pane_width )); then
+if (( ${#intro} > 10#$pane_width )); then
   echo "::error::intro length ${#intro} exceeds right pane width $pane_width"
   exit 1
 fi
 
-printf 'pass: intro fits one row: %d <= %d\n' "${#intro}" "$pane_width"
+printf 'pass: intro fits one row: %d <= %d\n' "${#intro}" "$((10#$pane_width))"
