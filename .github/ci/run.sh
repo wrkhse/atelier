@@ -7,12 +7,16 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux \
   exit 2
 fi
 
-# run.sh MODE, with GATE, GATES and BASE from the environment.
+# run.sh MODE, with GATE, GATES, BASE, GATE_IMAGE and GATE_IMAGE_HEAD from
+# the environment. GATE_IMAGE is the published reference pulled by digest;
+# GATE_IMAGE_HEAD is the PR-local reference for untrusted head code.
 MODE=${1:?mode}
 export GATE=${GATE:-}
 export ROOT=${ROOT:-.}
 export BASE=${BASE:-}
 export GATES=${GATES:-}
+GATE_IMAGE=${GATE_IMAGE:-}
+GATE_IMAGE_HEAD=${GATE_IMAGE_HEAD:-}
 support=${CI_SUPPORT:?pinned CI support directory}
 source=${SOURCE:?checkout}
 # Host-written inspections sit beside container/, which holds only what a
@@ -20,7 +24,11 @@ source=${SOURCE:?checkout}
 reports="$RUNNER_TEMP/atelier-reports"
 output="$reports/container"
 binary="$RUNNER_TEMP/atelier"
+digests="$reports/image-digests.txt"
+images="$reports/container-images.txt"
 mkdir -p "$output" "$binary"
+: > "$digests"
+: > "$images"
 
 # Each job stays inside its 90 minutes: a gate is gate + validate. The
 # metrics mode runs one metrics gate in the container, with no moon report
@@ -75,7 +83,35 @@ if [[ "$MODE" == record-gate ]]; then
   printf 'reporter: %s\n' "$reporter" >&2
 fi
 
-docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
+# A published reference is pinned to its manifest digest before it is pulled.
+# A failed inspect, pull or tag ends the runner: there is no local build and
+# no retry that could substitute a different image.
+pull_image() {
+  local reference=$1 local_tag=$2 digest
+
+  digest=$(docker buildx imagetools inspect "$reference" \
+    --format '{{.Manifest.Digest}}')
+  if [[ -z "$digest" ]]; then
+    echo "gate image: empty manifest digest for $reference" >&2
+    exit 1
+  fi
+  docker pull "$reference@$digest" >&2
+  docker tag "$reference@$digest" "$local_tag" >&2
+  printf '%s %s %s\n' "$local_tag" "$reference" "$digest" >> "$digests"
+}
+
+if [[ -n "$GATE_IMAGE" ]]; then
+  pull_image "$GATE_IMAGE" atelier-gates-base
+  if [[ -n "$GATE_IMAGE_HEAD" ]]; then
+    pull_image "$GATE_IMAGE_HEAD" atelier-gates-head
+  else
+    docker tag atelier-gates-base atelier-gates-head >&2
+  fi
+else
+  docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
+  docker tag atelier-gates atelier-gates-base >&2
+  docker tag atelier-gates atelier-gates-head >&2
+fi
 names=()
 trap 'docker rm --force "${names[@]}" >/dev/null 2>&1 || true' EXIT
 
@@ -84,14 +120,14 @@ cpus=$(( $(nproc) > 1 ? $(nproc) - 1 : 1 ))
 total=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
 memory="$(( total > 4096 ? total - 2048 : total / 2 ))m"
 
-# create NAME NETWORK MOUNT...: no runner home, credentials, command files or
-# container-engine socket. Omitting --pid keeps Docker's private PID
+# create IMAGE NAME NETWORK MOUNT...: no runner home, credentials, command
+# files or container-engine socket. Omitting --pid keeps Docker's private PID
 # namespace. The process limit counts threads: three mutant jobs run rustc
 # and nextest. GATE_OVERRIDE, when set, is the gate this one container runs,
 # as metrics/performance and metrics/resources run head and base in two.
 create() {
-  local name=$1 network=$2
-  shift 2
+  local image=$1 name=$2 network=$3
+  shift 3
   local gate=${GATE_OVERRIDE:-$GATE}
   local mounts=()
   for mount in "$@"; do
@@ -105,8 +141,9 @@ create() {
     "${mounts[@]}" \
     --env "MODE=$container_mode" --env "GATE=$gate" --env ROOT --env BASE \
     --env GATES \
-    atelier-gates >/dev/null
+    "$image" >/dev/null
   names+=("$name")
+  printf '%s %s\n' "$name" "$image" >> "$images"
   local sources=()
   for mount in "$@"; do
     sources+=("$(
@@ -140,7 +177,7 @@ start() {
 validate() {
   container_mode=validate
   limit=10m
-  create "atelier-validate-$id" none \
+  create atelier-gates-base "atelier-validate-$id" none \
     "type=bind,source=$output,target=/reports,readonly" \
     "type=bind,source=$binary,target=/binary,readonly"
   start "atelier-validate-$id"
@@ -187,8 +224,8 @@ if [[ "$MODE" == metrics && ( "$GATE" == metrics/performance \
       "zero, such as 12m, not '$limit'" >&2
     exit 2
   fi
-  GATE_OVERRIDE="$GATE-head" create "atelier-$short-head-$id" \
-    "$network" \
+  GATE_OVERRIDE="$GATE-head" create atelier-gates-head \
+    "atelier-$short-head-$id" "$network" \
     "type=bind,source=$source,target=/source,readonly" \
     "type=bind,source=$binary,target=/binary,readonly"
   head_status=0
@@ -218,8 +255,8 @@ if [[ "$MODE" == metrics && ( "$GATE" == metrics/performance \
     }
   ' || exit 1
 
-  GATE_OVERRIDE="$GATE" create "atelier-$short-base-$id" \
-    "$network" \
+  GATE_OVERRIDE="$GATE" create atelier-gates-base \
+    "atelier-$short-base-$id" "$network" \
     "type=bind,source=$source,target=/source,readonly" \
     "type=bind,source=$binary,target=/binary,readonly" \
     "type=bind,source=$headout,target=/head-in,readonly"
@@ -227,7 +264,7 @@ if [[ "$MODE" == metrics && ( "$GATE" == metrics/performance \
   docker cp "atelier-$short-base-$id:/reports/." "$output/" >&2 || true
   find "$output" -mindepth 1 ! -type f ! -type d -delete
 else
-  create "atelier-$container_mode-$id" "$network" \
+  create atelier-gates-head "atelier-$container_mode-$id" "$network" \
     "type=bind,source=$source,target=/source,readonly" \
     "type=bind,source=$binary,target=/binary,readonly"
 

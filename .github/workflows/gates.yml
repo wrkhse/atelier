@@ -15,8 +15,11 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+      packages: read
     env:
       GATE: rust/${{ matrix.gate }}
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
     strategy:
       fail-fast: false
       matrix:
@@ -55,6 +58,24 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           REPORT: ${{ runner.temp }}/atelier-reports/container/ci-report.json
-        run: >-
-          ./target/x86_64-unknown-linux-musl/release/atelier-reporter
-          --report "$REPORT" --gate "$GATE"
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          ./target/x86_64-unknown-linux-musl/release/atelier-reporter \
+            --report "$REPORT" --gate "$GATE"
+
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty" >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
