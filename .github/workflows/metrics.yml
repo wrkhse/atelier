@@ -469,10 +469,12 @@ jobs:
             done
 
             for field in "${absolute_fields[@]}"; do
-              expected=$(jq -e --arg f "$field" '.[$f]' <<< "$control_base") \
-                || fail "control base has no $field"
-              actual=$(jq -e --arg f "$field" '.[$f]' "$json") \
-                || fail "no $field in resources.json"
+              expected=$(jq -e --arg f "$field" \
+                '.[$f] | select(type == "number")' <<< "$control_base") \
+                || fail "control base $field is not a JSON number"
+              actual=$(jq -e --arg f "$field" \
+                '.[$f] | select(type == "number")' "$json") \
+                || fail "$field in resources.json is not a JSON number"
               awk -v expected="$expected" -v actual="$actual" 'BEGIN {
                 bound = 0.25 * expected
                 if (bound < 0.0005) bound = 0.0005
@@ -1158,14 +1160,16 @@ jobs:
           path: ${{ runner.temp }}/cpu-bound-${{ matrix.run }}.json
           if-no-files-found: error
 
-  # Judges the 30 CPU measurements together. The bound matches the one the
-  # resources-proof job applies to the base tree: the larger of an absolute
-  # 0.0005-second floor and 25% of the smallest measurement.
+  # Judges the 30 CPU measurements together. The first artifact is the
+  # control run. The bound matches resources-proof: the larger of an absolute
+  # 0.0005-second floor and 25% of the control run's cpu_seconds. Every other
+  # run's absolute difference from that value must lie within the bound.
   cpu-bound-summary:
     name: metrics/cpu-bound-summary
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: cpu-bound-run
+    if: always()
     permissions:
       contents: read
     steps:
@@ -1185,6 +1189,16 @@ jobs:
         run: |
           shopt -s nullglob
           files=("$DIR"/*)
+          # With if: always() the summary also runs after a failed or
+          # cancelled matrix run, so name the artifact that was not uploaded
+          # before checking the total.
+          for run in {1..30}; do
+            artifact="$DIR/cpu-bound-$run.json"
+            [[ -f "$artifact" && ! -L "$artifact" ]] || {
+              echo "::error::run $run: no cpu-bound artifact at $artifact"
+              exit 1
+            }
+          done
           (( ${#files[@]} == 30 )) || {
             echo "::error::expected 30 cpu-bound files, found ${#files[@]}"
             exit 1
@@ -1206,24 +1220,29 @@ jobs:
             exit 1
           fi
 
-          read -r min max spread bound <<< "$(jq -r '
-            min as $lo | max as $hi | ($hi - $lo) as $s
-            | (if 0.0005 > (0.25 * $lo) then 0.0005 else 0.25 * $lo end)
-              as $bound
-            | "\($lo) \($hi) \($s) \($bound)"
+          read -r min max spread expected bound worst <<< "$(jq -r '
+            .[0] as $expected
+            | (if 0.0005 > (0.25 * $expected) then 0.0005
+               else 0.25 * $expected end) as $bound
+            | min as $lo | max as $hi
+            | (map((. - $expected) | abs) | max) as $worst
+            | "\($lo) \($hi) \($hi - $lo) \($expected) \($bound) \($worst)"
           ' <<< "$values")"
 
           {
             echo "### metrics/cpu-bound-summary"
             echo
             echo "Runs: ${#files[@]}"
-            echo "min $min, max $max, spread $spread, bound $bound"
+            echo "min $min, max $max, spread $spread, expected $expected," \
+              "bound $bound"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          awk -v spread="$spread" -v bound="$bound" 'BEGIN {
-            exit !(spread + 0 <= bound + 0)
+          awk -v worst="$worst" -v bound="$bound" 'BEGIN {
+            exit !(worst + 0 <= bound + 0)
           }' || {
-            echo "::error::cpu_seconds spread $spread exceeds bound $bound"
+            echo "::error::cpu_seconds differ from expected $expected by" \
+              "$worst, beyond bound $bound"
             exit 1
           }
-          echo "CPU spread $spread (min $min, max $max, bound $bound)"
+          echo "CPU spread $spread (min $min, max $max, expected $expected," \
+            "bound $bound)"
