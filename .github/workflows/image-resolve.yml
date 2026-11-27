@@ -95,12 +95,43 @@ jobs:
           set -euo pipefail
 
           # gate-image.yml stamps ':main' beside an immutable sha-<commit>
-          # tag; both resolve to this one manifest.
-          digest=$(docker buildx imagetools inspect "$IMAGE:main" \
-            --format '{{.Manifest.Digest}}') || digest=
+          # tag; both resolve to this one manifest. Keep stdout and stderr
+          # so a failed inspect can be told apart from a missing tag.
+          if inspect=$(docker buildx imagetools inspect "$IMAGE:main" \
+            --format '{{.Manifest.Digest}}' 2>&1); then
+            digest=$inspect
+          else
+            digest=
+          fi
           if [[ -z "$digest" ]]; then
             if [[ "$BOOTSTRAP" != "1" ]]; then
               echo "::error::no digest for $IMAGE:main" >&2
+              exit 1
+            fi
+
+            # Only a genuine missing tag may fall back to a local base;
+            # auth, registry and network failures must fail the job.
+            output=${inspect,,}
+            missing=0
+            if [[ "$output" == *"not found"* || \
+                  "$output" == *"manifest unknown"* || \
+                  "$output" == *"does not exist"* ]]; then
+              missing=1
+            fi
+            unsafe=0
+            if [[ "$output" == *unauthor* || \
+                  "$output" == *denied* || \
+                  "$output" == *"failed to authorize"* || \
+                  "$output" == *timeout* || \
+                  "$output" == *"no such host"* || \
+                  "$output" == *connection* || \
+                  "$output" == *tls* ]]; then
+              unsafe=1
+            fi
+            if [[ "$missing" != 1 || "$unsafe" == 1 ]]; then
+              detail=${inspect//$'\n'/%0A}
+              echo "::error::cannot resolve $IMAGE:main;" \
+                "refusing local bootstrap: $detail" >&2
               exit 1
             fi
 
@@ -110,7 +141,6 @@ jobs:
             echo "head-ref=local" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "head-ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
       - name: Summarize the decision

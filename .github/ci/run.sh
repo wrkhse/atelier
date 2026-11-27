@@ -30,8 +30,6 @@ binary="$RUNNER_TEMP/atelier"
 digests="$reports/image-digests.txt"
 images="$reports/container-images.txt"
 mkdir -p "$output" "$binary"
-: > "$digests"
-: > "$images"
 
 # Each job stays inside its 90 minutes: a gate is gate + validate. The
 # metrics mode runs one metrics gate in the container, with no moon report

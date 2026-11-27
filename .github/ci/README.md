@@ -121,8 +121,9 @@ tolerance for rounded decimal values.
 
 On the normal path, every gate container runs from
 `ghcr.io/wrkhse/atelier-gates`, built from `Dockerfile` and published by
-`gate-image.yml` when `main` changes. Each job resolves the image's manifest
-digest once per run and pulls that immutable digest, never a moving tag. The
+`gate-image.yml` when `main` changes. A shared image job resolves the manifest
+digest once per run, and every gate job consumes `needs.image.outputs.digest`
+and pulls that immutable digest, never a moving tag. The
 trusted base side always uses the digest published from `main`. Two local
 builds exist, each bounded in time: the transition's named base build,
 signalled by the resolver's `@local` sentinel, and the head build below.
