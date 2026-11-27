@@ -16,6 +16,9 @@ jobs:
     permissions:
       contents: read
       packages: read
+    with:
+      bootstrap: 1
+    secrets: inherit
   # The job's status is the check metrics/complexity; no job holds a token
   # that can write.
   complexity:
@@ -31,6 +34,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,6 +92,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -139,6 +146,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -194,6 +203,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -706,6 +717,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -795,6 +808,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -907,6 +922,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1097,6 +1114,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1188,6 +1207,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

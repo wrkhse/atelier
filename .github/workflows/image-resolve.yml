@@ -11,7 +11,7 @@ on:
         description: Local base build until the main image is published.
         required: false
         type: string
-        default: "1"
+        default: "0"
     outputs:
       digest:
         description: Immutable digest of the published gate image.
@@ -68,13 +68,33 @@ jobs:
             fi
           fi
 
+          # No published head exists until the gate image is on main.
+          if [[ "$BOOTSTRAP" == "1" ]]; then
+            head_ref='local'
+          fi
+
           echo "head-ref=$head_ref" >> "$GITHUB_OUTPUT"
           echo "bootstrap=$BOOTSTRAP" >> "$GITHUB_OUTPUT"
+      - name: Log in to ghcr.io
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          # The gate image is private; a read token resolves its manifest.
+          if ! printf '%s' "$GH_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin; then
+            echo "::error::ghcr.io login failed" >&2
+            exit 1
+          fi
       - name: Resolve the published digest
         id: image
         shell: bash
         env:
           IMAGE: ghcr.io/${{ github.repository }}-gates
+          BOOTSTRAP: ${{ inputs.bootstrap }}
         run: |
           set -euo pipefail
 
@@ -83,8 +103,16 @@ jobs:
           digest=$(docker buildx imagetools inspect "$IMAGE:main" \
             --format '{{.Manifest.Digest}}') || digest=
           if [[ -z "$digest" ]]; then
-            echo "::error::no digest for $IMAGE:main" >&2
-            exit 1
+            if [[ "$BOOTSTRAP" != "1" ]]; then
+              echo "::error::no digest for $IMAGE:main" >&2
+              exit 1
+            fi
+
+            echo "::notice::no published gate image yet;" \
+              "bootstrap local build enabled"
+            echo "digest=local" >> "$GITHUB_OUTPUT"
+            echo "head-ref=local" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           echo "digest=$digest" >> "$GITHUB_OUTPUT"

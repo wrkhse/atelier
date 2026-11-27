@@ -92,6 +92,15 @@ fi
 # image cannot be resolved; GATE_IMAGE_HEAD=local builds head from the PR.
 pull_image() {
   local reference=$1 local_tag=$2 digest
+  local ref=${reference%%@*}
+
+  if [[ -n "${GH_TOKEN:-}" && -n "${GITHUB_ACTOR:-}" ]]; then
+    if ! printf '%s' "$GH_TOKEN" | docker login ghcr.io \
+      --username "$GITHUB_ACTOR" --password-stdin >&2; then
+      echo "gate image: ghcr.io login failed" >&2
+      return 1
+    fi
+  fi
 
   digest=$(docker buildx imagetools inspect "$reference" \
     --format '{{.Manifest.Digest}}') || digest=
@@ -99,8 +108,8 @@ pull_image() {
     echo "gate image: empty manifest digest for $reference" >&2
     return 1
   fi
-  docker pull "$reference@$digest" >&2 || return 1
-  docker tag "$reference@$digest" "$local_tag" >&2 || return 1
+  docker pull "$ref@$digest" >&2 || return 1
+  docker tag "$ref@$digest" "$local_tag" >&2 || return 1
   printf '%s %s %s\n' "$local_tag" "$reference" "$digest" >> "$digests"
 }
 

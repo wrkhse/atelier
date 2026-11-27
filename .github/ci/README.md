@@ -133,9 +133,15 @@ There is no local build fallback and no retry. A job that cannot pull the
 pinned digest fails with a message that names the image, and a fork pull
 request fails the same way when the package is unreadable to it.
 
-The pull request that introduces the published image uses a named bootstrap
-local build of the base side, only until `:main` exists. The bootstrap is
-removed once the image is published.
+The transition pull request enables bootstrap explicitly with `bootstrap: 1`
+on each image job while the `main` image is unpublished. This is a named
+one-time step, not a default and not a fallback: `run.sh` keeps bootstrap off
+unless the input sets it, and a job that cannot pull the pinned digest fails
+without a retry. The trusted base side still comes from the `.github/ci`
+support tree, never from the pull request's head; it is the published `main`
+digest once that exists, and a local build of the same `Dockerfile` during
+the transition. A follow-up pull request removes the `bootstrap` input after
+the image is published from `main`.
 
 ## The container
 

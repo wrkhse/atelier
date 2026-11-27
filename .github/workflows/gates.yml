@@ -12,6 +12,9 @@ jobs:
     permissions:
       contents: read
       packages: read
+    with:
+      bootstrap: 1
+    secrets: inherit
   # Each gate is its own job, and the job's status is the GitHub check, so
   # no job holds a token that can write checks.
   gate:
@@ -30,6 +33,8 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_ACTOR: ${{ github.actor }}
     strategy:
       fail-fast: false
       matrix:
