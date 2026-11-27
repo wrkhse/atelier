@@ -75,6 +75,8 @@ SUMMARY="$RUNNER_TEMP/atelier-reports/container/summary.txt"
 SESSION=metrics-demo
 GIF_MAX_BYTES=3000000
 GIF_MAX_WIDTH=1200
+# The right pane must show the intro on one rendered row for termctrl wait.
+RIGHT_PANE_WIDTH=48
 # Two containers per metrics gate, each bounded to six minutes.
 METRICS_CONTAINER_LIMIT=6m
 ALLOC_BEFORE=
@@ -371,13 +373,22 @@ start_panes() {
     env -u GITHUB_STEP_SUMMARY PS1='$ ' HISTFILE=/dev/null \
     bash --noprofile --norc -i)
   tmux set-option -t "$SESSION" status off
-  RIGHT=$(tmux split-window -h -l 44 -t "$LEFT" -P -F '#{pane_id}' \
+  RIGHT=$(tmux split-window -h -l "$RIGHT_PANE_WIDTH" -t "$LEFT" \
+    -P -F '#{pane_id}' \
     tail -n +1 -F "$CAPTIONS")
   tmux select-pane -t "$LEFT"
 }
 
 start_recording() {
   local intro="atelier: metrics against the previous version"
+  local intro_len=${#intro}
+
+  # termctrl waits on the rendered screen, where a wrapped intro never
+  # matches the full string, so an intro that wraps must fail up front.
+  if (( intro_len > RIGHT_PANE_WIDTH )); then
+    die "intro does not fit on one row: length $intro_len exceeds pane" \
+      "width $RIGHT_PANE_WIDTH"
+  fi
 
   printf '%s from release %s\n' "$intro" "$RELEASE_TAG" >> "$CAPTIONS"
   wait_until 10 pane_has "$RIGHT" -F -- "$intro"
