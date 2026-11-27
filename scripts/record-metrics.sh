@@ -15,17 +15,36 @@ fi
 RELEASE_TAG=${RELEASE_TAG:?the release tag to record, such as v0.2.0-rc.2}
 : "${GH_TOKEN:?GH_TOKEN is needed to download the release assets}"
 
-if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
-  echo "RELEASE_TAG $RELEASE_TAG is not a release candidate tag" >&2
-  exit 2
-fi
+# derive_base_tag TAG prints TAG's previous rc tag with one leading v. TAG may
+# arrive with or without that v; both forms resolve to the same base.
+derive_base_tag() {
+  local tag=$1 bare rc
 
-RC=${RELEASE_TAG##*-rc.}
-if (( 10#$RC == 0 )); then
-  echo "$RELEASE_TAG has no previous rc tag to compare" >&2
-  exit 2
-fi
-BASE="v${RELEASE_TAG%-rc.*}-rc.$((10#$RC - 1))"
+  bare=${tag#v}
+  if [[ ! "$bare" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+    echo "tag $tag is not a release candidate tag" >&2
+    return 2
+  fi
+
+  rc=${bare##*-rc.}
+  if (( 10#$rc == 0 )); then
+    echo "tag $tag has no previous rc tag to compare" >&2
+    return 2
+  fi
+
+  printf 'v%s-rc.%d\n' "${bare%-rc.*}" "$((10#$rc - 1))"
+}
+
+# normalize_release_tag TAG prints TAG with exactly one leading v, so a tag
+# supplied with or without that prefix resolves to the same form.
+normalize_release_tag() {
+  printf 'v%s\n' "${1#v}"
+}
+
+# Both tags go through the one-leading-v rule: RELEASE_TAG is the supplied tag
+# with a single leading v, and BASE is derived from that same form.
+RELEASE_TAG=$(normalize_release_tag "$RELEASE_TAG")
+BASE=$(derive_base_tag "$RELEASE_TAG") || exit $?
 VERSION=${RELEASE_TAG#v}
 
 ARCHIVE="atelier-$RELEASE_TAG-linux-x64.tar.gz"
