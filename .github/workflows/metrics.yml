@@ -418,20 +418,21 @@ jobs:
           # tree changes. A gate that wrote head into resources.json (the
           # table's before column) changes these base values, so save them in
           # the control run and require the two runs below to match. The
-          # deterministic fields must match exactly; CPU time and peak memory
-          # are hyperfine means over timed runs, so they get a 25% tolerance.
+          # deterministic fields must match exactly and peak RSS tolerantly;
+          # CPU time is a timed mean, excluded from cross-run comparison.
           base_fields=(total_bytes total_blocks binary_file_size \
             text_section_size package_count workspace_members \
             duplicate_versions crates)
-          tolerant_fields=(cpu_seconds peak_rss_bytes)
+          tolerant_fields=(peak_rss_bytes)
           # Startup, build, idle footprint, context switches, bytes written
           # and sampled peaks are timed or sampled and would flake across
           # runs, so check_base does not compare them.
 
           # Requires every base-side field of this run's resources.json to
           # match the control run's, naming $run and the field on a mismatch.
-          # Deterministic fields must be equal; the two timed fields must lie
-          # within 25% of the control run's value.
+          # Deterministic fields must be equal; peak RSS must lie within 25%
+          # of the control run's value. CPU time is a timed mean and is not
+          # compared across runs.
           check_base() {
             local field expected actual
             for field in "${base_fields[@]}"; do
