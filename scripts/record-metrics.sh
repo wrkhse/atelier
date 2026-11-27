@@ -189,11 +189,17 @@ make_worktree() {
 # The metrics gates build the harness from the base tree, passed as TREE. A
 # base without this file exits at "the base has no benchmark harness"; name
 # the reason so a bad base fails before any gate runs. Callers validate the
-# base tree, not just head.
+# base tree, not just head. SOURCE is checked out at RELEASE_TAG, so it is a
+# valid base only when BASE names that same tag.
 check_benchmark_harness() {
   local tree=$1
   local harness="reporter/benches/library_benchmark.rs"
   local path="$tree/$harness"
+
+  if [[ "$BASE" != "$RELEASE_TAG" ]]; then
+    die "base $BASE differs from release $RELEASE_TAG: SOURCE is checked" \
+      "out at $RELEASE_TAG and is a valid base only when both agree"
+  fi
 
   [[ -f "$path" && ! -L "$path" ]] \
     || die "base $BASE has no benchmark harness: $path is missing"
