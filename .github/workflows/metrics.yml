@@ -425,10 +425,11 @@ jobs:
             duplicate_versions crates)
           tolerant_fields=(peak_rss_bytes)
           # CPU time is a timed mean. Identical base trees swung by 0.000326
-          # seconds in job 140266821006, so the 0.0005-second floor sits just
-          # above that swing: a value contaminated from head cannot pass. A
-          # percentage floor would scale with the run's magnitude and flake;
-          # an absolute floor carries no such scaling.
+          # seconds in job 140266821006; the 0.0005-second floor keeps a
+          # cross-run check while tolerating that noise, catching large
+          # misattribution but not small timing variance. A percentage floor
+          # would scale with the run's magnitude and flake; an absolute floor
+          # carries no such scaling.
           absolute_fields=(cpu_seconds)
           # Startup, build, idle footprint, context switches, bytes written
           # and sampled peaks are timed or sampled and would flake across
@@ -437,9 +438,11 @@ jobs:
           # Requires every base-side field of this run's resources.json to
           # match the control run's, naming $run and the field on a mismatch.
           # Deterministic fields must be equal, peak RSS must lie within 25%,
-          # and CPU time within 0.0005 seconds of the control run's value,
-          # just above the 0.000326-second swing in job 140266821006 between
-          # identical base trees, so head contamination cannot pass.
+          # and CPU time within 0.0005 seconds of the control run's value.
+          # That floor keeps the cross-run check while tolerating the
+          # measured 0.000326-second noise in job 140266821006 between
+          # identical base trees: large misattribution is caught, small
+          # timing variance is not.
           check_base() {
             local field expected actual
             for field in "${base_fields[@]}"; do
