@@ -35,9 +35,15 @@ derive_base_tag() {
   printf 'v%s-rc.%d\n' "${bare%-rc.*}" "$((10#$rc - 1))"
 }
 
+# normalize_release_tag TAG prints TAG with exactly one leading v, so a tag
+# supplied with or without that prefix resolves to the same form.
+normalize_release_tag() {
+  printf 'v%s\n' "${1#v}"
+}
+
 # Both tags go through the one-leading-v rule: RELEASE_TAG is the supplied tag
 # with a single leading v, and BASE is derived from that same form.
-RELEASE_TAG="v${RELEASE_TAG#v}"
+RELEASE_TAG=$(normalize_release_tag "$RELEASE_TAG")
 BASE=$(derive_base_tag "$RELEASE_TAG") || exit $?
 VERSION=${RELEASE_TAG#v}
 

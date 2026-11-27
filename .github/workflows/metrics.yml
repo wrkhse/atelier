@@ -594,7 +594,8 @@ jobs:
               "control $control"
 
   # Checks the named failures of the resources helpers against the entrypoint
-  # itself. No tree is built: the four helpers are read from the shell script.
+  # itself, and the recorder's rc tag helpers. No tree is built: the helpers
+  # are read from shell scripts.
   resources-failure-proof:
     name: metrics/resources-failure-proof
     runs-on: ubuntu-latest
@@ -612,6 +613,9 @@ jobs:
       - name: Verify the named helper failures
         shell: bash
         run: bash .github/ci/resources-failure-tests.sh .github/ci/entrypoint.sh
+      - name: Verify rc tag derivation
+        shell: bash
+        run: bash scripts/record-metrics-tag-test.sh scripts/record-metrics.sh
 
   # A declared process that exits inside the idle window must fail the gate,
   # naming its status when it is nonzero and nothing when it is zero. Head's
@@ -1061,19 +1065,3 @@ jobs:
             exit 1
           fi
           echo "Ir spread $spread% (min $min, max $max)"
-
-  # Checks derive_base_tag of the recorder: an rc tag resolves to its
-  # predecessor with one leading v, whatever form was supplied.
-  recorder-tag-test:
-    name: metrics/recorder-tag-test
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Verify rc tag derivation
-        shell: bash
-        run: bash scripts/record-metrics-tag-test.sh scripts/record-metrics.sh
