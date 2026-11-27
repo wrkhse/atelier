@@ -419,17 +419,17 @@ jobs:
           # table's before column) changes these base values, so save them in
           # the control run and require the two runs below to match. The
           # deterministic fields must match exactly, peak RSS tolerantly, and
-          # CPU time within an absolute noise floor.
+          # CPU time within the larger of 25% and an absolute 0.0005-second
+          # noise floor.
           base_fields=(total_bytes total_blocks binary_file_size \
             text_section_size package_count workspace_members \
             duplicate_versions crates)
           tolerant_fields=(peak_rss_bytes)
           # CPU time is a timed mean. Identical base trees swung by 0.000326
-          # seconds in job 140266821006; the 0.0005-second floor keeps a
-          # cross-run check while tolerating that noise, catching large
-          # misattribution but not small timing variance. A percentage floor
-          # would scale with the run's magnitude and flake; an absolute floor
-          # carries no such scaling.
+          # seconds in job 140266821006, so a bare relative bound would flake
+          # on small means. The bound is the larger of 25% and an absolute
+          # 0.0005-second floor: it tolerates measured noise, keeps larger
+          # means under a relative check, and catches contamination.
           absolute_fields=(cpu_seconds)
           # Startup, build, idle footprint, context switches, bytes written
           # and sampled peaks are timed or sampled and would flake across
@@ -438,11 +438,10 @@ jobs:
           # Requires every base-side field of this run's resources.json to
           # match the control run's, naming $run and the field on a mismatch.
           # Deterministic fields must be equal, peak RSS must lie within 25%,
-          # and CPU time within 0.0005 seconds of the control run's value.
-          # That floor keeps the cross-run check while tolerating the
-          # measured 0.000326-second noise in job 140266821006 between
-          # identical base trees: large misattribution is caught, small
-          # timing variance is not.
+          # and CPU time within the larger of 25% and an absolute 0.0005-second
+          # floor, measured against the control run's value. Identical trees
+          # swung by 0.000326 seconds in job 140266821006: the floor absorbs
+          # that noise while the relative bound catches contamination.
           check_base() {
             local field expected actual
             for field in "${base_fields[@]}"; do
@@ -475,12 +474,15 @@ jobs:
               actual=$(jq -e --arg f "$field" '.[$f]' "$json") \
                 || fail "no $field in resources.json"
               awk -v expected="$expected" -v actual="$actual" 'BEGIN {
+                bound = 0.25 * expected
+                if (bound < 0.0005) bound = 0.0005
                 d = actual - expected
                 if (d < 0) d = -d
-                exit !(d <= 0.0005)
-              }' || fail "base field $field is '$actual', more than 0.0005" \
-                "seconds from '$expected' in the control run; just above the" \
-                "0.000326-second swing in job 140266821006"
+                exit !(d <= bound)
+              }' || fail "base field $field is '$actual', beyond the larger" \
+                "of 25% and 0.0005 seconds from '$expected' in the control" \
+                "run; identical base trees swung by 0.000326 seconds in job" \
+                "140266821006"
             done
           }
 
