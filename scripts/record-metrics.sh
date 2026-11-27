@@ -46,6 +46,10 @@ normalize_release_tag() {
 # reporter/benches/library_benchmark.rs, so it has no benchmark harness. The
 # planted source patch is the only difference between base and head.
 RELEASE_TAG=$(normalize_release_tag "$RELEASE_TAG")
+# Validate the tag here for the named rejections (rc.0 and non-rc tags)
+# without using the derived predecessor as BASE: BASE stays the released
+# candidate.
+derive_base_tag "$RELEASE_TAG" >/dev/null || exit $?
 BASE=$RELEASE_TAG
 VERSION=${RELEASE_TAG#v}
 
@@ -182,12 +186,14 @@ make_worktree() {
   git -C "$SOURCE" checkout --quiet --force --detach "$RELEASE_TAG"
 }
 
-# The metrics gates build the harness from BASE. A base without this file
-# exits at "the base has no benchmark harness"; name the reason here so a
-# bad base fails before any gate runs.
+# The metrics gates build the harness from the base tree, passed as TREE. A
+# base without this file exits at "the base has no benchmark harness"; name
+# the reason so a bad base fails before any gate runs. Callers validate the
+# base tree, not just head.
 check_benchmark_harness() {
+  local tree=$1
   local harness="reporter/benches/library_benchmark.rs"
-  local path="$SOURCE/$harness"
+  local path="$tree/$harness"
 
   [[ -f "$path" && ! -L "$path" ]] \
     || die "base $BASE has no benchmark harness: $path is missing"
@@ -814,7 +820,7 @@ main() {
   verify_release
   stage_release
   make_worktree
-  check_benchmark_harness
+  check_benchmark_harness "$SOURCE"
   cp -- "$SOURCE/$RESULTS_FILE" "$ORIGINAL"
   write_patch_helper
   stage_metrics

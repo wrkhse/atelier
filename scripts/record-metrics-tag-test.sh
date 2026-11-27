@@ -85,6 +85,37 @@ fi
 
 printf 'pass: BASE is RELEASE_TAG, not derive_base_tag\n'
 
+# The tag must still be validated through derive_base_tag, with its derived
+# predecessor discarded so it cannot become BASE. Check the call from source.
+validation="derive_base_tag \"\$RELEASE_TAG\" >/dev/null || exit \$?"
+if ! grep -qF -- "$validation" "$recorder"; then
+  echo "::error::recorder lacks the derive_base_tag validation call"
+  exit 1
+fi
+
+printf 'pass: recorder validates the tag via derive_base_tag\n'
+
+# The gates run inside drive(), which main() calls. Assert from source that
+# the harness check runs earlier in main(), so no gate can precede it.
+main_body=$(awk '
+  /^main\(\)/ { found = 1 }
+  found { print }
+  found && /^}/ { found = 0 }
+' "$recorder")
+harness_line=$(grep -nF -m1 "check_benchmark_harness \"\$SOURCE\"" \
+  <<< "$main_body" | cut -d: -f1 || true)
+drive_line=$(grep -nE -m1 '^[[:space:]]+drive$' \
+  <<< "$main_body" | cut -d: -f1 || true)
+
+if [[ ! "$harness_line" =~ ^[0-9]+$ \
+  || ! "$drive_line" =~ ^[0-9]+$ ]] \
+  || (( harness_line >= drive_line )); then
+  echo "::error::check_benchmark_harness must run before the first gate"
+  exit 1
+fi
+
+printf 'pass: check_benchmark_harness runs before the first gate\n'
+
 # The intro is one waited-for string; termctrl reads the rendered screen, so
 # a wrapped intro never matches. Check from the source alone that it fits on
 # one row of the right pane.
