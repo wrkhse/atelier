@@ -108,7 +108,7 @@ pull_image() {
   fi
   docker pull "$ref@$digest" >&2 || return 1
   docker tag "$ref@$digest" "$local_tag" >&2 || return 1
-  printf '%s %s %s\n' "$local_tag" "$reference" "$digest" >> "$digests"
+  printf '%s %s\n' "$local_tag" "$digest" >> "$digests"
 }
 
 bootstrap_base() {
@@ -118,8 +118,7 @@ bootstrap_base() {
     echo "gate image: bootstrap build failed from $support/Dockerfile" >&2
     exit 1
   fi
-  printf '%s %s %s\n' \
-    atelier-gates-base "$support/Dockerfile" local >> "$digests"
+  printf '%s %s\n' atelier-gates-base local >> "$digests"
 }
 
 if [[ -z "$GATE_IMAGE" ]]; then
@@ -152,8 +151,7 @@ if [[ "$GATE_IMAGE_HEAD" == local ]]; then
     echo "gate image: head build failed from $source/.github/ci/Dockerfile" >&2
     exit 1
   fi
-  printf '%s %s %s\n' atelier-gates-head \
-    "$source/.github/ci/Dockerfile" local >> "$digests"
+  printf '%s %s\n' atelier-gates-head local >> "$digests"
 elif [[ -z "$GATE_IMAGE_HEAD" || "$GATE_IMAGE_HEAD" == "$GATE_IMAGE" ]]; then
   docker tag atelier-gates-base atelier-gates-head >&2
 else

@@ -58,14 +58,18 @@ jobs:
               echo "::error::pull request has no base sha" >&2
               exit 1
             fi
+            range="$BASE...HEAD"
+          else
+            # checkout uses fetch-depth 0, so origin/main is present even
+            # for workflow_dispatch and merge_group runs.
+            range='origin/main...HEAD'
+          fi
 
-            # The Dockerfile and all build-context files, including tool
-            # pins, live in .github/ci/, so diff the whole context.
-            changed=$(git diff --name-only "$BASE...HEAD" -- \
-              .github/ci/)
-            if [[ -n "$changed" ]]; then
-              head_ref='local'
-            fi
+          # The Dockerfile and all build-context files, including tool
+          # pins, live in .github/ci/, so diff the whole context.
+          changed=$(git diff --name-only "$range" -- .github/ci/)
+          if [[ -n "$changed" ]]; then
+            head_ref='local'
           fi
 
           echo "head-ref=$head_ref" >> "$GITHUB_OUTPUT"
