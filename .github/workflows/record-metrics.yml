@@ -100,6 +100,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             tmux ffmpeg ripgrep fonts-dejavu-core fontconfig

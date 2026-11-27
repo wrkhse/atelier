@@ -32,6 +32,11 @@ jobs:
       # runs in the container; rust-code-analysis lives in the gate image.
       - name: Build atelier-metrics
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
@@ -77,6 +82,11 @@ jobs:
           toolchain: 1.100.0
       - name: Build atelier-metrics
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
@@ -121,6 +131,11 @@ jobs:
           toolchain: 1.100.0
       - name: Build atelier-metrics
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
@@ -168,6 +183,11 @@ jobs:
           toolchain: 1.100.0
       - name: Build atelier-metrics
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
@@ -672,6 +692,11 @@ jobs:
           toolchain: 1.100.0
       - name: Build atelier-metrics
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
@@ -753,6 +778,11 @@ jobs:
           toolchain: 1.100.0
       - name: Build atelier-metrics
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
@@ -857,6 +887,11 @@ jobs:
           toolchain: 1.100.0
       - name: Build atelier-metrics
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
@@ -1039,6 +1074,11 @@ jobs:
           toolchain: 1.100.0
       - name: Build atelier-metrics
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
@@ -1122,6 +1162,11 @@ jobs:
           toolchain: 1.100.0
       - name: Build atelier-metrics
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl

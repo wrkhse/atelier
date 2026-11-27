@@ -37,6 +37,11 @@ jobs:
       # the bookworm gate image whatever glibc the runner has.
       - name: Build reporter
         run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
