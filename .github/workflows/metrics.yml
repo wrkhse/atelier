@@ -17,7 +17,7 @@ jobs:
       contents: read
       packages: read
     with:
-      bootstrap: 1
+      bootstrap: ${{ github.event.pull_request.number == 123 && '1' || '0' }}
     secrets: inherit
   # The job's status is the check metrics/complexity; no job holds a token
   # that can write.

@@ -17,6 +17,7 @@ concurrency:
 jobs:
   publish:
     name: Publish the gate image
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -60,3 +61,20 @@ jobs:
             echo "Tags: $IMAGE:main, $IMAGE:$SHA_TAG"
             echo "Digest: $digest"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # A feature branch has no trusted image to publish; only main does. The
+  # notice names the ref so a manual, feature-branch dispatch is explained.
+  skip:
+    name: Feature branch cannot publish
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Explain skip
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::notice::$REF is not refs/heads/main;" \
+            "a feature branch cannot publish the trusted gate image."

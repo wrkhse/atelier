@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       digest: ${{ steps.image.outputs.digest }}
-      head-ref: ${{ steps.decision.outputs.head-ref }}
+      head-ref: ${{ steps.image.outputs.head-ref }}
       bootstrap: ${{ steps.decision.outputs.bootstrap }}
     steps:
       # actions/checkout v7.0.1
@@ -68,11 +68,6 @@ jobs:
             fi
           fi
 
-          # No published head exists until the gate image is on main.
-          if [[ "$BOOTSTRAP" == "1" ]]; then
-            head_ref='local'
-          fi
-
           echo "head-ref=$head_ref" >> "$GITHUB_OUTPUT"
           echo "bootstrap=$BOOTSTRAP" >> "$GITHUB_OUTPUT"
       - name: Log in to ghcr.io
@@ -95,6 +90,7 @@ jobs:
         env:
           IMAGE: ghcr.io/${{ github.repository }}-gates
           BOOTSTRAP: ${{ inputs.bootstrap }}
+          HEAD_REF: ${{ steps.decision.outputs.head-ref }}
         run: |
           set -euo pipefail
 
@@ -116,12 +112,13 @@ jobs:
           fi
 
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "head-ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
       - name: Summarize the decision
         shell: bash
         env:
           IMAGE: ghcr.io/${{ github.repository }}-gates
           DIGEST: ${{ steps.image.outputs.digest }}
-          HEAD_REF: ${{ steps.decision.outputs.head-ref }}
+          HEAD_REF: ${{ steps.image.outputs.head-ref }}
           BOOTSTRAP: ${{ steps.decision.outputs.bootstrap }}
         run: |
           {
