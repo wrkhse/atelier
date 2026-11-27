@@ -17,8 +17,8 @@ jobs:
       contents: read
       packages: read
     with:
-      bootstrap: ${{ github.event.pull_request.number == 123 && '1' || '0' }}
-    secrets: inherit
+      # Transition only: remove this input after the main image is published.
+      bootstrap: 1
   # The job's status is the check metrics/complexity; no job holds a token
   # that can write.
   complexity:
@@ -76,6 +76,28 @@ jobs:
           fi
           cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   performance:
     name: metrics/performance
     needs: image
@@ -127,6 +149,28 @@ jobs:
             exit 1
           fi
           cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Reports CPU time, peak memory, allocations, binary size and dependency
   # facts for both trees; it never fails on what it measures.
@@ -181,6 +225,28 @@ jobs:
             exit 1
           fi
           cat -- "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # A controlled A/B of the allocation patch. The trusted container measures
   # the real PR base in both runs; only the untrusted head container sees the
@@ -670,6 +736,28 @@ jobs:
             || fail "expected restored head TotalBlocks $restored to equal" \
               "control $control"
 
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Checks the named failures of the resources helpers against the entrypoint
   # itself, and the recorder's rc tag helpers. No tree is built: the helpers
   # are read from shell scripts.
@@ -788,6 +876,28 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   budget-proof:
     name: metrics/budget-proof (${{ matrix.mode }})
     needs: image
@@ -896,6 +1006,28 @@ jobs:
             fi
           fi
           cat -- "$summary" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Adds a benchmark that only head declares, so the gate judges it against
   # the absolute new_bench_instruction_ir budget: over sets the budget to 1
@@ -1095,6 +1227,28 @@ jobs:
               ;;
           esac
 
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Runs head's benchmark ten times with ASLR allowed, as metrics/performance
   # does, and requires the total Callgrind Ir to spread by under 0.5 percent,
   # so address layout cannot move a count near the budget.
@@ -1183,6 +1337,28 @@ jobs:
           fi
           echo "Ir spread $spread% (min $min, max $max)"
 
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Measures the base tree's CPU time in 30 independent gate runs and keeps
   # each measurement as a small artifact, so the summary below can judge the
   # cross-run spread before tightening the resources-proof bound.
@@ -1257,6 +1433,28 @@ jobs:
           name: cpu-bound-${{ matrix.run }}
           path: ${{ runner.temp }}/cpu-bound-${{ matrix.run }}.json
           if-no-files-found: error
+
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Judges the 30 CPU measurements together. The first artifact is the
   # control run. The bound matches resources-proof: the larger of an absolute

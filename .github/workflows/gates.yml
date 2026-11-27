@@ -13,8 +13,8 @@ jobs:
       contents: read
       packages: read
     with:
-      bootstrap: ${{ github.event.pull_request.number == 123 && '1' || '0' }}
-    secrets: inherit
+      # Transition only: remove this input after the main image is published.
+      bootstrap: 1
   # Each gate is its own job, and the job's status is the GitHub check, so
   # no job holds a token that can write checks.
   gate:

@@ -15,8 +15,8 @@ jobs:
       contents: read
       packages: read
     with:
-      bootstrap: ${{ github.event.pull_request.number == 123 && '1' || '0' }}
-    secrets: inherit
+      # Transition only: remove this input after the main image is published.
+      bootstrap: 1
   violation:
     name: "violation rust/${{ matrix.gate }}"
     needs: image
@@ -109,6 +109,28 @@ jobs:
             echo "::error::$GATE failed on the restored code; it must pass"
             exit 1
           fi
+
+      - name: Check gate image evidence
+        if: ${{ !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # The msrv script refuses a rust-version it cannot trust before installing
   # anything: three small workspaces each fail it with their named reason,

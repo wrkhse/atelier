@@ -21,8 +21,8 @@ jobs:
       contents: read
       packages: read
     with:
-      bootstrap: ${{ github.event.pull_request.number == 123 && '1' || '0' }}
-    secrets: inherit
+      # Transition only: remove this input after the main image is published.
+      bootstrap: 1
   build:
     needs: image
     strategy:
@@ -246,6 +246,29 @@ jobs:
               names = ", ".join(sorted(missing))
               sys.exit(f"archive preset is missing tasks: {names}")
           '
+
+      - name: Check gate image evidence
+        if: ${{ runner.os == 'Linux' && !cancelled() }}
+        env:
+          REPORTS: ${{ runner.temp }}/atelier-reports
+        run: |
+          for name in image-digests.txt container-images.txt; do
+            report="$REPORTS/$name"
+
+            if [[ ! -f "$report" || ! -s "$report" ]]; then
+              echo "::error::$name is missing or empty"
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "### Gate image"
+            echo ""
+            cat "$REPORTS/image-digests.txt"
+            cat "$REPORTS/container-images.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # actions/upload-artifact v7.0.2
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:

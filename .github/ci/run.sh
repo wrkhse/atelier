@@ -118,8 +118,16 @@ if [[ -z "$GATE_IMAGE" ]]; then
   exit 2
 fi
 
+# Only a genuinely unavailable image starts a local base build: an empty
+# digest, or a pull that reports the image or tag missing or unauthorised.
+# A ghcr.io login failure or a transport error ends the runner instead.
+unpublished='empty manifest digest|not found|manifest unknown'
+unpublished+='|does not exist|unauthorized|denied'
+
 if ! pull_output=$(pull_image "$GATE_IMAGE" atelier-gates-base 2>&1); then
-  if [[ "$GATE_IMAGE_BOOTSTRAP" == 1 ]]; then
+  if [[ "$GATE_IMAGE_BOOTSTRAP" == 1 \
+    && "$pull_output" != *"ghcr.io login failed"* \
+    && "$pull_output" =~ $unpublished ]]; then
     echo "gate image: bootstrap local build; no published image available" >&2
     if ! docker build --tag atelier-gates-base \
       --file "$support/Dockerfile" "$support" >&2; then
@@ -129,7 +137,7 @@ if ! pull_output=$(pull_image "$GATE_IMAGE" atelier-gates-base 2>&1); then
     printf '%s %s %s\n' \
       atelier-gates-base "$support/Dockerfile" local >> "$digests"
   else
-    echo "gate image: could not pull $GATE_IMAGE; bootstrap is off:" \
+    echo "gate image: could not pull $GATE_IMAGE; no local build:" \
       "$pull_output" >&2
     exit 1
   fi
@@ -147,7 +155,10 @@ if [[ "$GATE_IMAGE_HEAD" == local ]]; then
 elif [[ -z "$GATE_IMAGE_HEAD" || "$GATE_IMAGE_HEAD" == "$GATE_IMAGE" ]]; then
   docker tag atelier-gates-base atelier-gates-head >&2
 else
-  pull_image "$GATE_IMAGE_HEAD" atelier-gates-head
+  if ! pull_image "$GATE_IMAGE_HEAD" atelier-gates-head; then
+    echo "gate image: could not pull $GATE_IMAGE_HEAD" >&2
+    exit 1
+  fi
 fi
 names=()
 trap 'docker rm --force "${names[@]}" >/dev/null 2>&1 || true' EXIT

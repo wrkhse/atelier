@@ -129,19 +129,20 @@ A pull request that changes the gate `Dockerfile` or a tool pin builds a
 local head image from its own `Dockerfile`. That image is never pushed to
 GHCR, and the trusted base side still uses the digest from `main`.
 
-There is no local build fallback and no retry. A job that cannot pull the
-pinned digest fails with a message that names the image, and a fork pull
-request fails the same way when the package is unreadable to it.
+The normal path has no local build fallback and no retry. A job that cannot
+pull the pinned digest fails with a message that names the image, and a fork
+pull request fails the same way when the package is unreadable to it.
 
-The transition pull request enables bootstrap explicitly with `bootstrap: 1`
-on each image job while the `main` image is unpublished. This is a named
-one-time step, not a default and not a fallback: `run.sh` keeps bootstrap off
-unless the input sets it, and a job that cannot pull the pinned digest fails
-without a retry. The trusted base side still comes from the `.github/ci`
-support tree, never from the pull request's head; it is the published `main`
-digest once that exists, and a local build of the same `Dockerfile` during
-the transition. A follow-up pull request removes the `bootstrap` input after
-the image is published from `main`.
+The sole temporary exception to that is the transition's explicit bootstrap.
+While the `main` image is unpublished, each caller passes the tracked input
+`bootstrap: 1` to the image job; it is not keyed to a pull request number.
+`run.sh` keeps bootstrap off unless the input sets it, so a job without it
+fails without a retry when it cannot pull the pinned digest. The trusted base
+side still comes from the `.github/ci` support tree, never from the pull
+request's head: the published `main` digest once that exists, and a local
+build of the same `Dockerfile` during the transition. A follow-up pull
+request removes the `bootstrap` input after the image is published from
+`main`.
 
 ## The container
 
