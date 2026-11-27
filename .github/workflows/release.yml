@@ -25,6 +25,7 @@ jobs:
       bootstrap: 1
   build:
     needs: image
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -47,9 +48,14 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
-      GH_TOKEN: ${{ github.token }}
-      GITHUB_ACTOR: ${{ github.actor }}
     steps:
+      - name: Fail if the image could not be resolved
+        run: |
+          if [[ "${{ needs.image.result }}" != success ]]; then
+            echo "::error::gate image resolution failed; refusing to run the gate" \
+              >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -142,6 +148,8 @@ jobs:
           TAG: ${{ github.ref_name }}
           ARCHIVE: ${{ matrix.archive }}
           CI_SUPPORT: ${{ github.workspace }}/.github/ci
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
 

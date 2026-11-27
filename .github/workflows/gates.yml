@@ -20,6 +20,7 @@ jobs:
   gate:
     name: "rust/${{ matrix.gate }}"
     needs: image
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -33,13 +34,18 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
-      GH_TOKEN: ${{ github.token }}
-      GITHUB_ACTOR: ${{ github.actor }}
     strategy:
       fail-fast: false
       matrix:
         gate: [fmt, clippy, test, kani, miri, mutants, msrv]
     steps:
+      - name: Fail if the image could not be resolved
+        run: |
+          if [[ "${{ needs.image.result }}" != success ]]; then
+            echo "::error::gate image resolution failed; refusing to run the gate" \
+              >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -66,6 +72,8 @@ jobs:
           SOURCE: ${{ github.workspace }}
           GATES: rust/${{ matrix.gate }}
           BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
         run: bash "$CI_SUPPORT/run.sh" gate
       # Writes the gate's line to GITHUB_STEP_SUMMARY, after a failed gate
       # too. The offline container above remains the validator of record.

@@ -20,6 +20,7 @@ jobs:
   violation:
     name: "violation rust/${{ matrix.gate }}"
     needs: image
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -44,9 +45,14 @@ jobs:
         format('ghcr.io/{0}-gates@{1}', github.repository,
         needs.image.outputs.digest) }}
       GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
-      GH_TOKEN: ${{ github.token }}
-      GITHUB_ACTOR: ${{ github.actor }}
     steps:
+      - name: Fail if the image could not be resolved
+        run: |
+          if [[ "${{ needs.image.result }}" != success ]]; then
+            echo "::error::gate image resolution failed; refusing to run the gate" \
+              >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -82,6 +88,9 @@ jobs:
       # A non-empty report shows moon ran the task, so a failure before the
       # gate, such as the image build, never counts as the expected one.
       - name: Expect the gate to fail
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
         run: |
           status=0
           bash "$CI_SUPPORT/run.sh" gate || status=$?
@@ -95,6 +104,9 @@ jobs:
           fi
           echo "$GATE failed with its violation applied (exit $status), as expected"
       - name: Restore and expect the gate to pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
         run: |
           git reset --hard --quiet "$CLEAN_HEAD"
           git clean -fd --exclude=/target/
