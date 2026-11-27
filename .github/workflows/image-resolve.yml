@@ -1,0 +1,106 @@
+# Resolves the gate image once per caller run. The caller pins the published
+# base by digest, pulls the head from ':main' or builds it from the PR
+# ('local'), and allows a local base build only while the main image is
+# unpublished. This workflow never builds or pushes an image.
+name: image resolve
+
+on:
+  workflow_call:
+    inputs:
+      bootstrap:
+        description: Local base build until the main image is published.
+        required: false
+        type: string
+        default: "1"
+    outputs:
+      digest:
+        description: Immutable digest of the published gate image.
+        value: ${{ jobs.resolve.outputs.digest }}
+      head-ref:
+        description: "':main' for a published head, 'local' for a PR build."
+        value: ${{ jobs.resolve.outputs.head-ref }}
+      bootstrap:
+        description: "'1' during the transition, then '0'."
+        value: ${{ jobs.resolve.outputs.bootstrap }}
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  resolve:
+    name: Resolve the gate image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+      head-ref: ${{ steps.decision.outputs.head-ref }}
+      bootstrap: ${{ steps.decision.outputs.bootstrap }}
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide the head reference
+        id: decision
+        shell: bash
+        env:
+          BOOTSTRAP: ${{ inputs.bootstrap }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || '' }}
+        run: |
+          set -euo pipefail
+
+          head_ref=':main'
+          if [[ "$EVENT" == pull_request ]]; then
+            if [[ -z "$BASE" ]]; then
+              echo "::error::pull request has no base sha" >&2
+              exit 1
+            fi
+
+            # Tool pins live in the Dockerfile, so its path covers the
+            # whole gate image definition.
+            changed=$(git diff --name-only "$BASE...HEAD" -- \
+              .github/ci/Dockerfile)
+            if [[ -n "$changed" ]]; then
+              head_ref='local'
+            fi
+          fi
+
+          echo "head-ref=$head_ref" >> "$GITHUB_OUTPUT"
+          echo "bootstrap=$BOOTSTRAP" >> "$GITHUB_OUTPUT"
+      - name: Resolve the published digest
+        id: image
+        shell: bash
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}-gates
+        run: |
+          set -euo pipefail
+
+          # gate-image.yml stamps ':main' beside an immutable sha-<commit>
+          # tag; both resolve to this one manifest.
+          digest=$(docker buildx imagetools inspect "$IMAGE:main" \
+            --format '{{.Manifest.Digest}}') || digest=
+          if [[ -z "$digest" ]]; then
+            echo "::error::no digest for $IMAGE:main" >&2
+            exit 1
+          fi
+
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Summarize the decision
+        shell: bash
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}-gates
+          DIGEST: ${{ steps.image.outputs.digest }}
+          HEAD_REF: ${{ steps.decision.outputs.head-ref }}
+          BOOTSTRAP: ${{ steps.decision.outputs.bootstrap }}
+        run: |
+          {
+            echo "### Gate image"
+            echo ""
+            echo "Digest: $DIGEST"
+            echo "Base: $IMAGE@$DIGEST"
+            echo "Head ref: $HEAD_REF"
+            echo "Bootstrap: $BOOTSTRAP"
+          } >> "$GITHUB_STEP_SUMMARY"

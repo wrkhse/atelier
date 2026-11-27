@@ -17,4 +17,5 @@ jobs:
     # status is its check, so read access is all it needs.
     permissions:
       contents: read
+      packages: read
     uses: ./.github/workflows/gates.yml

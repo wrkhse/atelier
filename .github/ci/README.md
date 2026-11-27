@@ -117,6 +117,26 @@ sampled values after. In every run, every rendered row is checked against the
 matching field in that run's `resources.json` and `head-resources.json`, with a
 tolerance for rounded decimal values.
 
+## The gate image
+
+Every gate container runs from `ghcr.io/wrkhse/atelier-gates`, built from
+`Dockerfile` and published by `gate-image.yml` when `main` changes. Each
+job resolves the image's manifest digest once per run and pulls that
+immutable digest, never a moving tag. The trusted base side always uses the
+digest published from `main`.
+
+A pull request that changes the gate `Dockerfile` or a tool pin builds a
+local head image from its own `Dockerfile`. That image is never pushed to
+GHCR, and the trusted base side still uses the digest from `main`.
+
+There is no local build fallback and no retry. A job that cannot pull the
+pinned digest fails with a message that names the image, and a fork pull
+request fails the same way when the package is unreadable to it.
+
+The pull request that introduces the published image uses a named bootstrap
+local build of the base side, only until `:main` exists. The bootstrap is
+removed once the image is published.
+
 ## The container
 
 ```sh

@@ -7,9 +7,11 @@ if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_OS:-}" != Linux \
   exit 2
 fi
 
-# run.sh MODE, with GATE, GATES, BASE, GATE_IMAGE and GATE_IMAGE_HEAD from
-# the environment. GATE_IMAGE is the published reference pulled by digest;
-# GATE_IMAGE_HEAD is the PR-local reference for untrusted head code.
+# run.sh MODE, with GATE, GATES, BASE, GATE_IMAGE, GATE_IMAGE_HEAD and
+# GATE_IMAGE_BOOTSTRAP from the environment. GATE_IMAGE is the published
+# reference pulled by digest; GATE_IMAGE_HEAD names the head reference or
+# 'local' for a build from the PR; GATE_IMAGE_BOOTSTRAP allows a local base
+# build when no published image resolves.
 MODE=${1:?mode}
 export GATE=${GATE:-}
 export ROOT=${ROOT:-.}
@@ -17,6 +19,7 @@ export BASE=${BASE:-}
 export GATES=${GATES:-}
 GATE_IMAGE=${GATE_IMAGE:-}
 GATE_IMAGE_HEAD=${GATE_IMAGE_HEAD:-}
+GATE_IMAGE_BOOTSTRAP=${GATE_IMAGE_BOOTSTRAP:-0}
 support=${CI_SUPPORT:?pinned CI support directory}
 source=${SOURCE:?checkout}
 # Host-written inspections sit beside container/, which holds only what a
@@ -84,33 +87,58 @@ if [[ "$MODE" == record-gate ]]; then
 fi
 
 # A published reference is pinned to its manifest digest before it is pulled.
-# A failed inspect, pull or tag ends the runner: there is no local build and
-# no retry that could substitute a different image.
+# A failed inspect, pull or tag ends the runner: no retry substitutes another
+# image. GATE_IMAGE_BOOTSTRAP=1 builds the base locally when the published
+# image cannot be resolved; GATE_IMAGE_HEAD=local builds head from the PR.
 pull_image() {
   local reference=$1 local_tag=$2 digest
 
   digest=$(docker buildx imagetools inspect "$reference" \
-    --format '{{.Manifest.Digest}}')
+    --format '{{.Manifest.Digest}}') || digest=
   if [[ -z "$digest" ]]; then
     echo "gate image: empty manifest digest for $reference" >&2
-    exit 1
+    return 1
   fi
-  docker pull "$reference@$digest" >&2
-  docker tag "$reference@$digest" "$local_tag" >&2
+  docker pull "$reference@$digest" >&2 || return 1
+  docker tag "$reference@$digest" "$local_tag" >&2 || return 1
   printf '%s %s %s\n' "$local_tag" "$reference" "$digest" >> "$digests"
 }
 
-if [[ -n "$GATE_IMAGE" ]]; then
-  pull_image "$GATE_IMAGE" atelier-gates-base
-  if [[ -n "$GATE_IMAGE_HEAD" ]]; then
-    pull_image "$GATE_IMAGE_HEAD" atelier-gates-head
+if [[ -z "$GATE_IMAGE" ]]; then
+  echo "gate image: GATE_IMAGE is required; no local build fallback" >&2
+  exit 2
+fi
+
+if ! pull_output=$(pull_image "$GATE_IMAGE" atelier-gates-base 2>&1); then
+  if [[ "$GATE_IMAGE_BOOTSTRAP" == 1 ]]; then
+    echo "gate image: bootstrap local build; no published image available" >&2
+    if ! docker build --tag atelier-gates-base \
+      --file "$support/Dockerfile" "$support" >&2; then
+      echo "gate image: bootstrap build failed from $support/Dockerfile" >&2
+      exit 1
+    fi
+    printf '%s %s %s\n' \
+      atelier-gates-base "$support/Dockerfile" local >> "$digests"
   else
-    docker tag atelier-gates-base atelier-gates-head >&2
+    echo "gate image: could not pull $GATE_IMAGE; bootstrap is off:" \
+      "$pull_output" >&2
+    exit 1
   fi
+fi
+
+if [[ "$GATE_IMAGE_HEAD" == local ]]; then
+  echo "gate image: local head build from $source/.github/ci/Dockerfile" >&2
+  if ! docker build --tag atelier-gates-head \
+    --file "$source/.github/ci/Dockerfile" "$source/.github/ci" >&2; then
+    echo "gate image: head build failed from $source/.github/ci/Dockerfile" >&2
+    exit 1
+  fi
+  printf '%s %s %s\n' atelier-gates-head \
+    "$source/.github/ci/Dockerfile" local >> "$digests"
+elif [[ -z "$GATE_IMAGE_HEAD" || "$GATE_IMAGE_HEAD" == "$GATE_IMAGE" ]]; then
+  docker tag atelier-gates-base atelier-gates-head >&2
 else
-  docker build --tag atelier-gates --file "$support/Dockerfile" "$support" >&2
-  docker tag atelier-gates atelier-gates-base >&2
-  docker tag atelier-gates atelier-gates-head >&2
+  pull_image "$GATE_IMAGE_HEAD" atelier-gates-head
 fi
 names=()
 trap 'docker rm --force "${names[@]}" >/dev/null 2>&1 || true' EXIT

@@ -11,16 +11,26 @@ permissions:
   packages: read
 
 jobs:
+  image:
+    uses: ./.github/workflows/image-resolve.yml
+    permissions:
+      contents: read
+      packages: read
   # The job's status is the check metrics/complexity; no job holds a token
   # that can write.
   complexity:
     name: metrics/complexity
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       GATE: metrics/complexity
-      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
-      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates@${{
+        needs.image.outputs.digest }}
+      GATE_IMAGE_HEAD: ${{ needs.image.outputs.head-ref == 'local' && 'local' ||
+        format('ghcr.io/{0}-gates@{1}', github.repository,
+        needs.image.outputs.digest) }}
+      GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,6 +73,7 @@ jobs:
 
   performance:
     name: metrics/performance
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -70,8 +81,12 @@ jobs:
       packages: read
     env:
       GATE: metrics/performance
-      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
-      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates@${{
+        needs.image.outputs.digest }}
+      GATE_IMAGE_HEAD: ${{ needs.image.outputs.head-ref == 'local' && 'local' ||
+        format('ghcr.io/{0}-gates@{1}', github.repository,
+        needs.image.outputs.digest) }}
+      GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,6 +125,7 @@ jobs:
   # facts for both trees; it never fails on what it measures.
   resources:
     name: metrics/resources
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -117,8 +133,12 @@ jobs:
       packages: read
     env:
       GATE: metrics/resources
-      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
-      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates@${{
+        needs.image.outputs.digest }}
+      GATE_IMAGE_HEAD: ${{ needs.image.outputs.head-ref == 'local' && 'local' ||
+        format('ghcr.io/{0}-gates@{1}', github.repository,
+        needs.image.outputs.digest) }}
+      GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -160,6 +180,7 @@ jobs:
   # passes. Both runs must exit 0.
   resources-proof:
     name: metrics/resources-proof
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -167,8 +188,12 @@ jobs:
       packages: read
     env:
       GATE: metrics/resources
-      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
-      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates@${{
+        needs.image.outputs.digest }}
+      GATE_IMAGE_HEAD: ${{ needs.image.outputs.head-ref == 'local' && 'local' ||
+        format('ghcr.io/{0}-gates@{1}', github.repository,
+        needs.image.outputs.digest) }}
+      GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -663,6 +688,7 @@ jobs:
   # working tree declares the process; the base tree keeps its own config.
   resources-exit-proof:
     name: metrics/resources-exit-proof (${{ matrix.mode }})
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -674,8 +700,12 @@ jobs:
         mode: [nonzero, zero]
     env:
       GATE: metrics/resources
-      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
-      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates@${{
+        needs.image.outputs.digest }}
+      GATE_IMAGE_HEAD: ${{ needs.image.outputs.head-ref == 'local' && 'local' ||
+        format('ghcr.io/{0}-gates@{1}', github.repository,
+        needs.image.outputs.digest) }}
+      GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -747,6 +777,7 @@ jobs:
 
   budget-proof:
     name: metrics/budget-proof (${{ matrix.mode }})
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -758,8 +789,12 @@ jobs:
         mode: [slowdown, restored, head-raises]
     env:
       GATE: metrics/performance
-      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
-      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates@${{
+        needs.image.outputs.digest }}
+      GATE_IMAGE_HEAD: ${{ needs.image.outputs.head-ref == 'local' && 'local' ||
+        format('ghcr.io/{0}-gates@{1}', github.repository,
+        needs.image.outputs.digest) }}
+      GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -854,6 +889,7 @@ jobs:
   # dependency proves a PR that adds a dependency builds and is measured.
   new-bench-proof:
     name: metrics/new-bench-proof (${{ matrix.mode }})
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -865,8 +901,12 @@ jobs:
         mode: [over, under, no-budget, dependency]
     env:
       GATE: metrics/performance
-      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
-      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates@${{
+        needs.image.outputs.digest }}
+      GATE_IMAGE_HEAD: ${{ needs.image.outputs.head-ref == 'local' && 'local' ||
+        format('ghcr.io/{0}-gates@{1}', github.repository,
+        needs.image.outputs.digest) }}
+      GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1043,6 +1083,7 @@ jobs:
   # so address layout cannot move a count near the budget.
   aslr-spread:
     name: metrics/aslr-spread
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -1050,8 +1091,12 @@ jobs:
       packages: read
     env:
       GATE: metrics/spread
-      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
-      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates@${{
+        needs.image.outputs.digest }}
+      GATE_IMAGE_HEAD: ${{ needs.image.outputs.head-ref == 'local' && 'local' ||
+        format('ghcr.io/{0}-gates@{1}', github.repository,
+        needs.image.outputs.digest) }}
+      GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1124,6 +1169,7 @@ jobs:
   # cross-run spread before tightening the resources-proof bound.
   cpu-bound-run:
     name: metrics/cpu-bound-run
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -1136,8 +1182,12 @@ jobs:
               16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
     env:
       GATE: metrics/resources
-      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates:main
-      GATE_IMAGE_HEAD: ghcr.io/${{ github.repository }}-gates:main
+      GATE_IMAGE: ghcr.io/${{ github.repository }}-gates@${{
+        needs.image.outputs.digest }}
+      GATE_IMAGE_HEAD: ${{ needs.image.outputs.head-ref == 'local' && 'local' ||
+        format('ghcr.io/{0}-gates@{1}', github.repository,
+        needs.image.outputs.digest) }}
+      GATE_IMAGE_BOOTSTRAP: ${{ needs.image.outputs.bootstrap }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
