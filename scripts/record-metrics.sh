@@ -383,12 +383,20 @@ start_recording() {
   local intro="atelier: metrics against the previous version"
   local intro_len=${#intro}
   local right_width left_width value
+  local width_err right_status left_status right_error left_error
 
   # A requested tmux split can be clamped when the window is narrow, so use
-  # the width tmux actually reports, not the configured split width.
-  right_width=$(tmux display-message -p -t "$RIGHT" "#{pane_width}" || true)
-  if [[ ! "$right_width" =~ ^[0-9]+$ ]] || (( 10#$right_width == 0 )); then
-    die "right pane has no positive integer width: '$right_width'"
+  # the width tmux actually reports, not the configured split width. Keep
+  # tmux's stderr: a read that fails names its reason in the guard below.
+  width_err="$WORK/pane-width.err"
+  right_status=0
+  right_width=$(tmux display-message -p -t "$RIGHT" "#{pane_width}" \
+    2>"$width_err") || right_status=$?
+  right_error=$(<"$width_err")
+  if [[ ! "$right_width" =~ ^[0-9]+$ ]] || (( 10#$right_width == 0 )) \
+    || (( right_status != 0 )); then
+    die "right pane has no positive integer width: '$right_width'" \
+      "(tmux exited $right_status: $right_error)"
   fi
 
   # termctrl waits on the rendered screen, where a wrapped intro never
@@ -398,9 +406,14 @@ start_recording() {
       "width $right_width"
   fi
 
-  left_width=$(tmux display-message -p -t "$LEFT" "#{pane_width}" || true)
-  if [[ ! "$left_width" =~ ^[0-9]+$ ]] || (( 10#$left_width == 0 )); then
-    die "left pane has no positive integer width: '$left_width'"
+  left_status=0
+  left_width=$(tmux display-message -p -t "$LEFT" "#{pane_width}" \
+    2>"$width_err") || left_status=$?
+  left_error=$(<"$width_err")
+  if [[ ! "$left_width" =~ ^[0-9]+$ ]] || (( 10#$left_width == 0 )) \
+    || (( left_status != 0 )); then
+    die "left pane has no positive integer width: '$left_width'" \
+      "(tmux exited $left_status: $left_error)"
   fi
 
   # Widening the right pane narrows the left. Every string waited for in the
