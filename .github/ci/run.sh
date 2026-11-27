@@ -113,30 +113,34 @@ pull_image() {
   printf '%s %s %s\n' "$local_tag" "$reference" "$digest" >> "$digests"
 }
 
+bootstrap_base() {
+  echo "gate image: bootstrap local build; no published image available" >&2
+  if ! timeout 1800 docker build --tag atelier-gates-base \
+    --file "$support/Dockerfile" "$support" >&2; then
+    echo "gate image: bootstrap build failed from $support/Dockerfile" >&2
+    exit 1
+  fi
+  printf '%s %s %s\n' \
+    atelier-gates-base "$support/Dockerfile" local >> "$digests"
+}
+
 if [[ -z "$GATE_IMAGE" ]]; then
   echo "gate image: GATE_IMAGE is required; no local build fallback" >&2
   exit 2
 fi
 
-# Only a genuinely unavailable image starts a local base build: an empty
-# digest, or a pull that reports the image or tag missing or unauthorised.
-# A ghcr.io login failure or a transport error ends the runner instead.
-unpublished='empty manifest digest|not found|manifest unknown'
-unpublished+='|does not exist|unauthorized|denied'
-
-if ! pull_output=$(pull_image "$GATE_IMAGE" atelier-gates-base 2>&1); then
-  if [[ "$GATE_IMAGE_BOOTSTRAP" == 1 \
-    && "$pull_output" != *"ghcr.io login failed"* \
-    && "$pull_output" =~ $unpublished ]]; then
-    echo "gate image: bootstrap local build; no published image available" >&2
-    if ! docker build --tag atelier-gates-base \
-      --file "$support/Dockerfile" "$support" >&2; then
-      echo "gate image: bootstrap build failed from $support/Dockerfile" >&2
-      exit 1
-    fi
-    printf '%s %s %s\n' \
-      atelier-gates-base "$support/Dockerfile" local >> "$digests"
+# The resolver marks an unpublished image with the @local suffix. Only that
+# sentinel starts a local base build, and only with GATE_IMAGE_BOOTSTRAP=1;
+# any other pull failure ends the runner with no local build or retry.
+if [[ "$GATE_IMAGE" == *@local ]]; then
+  if [[ "$GATE_IMAGE_BOOTSTRAP" == 1 ]]; then
+    bootstrap_base
   else
+    echo "gate image: unpublished $GATE_IMAGE; GATE_IMAGE_BOOTSTRAP is off" >&2
+    exit 1
+  fi
+else
+  if ! pull_output=$(pull_image "$GATE_IMAGE" atelier-gates-base 2>&1); then
     echo "gate image: could not pull $GATE_IMAGE; no local build:" \
       "$pull_output" >&2
     exit 1
@@ -145,7 +149,7 @@ fi
 
 if [[ "$GATE_IMAGE_HEAD" == local ]]; then
   echo "gate image: local head build from $source/.github/ci/Dockerfile" >&2
-  if ! docker build --tag atelier-gates-head \
+  if ! timeout 1800 docker build --tag atelier-gates-head \
     --file "$source/.github/ci/Dockerfile" "$source/.github/ci" >&2; then
     echo "gate image: head build failed from $source/.github/ci/Dockerfile" >&2
     exit 1

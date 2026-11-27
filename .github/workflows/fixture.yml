@@ -114,6 +114,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           REPORTS: ${{ runner.temp }}/atelier-reports
+          EXPECTED: ${{ needs.image.outputs.digest }}
         run: |
           for name in image-digests.txt container-images.txt; do
             report="$REPORTS/$name"
@@ -123,6 +124,20 @@ jobs:
               exit 1
             fi
           done
+
+          recorded=$(paste -sd, -- "$REPORTS/image-digests.txt")
+          if [[ "$EXPECTED" == local ]]; then
+            if ! rg -q ' local$' "$REPORTS/image-digests.txt"; then
+              echo "::error::expected a ' local' digest line, recorded $recorded"
+              exit 1
+            fi
+            echo "Local sentinel: a ' local' digest line is recorded" \
+              >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -z "$EXPECTED" ]] \
+            || ! rg -qF -- "$EXPECTED" "$REPORTS/image-digests.txt"; then
+            echo "::error::expected digest '$EXPECTED', recorded '$recorded'"
+            exit 1
+          fi
 
           {
             echo ""

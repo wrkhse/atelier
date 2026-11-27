@@ -59,10 +59,10 @@ jobs:
               exit 1
             fi
 
-            # Tool pins live in the Dockerfile, so its path covers the
-            # whole gate image definition.
+            # The Dockerfile and all build-context files, including tool
+            # pins, live in .github/ci/, so diff the whole context.
             changed=$(git diff --name-only "$BASE...HEAD" -- \
-              .github/ci/Dockerfile)
+              .github/ci/)
             if [[ -n "$changed" ]]; then
               head_ref='local'
             fi

@@ -74,6 +74,7 @@ jobs:
         env:
           REPORT: ${{ runner.temp }}/atelier-reports/container/ci-report.json
           REPORTS: ${{ runner.temp }}/atelier-reports
+          EXPECTED: ${{ needs.image.outputs.digest }}
         run: |
           ./target/x86_64-unknown-linux-musl/release/atelier-reporter \
             --report "$REPORT" --gate "$GATE"
@@ -86,6 +87,20 @@ jobs:
               exit 1
             fi
           done
+
+          recorded=$(paste -sd, -- "$REPORTS/image-digests.txt")
+          if [[ "$EXPECTED" == local ]]; then
+            if ! rg -q ' local$' "$REPORTS/image-digests.txt"; then
+              echo "::error::expected a ' local' digest line, recorded $recorded"
+              exit 1
+            fi
+            echo "Local sentinel: a ' local' digest line is recorded" \
+              >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -z "$EXPECTED" ]] \
+            || ! rg -qF -- "$EXPECTED" "$REPORTS/image-digests.txt"; then
+            echo "::error::expected digest '$EXPECTED', recorded '$recorded'"
+            exit 1
+          fi
 
           {
             echo ""

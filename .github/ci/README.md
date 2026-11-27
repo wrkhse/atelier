@@ -119,19 +119,23 @@ tolerance for rounded decimal values.
 
 ## The gate image
 
-Every gate container runs from `ghcr.io/wrkhse/atelier-gates`, built from
-`Dockerfile` and published by `gate-image.yml` when `main` changes. Each
-job resolves the image's manifest digest once per run and pulls that
-immutable digest, never a moving tag. The trusted base side always uses the
-digest published from `main`.
+On the normal path, every gate container runs from
+`ghcr.io/wrkhse/atelier-gates`, built from `Dockerfile` and published by
+`gate-image.yml` when `main` changes. Each job resolves the image's manifest
+digest once per run and pulls that immutable digest, never a moving tag. The
+trusted base side always uses the digest published from `main`. Two local
+builds exist, each bounded in time: the transition's named base build,
+signalled by the resolver's `@local` sentinel, and the head build below.
 
-A pull request that changes the gate `Dockerfile` or a tool pin builds a
+A pull request that changes the gate build context, `.github/ci/`, builds a
 local head image from its own `Dockerfile`. That image is never pushed to
 GHCR, and the trusted base side still uses the digest from `main`.
 
 The normal path has no local build fallback and no retry. A job that cannot
-pull the pinned digest fails with a message that names the image, and a fork
-pull request fails the same way when the package is unreadable to it.
+pull the pinned digest once the image is published fails by name, with a
+message that names the image; `run.sh` never reads the error text to decide
+on a bootstrap. A fork pull request fails the same way when the package is
+unreadable to it.
 
 The sole temporary exception to that is the transition's explicit bootstrap.
 While the `main` image is unpublished, each caller passes the tracked input
