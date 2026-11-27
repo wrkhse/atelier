@@ -19,6 +19,7 @@ jobs:
       GATE: rust/${{ matrix.gate }}
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         gate: [fmt, clippy, test, kani, miri, mutants, msrv]
     steps:

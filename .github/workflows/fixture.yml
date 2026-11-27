@@ -17,6 +17,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         gate: [fmt, clippy, test, mutants, kani, miri, msrv]
     defaults:
