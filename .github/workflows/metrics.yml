@@ -1061,3 +1061,19 @@ jobs:
             exit 1
           fi
           echo "Ir spread $spread% (min $min, max $max)"
+
+  # Checks derive_base_tag of the recorder: an rc tag resolves to its
+  # predecessor with one leading v, whatever form was supplied.
+  recorder-tag-test:
+    name: metrics/recorder-tag-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify rc tag derivation
+        shell: bash
+        run: bash scripts/record-metrics-tag-test.sh scripts/record-metrics.sh
