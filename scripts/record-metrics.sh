@@ -41,10 +41,12 @@ normalize_release_tag() {
   printf 'v%s\n' "${1#v}"
 }
 
-# Both tags go through the one-leading-v rule: RELEASE_TAG is the supplied tag
-# with a single leading v, and BASE is derived from that same form.
+# RELEASE_TAG is the supplied tag with a single leading v. BASE is that same
+# released candidate: the previous rc predates
+# reporter/benches/library_benchmark.rs, so it has no benchmark harness. The
+# planted source patch is the only difference between base and head.
 RELEASE_TAG=$(normalize_release_tag "$RELEASE_TAG")
-BASE=$(derive_base_tag "$RELEASE_TAG") || exit $?
+BASE=$RELEASE_TAG
 VERSION=${RELEASE_TAG#v}
 
 ARCHIVE="atelier-$RELEASE_TAG-linux-x64.tar.gz"
@@ -178,6 +180,17 @@ make_worktree() {
   rm -rf "$SOURCE/.git/worktrees"
   git -C "$SOURCE" reset --quiet --hard "$RELEASE_TAG"
   git -C "$SOURCE" checkout --quiet --force --detach "$RELEASE_TAG"
+}
+
+# The metrics gates build the harness from BASE. A base without this file
+# exits at "the base has no benchmark harness"; name the reason here so a
+# bad base fails before any gate runs.
+check_benchmark_harness() {
+  local harness="reporter/benches/library_benchmark.rs"
+  local path="$SOURCE/$harness"
+
+  [[ -f "$path" && ! -L "$path" ]] \
+    || die "base $BASE has no benchmark harness: $path is missing"
 }
 
 # REQUIRE_INSTALLED defaults to 1: after a gate, the container has installed
@@ -380,7 +393,7 @@ start_panes() {
 }
 
 start_recording() {
-  local intro="atelier: metrics against the previous version"
+  local intro="atelier: metrics on the released candidate"
   local intro_len=${#intro}
   local right_width left_width value
   local width_err right_status left_status right_error left_error
@@ -801,6 +814,7 @@ main() {
   verify_release
   stage_release
   make_worktree
+  check_benchmark_harness
   cp -- "$SOURCE/$RESULTS_FILE" "$ORIGINAL"
   write_patch_helper
   stage_metrics

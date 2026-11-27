@@ -73,6 +73,18 @@ check_failure 0.2.0-rc.0 'tag 0.2.0-rc.0 has no previous rc tag to compare'
 check_failure v0.2.0 'tag v0.2.0 is not a release candidate tag'
 check_failure 0.2.0 'tag 0.2.0 is not a release candidate tag'
 
+# The gate base is the released candidate. A derive_base_tag call assigning
+# BASE would regress the fixture to the previous rc, which has no benchmark
+# harness. Assert both facts from the source alone.
+base_lines=$(grep -E '^BASE=' "$recorder" || true)
+if [[ "$base_lines" != "BASE=\$RELEASE_TAG" ]] \
+  || grep -q 'derive_base_tag' <<< "$base_lines"; then
+  echo "::error::BASE must be RELEASE_TAG, never derive_base_tag"
+  exit 1
+fi
+
+printf 'pass: BASE is RELEASE_TAG, not derive_base_tag\n'
+
 # The intro is one waited-for string; termctrl reads the rendered screen, so
 # a wrapped intro never matches. Check from the source alone that it fits on
 # one row of the right pane.
