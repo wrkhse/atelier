@@ -5,11 +5,87 @@ name: metrics
 on:
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    name: metrics/changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      metrics: ${{ steps.decide.outputs.metrics }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Decide whether metrics paths changed
+        id: decide
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          paths=(
+            'metrics/**'
+            'reporter/**'
+            '.github/ci/**'
+            '.github/workflows/metrics.yml'
+            'Cargo.toml'
+            'Cargo.lock'
+            '.prototools'
+            '.moon/**'
+            'tests/**'
+            'fixtures/**'
+            'scripts/**'
+            'rust-toolchain.toml'
+            'clippy.toml'
+            'deny.toml'
+          )
+
+          if [[ "$EVENT" != pull_request ]]; then
+            metrics=true
+            reason='not a pull request; the daily main run covers the proofs'
+          else
+            if [[ -z "$BASE" ]]; then
+              echo "::error::changes has no pull_request base sha"
+              exit 1
+            fi
+            if ! git fetch --no-tags --depth=1 origin "$BASE"; then
+              echo "::error::changes cannot fetch the base $BASE"
+              exit 1
+            fi
+            changed=$(git diff --name-only --no-renames \
+              "$BASE" HEAD -- "${paths[@]}")
+            if [[ -n "$changed" ]]; then
+              metrics=true
+              reason='metrics paths changed'
+            else
+              metrics=false
+              reason='no metrics paths changed'
+            fi
+          fi
+
+          echo "metrics=$metrics" >> "$GITHUB_OUTPUT"
+          {
+            echo '### metrics/changes'
+            echo
+            echo "Event: $EVENT; metrics: $metrics; $reason"
+            if [[ -n "${changed:-}" ]]; then
+              echo
+              echo 'Changed paths:'
+              echo '```text'
+              echo "$changed"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # The job's status is the check metrics/complexity; no job holds a token
   # that can write.
   complexity:
@@ -151,6 +227,8 @@ jobs:
   # passes. Both runs must exit 0.
   resources-proof:
     name: metrics/resources-proof
+    needs: changes
+    if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -627,6 +705,8 @@ jobs:
   # are read from shell scripts.
   resources-failure-proof:
     name: metrics/resources-failure-proof
+    needs: changes
+    if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -651,6 +731,8 @@ jobs:
   # working tree declares the process; the base tree keeps its own config.
   resources-exit-proof:
     name: metrics/resources-exit-proof (${{ matrix.mode }})
+    needs: changes
+    if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -732,6 +814,8 @@ jobs:
 
   budget-proof:
     name: metrics/budget-proof (${{ matrix.mode }})
+    needs: changes
+    if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -836,6 +920,8 @@ jobs:
   # dependency proves a PR that adds a dependency builds and is measured.
   new-bench-proof:
     name: metrics/new-bench-proof (${{ matrix.mode }})
+    needs: changes
+    if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -1022,6 +1108,8 @@ jobs:
   # so address layout cannot move a count near the budget.
   aslr-spread:
     name: metrics/aslr-spread
+    needs: changes
+    if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -1100,6 +1188,8 @@ jobs:
   # cross-run spread before tightening the resources-proof bound.
   cpu-bound-run:
     name: metrics/cpu-bound-run
+    needs: changes
+    if: ${{ needs.changes.outputs.metrics == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -1173,16 +1263,36 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Report a skipped CPU matrix
+        if: ${{ needs.cpu-bound-run.result == 'skipped' }}
+        shell: bash
+        run: |
+          echo "skipped: no metrics paths changed; daily main run covers " \
+            "the proofs" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - name: Fail on an unverified CPU matrix
+        if: >-
+          ${{ needs.cpu-bound-run.result != 'success' &&
+          needs.cpu-bound-run.result != 'skipped' }}
+        shell: bash
+        env:
+          RESULT: ${{ needs.cpu-bound-run.result }}
+        run: |
+          echo "::error::cpu-bound-run result '$RESULT' is not success or skipped"
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ needs.cpu-bound-run.result == 'success' }}
         with:
           persist-credentials: false
       # actions/download-artifact v8.0.2
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ needs.cpu-bound-run.result == 'success' }}
         with:
           pattern: cpu-bound-*
           path: ${{ runner.temp }}/cpu-bound
           merge-multiple: true
       - name: Require a bounded CPU spread
+        if: ${{ needs.cpu-bound-run.result == 'success' }}
         shell: bash
         env:
           DIR: ${{ runner.temp }}/cpu-bound
@@ -1246,3 +1356,105 @@ jobs:
           }
           echo "CPU spread $spread (min $min, max $max, expected $expected," \
             "bound $bound)"
+
+  proofs-summary:
+    name: metrics/proofs-summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - changes
+      - resources-proof
+      - resources-failure-proof
+      - resources-exit-proof
+      - budget-proof
+      - new-bench-proof
+      - aslr-spread
+      - cpu-bound-run
+      - cpu-bound-summary
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+    steps:
+      - name: Verify the metrics proofs
+        shell: bash
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          CHANGED: ${{ needs.changes.outputs.metrics }}
+          RESOURCES_PROOF: ${{ needs.resources-proof.result }}
+          RESOURCES_FAILURE_PROOF: ${{ needs.resources-failure-proof.result }}
+          RESOURCES_EXIT_PROOF: ${{ needs.resources-exit-proof.result }}
+          BUDGET_PROOF: ${{ needs.budget-proof.result }}
+          NEW_BENCH_PROOF: ${{ needs.new-bench-proof.result }}
+          ASLR_SPREAD: ${{ needs.aslr-spread.result }}
+          CPU_BOUND_RUN: ${{ needs.cpu-bound-run.result }}
+          CPU_BOUND_SUMMARY: ${{ needs.cpu-bound-summary.result }}
+        run: |
+          fail() {
+            echo "::error::$1 result '$2' is not $3"
+            exit 1
+          }
+
+          names=(
+            changes
+            resources-proof
+            resources-failure-proof
+            resources-exit-proof
+            budget-proof
+            new-bench-proof
+            aslr-spread
+            cpu-bound-run
+            cpu-bound-summary
+          )
+          declare -A result=(
+            [changes]="$CHANGES"
+            [resources-proof]="$RESOURCES_PROOF"
+            [resources-failure-proof]="$RESOURCES_FAILURE_PROOF"
+            [resources-exit-proof]="$RESOURCES_EXIT_PROOF"
+            [budget-proof]="$BUDGET_PROOF"
+            [new-bench-proof]="$NEW_BENCH_PROOF"
+            [aslr-spread]="$ASLR_SPREAD"
+            [cpu-bound-run]="$CPU_BOUND_RUN"
+            [cpu-bound-summary]="$CPU_BOUND_SUMMARY"
+          )
+
+          {
+            echo '### metrics/proofs-summary'
+            echo
+            echo "Changed: $CHANGED"
+            echo
+            echo '| Job | Result |'
+            echo '| --- | --- |'
+            for name in "${names[@]}"; do
+              echo "| $name | ${result[$name]} |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # A cancelled needed job is never an acceptable verdict.
+          for name in "${names[@]}"; do
+            [[ "${result[$name]}" != cancelled ]] \
+              || fail "$name" "${result[$name]}" 'not cancelled'
+          done
+
+          [[ "$CHANGES" == success ]] || fail changes "$CHANGES" success
+          if [[ "$CHANGED" != true && "$CHANGED" != false ]]; then
+            fail changes.outputs.metrics "$CHANGED" 'true or false'
+          fi
+
+          if [[ "$CHANGED" == true ]]; then
+            for name in "${names[@]:1}"; do
+              [[ "${result[$name]}" == success ]] \
+                || fail "$name" "${result[$name]}" success
+            done
+          else
+            for name in "${names[@]:1}"; do
+              if [[ "$name" == cpu-bound-summary ]]; then
+                [[ "${result[$name]}" == success ]] \
+                  || fail "$name" "${result[$name]}" success
+              else
+                [[ "${result[$name]}" == skipped ]] \
+                  || fail "$name" "${result[$name]}" skipped
+              fi
+            done
+            echo 'proofs skipped: no metrics paths changed' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
